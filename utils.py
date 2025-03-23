@@ -21,18 +21,14 @@ def is_valid_website(url: str) -> bool:
     return bool(parsed.netloc) and parsed.netloc not in ["x.com", "t.me", "telegram.org"]
 
 def play_wav(file_path: str):
-    """
-    Synchronously plays a WAV file using winsound.
-    """
+    """Synchronously plays a WAV file using winsound."""
     try:
         winsound.PlaySound(file_path, winsound.SND_FILENAME | winsound.SND_NODEFAULT)
     except RuntimeError as e:
         print(f"Error playing the file {file_path}: {e}")
 
 async def play_buy_opportunity_sound():
-    """
-    Asynchronously plays an alert sound for a buy opportunity.
-    """
+    """Asynchronously plays an alert sound for a buy opportunity."""
     import asyncio
     loop = asyncio.get_running_loop()
     wav_file = "assets/alert.wav"
@@ -68,9 +64,7 @@ async def play_sell_tp_sound_async():
     await loop.run_in_executor(None, play_sell_tp_sound)
 
 def format_buy_order_log(mint: str, price_per_token: float, tokens_bought: float, market_cap: float) -> str:
-    """
-    Formats the log message for a buy order.
-    """
+    """Formats the log message for a buy order."""
     from config import SOL_PRICE
     if SOL_PRICE:
         price_usd = price_per_token * SOL_PRICE
@@ -92,10 +86,7 @@ def format_buy_order_log(mint: str, price_per_token: float, tokens_bought: float
         )
 
 def calculate_social_score(social_data: dict, token_name: str, token_symbol: str) -> int:
-    """
-    Computes a social risk score based on the provided social data.
-    Lower scores indicate better social presence.
-    """
+    """Computes a social risk score based on provided social data."""
     total_penalty = 0
     token_name = (token_name or "").lower()
     token_symbol = (token_symbol or "").lower()

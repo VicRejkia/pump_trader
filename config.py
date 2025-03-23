@@ -16,7 +16,8 @@ DEFAULT_SELL_FEE = 0.001       # Fee for selling in SOL
 DEFAULT_SELL_TIP = 0.001       # Tip for selling in SOL
 
 # Database settings
-DB_NAME = "data/token_data.db"
+DB_URL = "postgresql://bot_user:tr4d1ng_b0t_us3r@localhost:5432/trading_bot?options=-c%20timezone%3Dutc"
+
 INACTIVITY_PERIOD = timedelta(minutes=5)
 MIN_MARKET_CAP = 5.0           # Minimum market cap (in SOL)
 
