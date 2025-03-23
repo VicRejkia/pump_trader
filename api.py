@@ -84,7 +84,7 @@ async def refresh_rugcheck_queue():
                     logger.debug("✅ All tokens have corresponding RugCheck data after refresh.")
 
         logger.debug("Heartbeat: refresh_rugcheck_queue cycle complete; sleeping 30s")
-        # 🚀 Instead of sleeping xx seconds straight, sleep interruptibly
+        # Instead of sleeping xx seconds straight, sleep interruptibly
         await state.wait_or_interrupt(timeout=30)
 
 async def rugcheck_worker():
@@ -150,7 +150,7 @@ async def fetch_rugcheck_data(mint: str) -> bool:
         async with (await get_db()).acquire() as conn:
             exists = await conn.fetchval("SELECT EXISTS(SELECT 1 FROM tokens WHERE mint = $1)", mint)
             if not exists:
-                logger.debug(f"	TokenName {mint} no longer exists in tokens table. Skipping RugCheck.")
+                logger.debug(f"TokenName {mint} no longer exists in tokens table. Skipping RugCheck.")
                 return True
             
         try:

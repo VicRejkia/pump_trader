@@ -226,8 +226,8 @@ class WebSocketHandler:
     def start(self):
         """Starts all WebSocket tasks."""
         return [
-            asyncio.create_task(self.resume_subscriptions()),
-            asyncio.create_task(self.message_handler()),
-            asyncio.create_task(self.monitor_connection()),
-            asyncio.create_task(self.unsubscribe_checker())
+            asyncio.create_task(self.resume_subscriptions(), name="ws_resume_subscriptions"),
+            asyncio.create_task(self.message_handler(), name="ws_message_handler"),
+            asyncio.create_task(self.monitor_connection(), name="ws_connection_monitor"),
+            asyncio.create_task(self.unsubscribe_checker(), name="ws_unsubscribe_checker")
         ]

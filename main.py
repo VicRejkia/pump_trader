@@ -13,8 +13,36 @@ from logger import setup_logging, logger
 from state import state  # Singleton state management
 
 async def monitor_tasks(tasks):
+    """Enhanced task monitor with queue metrics and detailed statuses"""
     while not await state.get_shutdown():
-        logger.debug("Task monitor: " + ", ".join([f"{t.get_name()}:{'done' if t.done() else 'running'}" for t in tasks]))
+        try:
+            queue = state.get_rugcheck_queue()
+            queue_size = queue.qsize()
+            
+            task_status = []
+            for task in tasks:
+                if task.done():
+                    if task.cancelled():
+                        status = "cancelled"
+                    else:
+                        try:
+                            result = task.result()
+                            status = f"done ({result})"
+                        except Exception as e:
+                            status = f"failed ({str(e)})"
+                else:
+                    status = "running"
+                task_status.append(f"{task.get_name()}:{status}")
+            
+            logger.debug(
+                f"**Task Monitor**\n"
+                f"│ Queue size: {queue_size}\n"
+                f"│ Active tasks: {len([t for t in tasks if not t.done()])}/{len(tasks)}\n"
+                f"│ Tasks: {', '.join(task_status)}"
+            )
+        except Exception as e:
+            logger.error(f"Monitor task error: {e}")
+        
         await asyncio.sleep(30)
 
 async def main(cleanup: bool):
@@ -31,14 +59,15 @@ async def main(cleanup: bool):
     await ws_handler.connect()
 
     tasks = [
-        asyncio.create_task(update_sol_price()),
-        asyncio.create_task(refresh_rugcheck_queue()),
-        asyncio.create_task(check_trading_opportunities(ws_handler.websocket)),
-        asyncio.create_task(rugcheck_worker()),
-        asyncio.create_task(check_missing_rugcheck_data())
+        asyncio.create_task(update_sol_price(), name="sol_price_updater"),
+        asyncio.create_task(refresh_rugcheck_queue(), name="rugcheck_queue_refresher"),
+        asyncio.create_task(check_trading_opportunities(ws_handler.websocket), name="trading_opportunities_checker"),
+        asyncio.create_task(rugcheck_worker(), name="rugcheck_worker"),
+        asyncio.create_task(check_missing_rugcheck_data(), name="missing_rugcheck_data_checker")
     ]
+    monitor_task = asyncio.create_task(monitor_tasks(tasks), name="task_monitor")
+    tasks.append(monitor_task)
     tasks.extend(ws_handler.start())  # Add WebSocket handler tasks
-    tasks.append(asyncio.create_task(monitor_tasks(tasks)))
 
     try:
         logger.info("🚀 Trading bot started successfully. Listening for market updates...")

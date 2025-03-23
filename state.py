@@ -4,7 +4,7 @@ Manages mutable global state such as SOL price, shutdown flag, active subscripti
 """
 import asyncio
 from collections import deque
-import logger
+from logger import logger
 
 class GlobalState:
     """Thread-safe Singleton class to store global state variables."""
