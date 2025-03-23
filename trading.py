@@ -73,6 +73,8 @@ async def check_trading_opportunities(websocket):
             await state.wait_or_interrupt(timeout=5) 
             continue
 
+        logger.debug("Checking for trading opportunities...")
+        logger.debug(f"SOL price: {sol_price},  DEFAULT_VOLUME_THRESHOLD: {DEFAULT_VOLUME_THRESHOLD}, DEFAULT_MARKETCAP_THRESHOLD: {DEFAULT_MARKETCAP_THRESHOLD}")
         async with (await get_db()).acquire() as conn:
             async with conn.transaction():
                 rows = await conn.fetch('''
@@ -114,6 +116,7 @@ async def check_trading_opportunities(websocket):
                     ORDER BY total_buys DESC;
                 ''', sol_price, DEFAULT_VOLUME_THRESHOLD, DEFAULT_MARKETCAP_THRESHOLD)
 
+                logger.debug(f"Found {len(rows)} trading opportunities.")
                 for row in rows:
                     mint = row['mint']
                     initial_market_cap = row['initial_market_cap'],
@@ -129,9 +132,15 @@ async def check_trading_opportunities(websocket):
                     telegram = row['telegram']
                     twitter = row['twitter']
 
+                    logger.debug("Checking trading opportunity for %s", mint)
+                    logger.debug("Initial market cap: %.2f SOL, initial vTokens: %.2f, initial vSol: %.2f",
+                        initial_market_cap, initial_v_tokens, initial_v_sol)
+                    logger.debug("Latest market cap: %.2f SOL, latest vTokens: %.2f, latest vSol: %.2f",
+                        latest_market_cap_sol, latest_v_tokens, latest_v_sol)
+                        
                     total_supply = await get_total_supply(mint)
                     if latest_market_cap_sol is None:
-                        latest_market_cap_sol = calculate_market_cap(latest_v_tokens or initial_v_tokens, latest_v_sol or initial_v_sol, total_supply)
+                        latest_market_cap_sol = calculate_market_cap(latest_v_tokens or initial_v_tokens or 0, latest_v_sol or initial_v_sol or 0, total_supply)
 
                     volatility = await calculate_volatility(mint)
                     if volatility < MIN_VOLATILITY:

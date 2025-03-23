@@ -68,7 +68,7 @@ async def store_token(data: dict) -> bool:
                         )
 
                     if token_count > 2:
-                        logger.warning(f"Suspicious creator {creator} with {token_count} tokens in 7 days")
+                        logger.warning(f"Suspicious creator {creator} for token {data['mint']} with {token_count} tokens in 7 days")
                         return False
                 
                 from api import calculate_market_cap

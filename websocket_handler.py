@@ -107,6 +107,8 @@ class WebSocketHandler:
                             "keys": [data['mint']]
                         }))
                         await state.add_subscription(data['mint'])
+                        active_subs = list(await state.get_subscriptions())
+                        logger.debug(f"✅ Subscribed to {data['mint']} --> {len(active_subs)} active subscriptions")
                     elif 'tokenAmount' in data:
                         #logger.debug(f"WebSocket got trade message: {data}")
                         await store_trade(data)
@@ -190,6 +192,7 @@ class WebSocketHandler:
                         "method": "unsubscribeNewToken"
                     }))
                 await state.set_new_token_subscription(False)
+                logger.info("✅ Unsubscribed from new token events")
             except Exception as e:
                 logger.error(f"❌ Failed to unsubscribe new tokens: {e}")
 

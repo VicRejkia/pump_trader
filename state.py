@@ -60,7 +60,7 @@ class GlobalState:
 
     async def wait_or_interrupt(self, timeout: float):
         """Waits for a given timeout, but exits early if shutdown is triggered."""
-        logger.debug(f"wait_or_interrupt: waiting for {timeout} seconds")
+        # logger.debug(f"wait_or_interrupt: waiting for {timeout} seconds")
         try:
             await asyncio.wait_for(self.shutdown_event.wait(), timeout=timeout)
         except asyncio.TimeoutError:
