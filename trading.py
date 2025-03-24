@@ -6,7 +6,6 @@ import asyncio
 import numpy as np
 import json
 from datetime import datetime, timezone
-import asyncpg
 
 from config import (SOL_TO_BUY, DEFAULT_STOP_LOSS, DEFAULT_TRAILING_TP, DEFAULT_BUY_FEE, 
                     DEFAULT_BUY_TIP, DEFAULT_SELL_FEE, DEFAULT_SELL_TIP, DEFAULT_VOLUME_THRESHOLD,
@@ -15,7 +14,6 @@ from database import get_total_supply, get_db
 from api import calculate_market_cap
 from logger import logger
 from utils import play_buy_opportunity_sound, play_sell_sl_sound_async, play_sell_tp_sound_async, calculate_social_score
-#from state import state
 
 async def calculate_volatility(mint: str) -> float:
     """Calculates price volatility over the last hour"""
@@ -67,114 +65,123 @@ async def has_active_position(mint: str) -> bool:
 async def check_trading_opportunities(websocket, state):
     """Check buy opportunities"""
     while not await state.get_shutdown():
-        sol_price = await state.get_sol_price()
-        if sol_price is None:
-            logger.warning("SOL_PRICE not updated yet; skipping buy check.")
-            await state.wait_or_interrupt(timeout=5) 
-            continue
+        try:
+            sol_price = await state.get_sol_price()
+            if sol_price is None:
+                logger.warning("SOL_PRICE not updated yet; skipping buy check.")
+                await state.wait_or_interrupt(timeout=5) 
+                continue
 
-        logger.debug("Checking for trading opportunities...")
-        logger.debug(f"SOL price: {sol_price},  DEFAULT_VOLUME_THRESHOLD: {DEFAULT_VOLUME_THRESHOLD}, DEFAULT_MARKETCAP_THRESHOLD: {DEFAULT_MARKETCAP_THRESHOLD}")
-        async with (await get_db()).acquire() as conn:
-            async with conn.transaction():
-                rows = await conn.fetch('''
-                    WITH LatestMarketCap AS (
-                        SELECT 
-                            mint, marketCapSol, vTokensInBondingCurve, vSolInBondingCurve,
-                            ROW_NUMBER() OVER (PARTITION BY mint ORDER BY timestamp DESC) AS rn
-                        FROM trades
-                    )
-                    SELECT 
-                        t.mint, 
-                        t.marketCapSol AS initial_market_cap,
-                        t.vTokensInBondingCurve AS initial_v_tokens,
-                        t.vSolInBondingCurve AS initial_v_sol,
-                        SUM(CASE WHEN tr.tx_type = 'buy' THEN tr.sol_amount ELSE 0 END) AS total_buys,
-                        SUM(CASE WHEN tr.tx_type = 'sell' THEN tr.sol_amount ELSE 0 END) AS total_sells,
-                        COALESCE(SUM(CASE WHEN tr.timestamp > NOW() - INTERVAL '5 minutes' THEN tr.sol_amount ELSE 0 END), 0) AS volume,
-                        MAX(lmc.marketCapSol) AS latest_marketCapSol,
-                        MAX(lmc.vTokensInBondingCurve) AS latest_vTokens,  
-                        MAX(lmc.vSolInBondingCurve) AS latest_vSol, 
-                        MAX(r.tokenMeta_name) AS name,
-                        MAX(r.tokenMeta_symbol) AS symbol,
-                        MAX(r.score) AS rugcheck_score,
-                        MAX(t.website) AS website,
-                        MAX(t.telegram) AS telegram,
-                        MAX(t.twitter) AS twitter
-                    FROM tokens AS t
-                    LEFT JOIN rugcheck AS r ON t.mint = r.mint
-                    LEFT JOIN trades AS tr ON t.mint = tr.mint
-                    LEFT JOIN LatestMarketCap AS lmc ON t.mint = lmc.mint AND lmc.rn = 1
-                    WHERE 
-                        t.is_active = TRUE AND
-                        r.score IS NOT NULL AND
-                        t.mint NOT IN (SELECT mint FROM portfolio WHERE status = 'active')
-                    GROUP BY t.mint
-                    HAVING 
-                        (COALESCE(SUM(CASE WHEN tr.timestamp > NOW() - INTERVAL '5 minutes' THEN tr.sol_amount ELSE 0 END), 0) * $1) > $2 AND
-                        (COALESCE(MAX(lmc.marketCapSol), 0) * $1) > $3
-                    ORDER BY total_buys DESC;
-                ''', sol_price, DEFAULT_VOLUME_THRESHOLD, DEFAULT_MARKETCAP_THRESHOLD)
+            logger.debug("Checking for trading opportunities...")
 
-                logger.debug(f"Found {len(rows)} trading opportunities.")
-                for row in rows:
-                    mint = row['mint']
-                    initial_market_cap = row['initial_market_cap']
-                    initial_v_tokens = row['initial_v_tokens']
-                    initial_v_sol = row['initial_v_sol']
-                    latest_market_cap_sol = row['latest_marketCapSol']
-                    latest_v_tokens = row['latest_vTokens']
-                    latest_v_sol = row['latest_vSol']
-                    token_name = row['name']
-                    token_symbol = row['symbol']
-                    rugcheck_score = row['rugcheck_score']
-                    website = row['website']
-                    telegram = row['telegram']
-                    twitter = row['twitter']
-
-                    logger.debug("Checking trading opportunity for %s", mint)
-                    logger.debug("Initial market cap: %.2f SOL, initial vTokens: %.2f, initial vSol: %.2f",
-                        initial_market_cap, initial_v_tokens, initial_v_sol)
-                    logger.debug("Latest market cap: %.2f SOL, latest vTokens: %.2f, latest vSol: %.2f",
-                        latest_market_cap_sol, latest_v_tokens, latest_v_sol)
-                        
-                    total_supply = await get_total_supply(mint)
-                    if latest_market_cap_sol is None:
-                        latest_market_cap_sol = calculate_market_cap(latest_v_tokens or initial_v_tokens or 0, latest_v_sol or initial_v_sol or 0, total_supply)
-
-                    volatility = await calculate_volatility(mint)
-                    if volatility < MIN_VOLATILITY:
+            async with (await get_db()).acquire() as conn:
+                async with conn.transaction():
+                    try:
+                        rows = await asyncio.wait_for(conn.fetch('''
+                            WITH LatestMarketCap AS (
+                                SELECT 
+                                    mint, marketCapSol, vTokensInBondingCurve, vSolInBondingCurve,
+                                    ROW_NUMBER() OVER (PARTITION BY mint ORDER BY timestamp DESC) AS rn
+                                FROM trades
+                            )
+                            SELECT 
+                                t.mint, 
+                                t.marketCapSol AS initial_market_cap,
+                                t.vTokensInBondingCurve AS initial_v_tokens,
+                                t.vSolInBondingCurve AS initial_v_sol,
+                                SUM(CASE WHEN tr.tx_type = 'buy' THEN tr.sol_amount ELSE 0 END) AS total_buys,
+                                SUM(CASE WHEN tr.tx_type = 'sell' THEN tr.sol_amount ELSE 0 END) AS total_sells,
+                                COALESCE(SUM(CASE WHEN tr.timestamp > NOW() - INTERVAL '5 minutes' THEN tr.sol_amount ELSE 0 END), 0) AS volume,
+                                MAX(lmc.marketCapSol) AS latest_marketCapSol,
+                                MAX(lmc.vTokensInBondingCurve) AS latest_vTokens,  
+                                MAX(lmc.vSolInBondingCurve) AS latest_vSol, 
+                                MAX(r.tokenMeta_name) AS name,
+                                MAX(r.tokenMeta_symbol) AS symbol,
+                                MAX(r.score) AS rugcheck_score,
+                                MAX(t.website) AS website,
+                                MAX(t.telegram) AS telegram,
+                                MAX(t.twitter) AS twitter
+                            FROM tokens AS t
+                            LEFT JOIN rugcheck AS r ON t.mint = r.mint
+                            LEFT JOIN trades AS tr ON t.mint = tr.mint
+                            LEFT JOIN LatestMarketCap AS lmc ON t.mint = lmc.mint AND lmc.rn = 1
+                            WHERE 
+                                t.is_active = TRUE AND
+                                r.score IS NOT NULL AND
+                                t.mint NOT IN (SELECT mint FROM portfolio WHERE status = 'active')
+                            GROUP BY t.mint
+                            HAVING 
+                                (COALESCE(SUM(CASE WHEN tr.timestamp > NOW() - INTERVAL '5 minutes' THEN tr.sol_amount ELSE 0 END), 0) * $1) > $2 AND
+                                (COALESCE(MAX(lmc.marketCapSol), 0) * $1) > $3
+                            ORDER BY total_buys DESC;
+                        ''', sol_price, DEFAULT_VOLUME_THRESHOLD, DEFAULT_MARKETCAP_THRESHOLD), timeout=10)
+                    except asyncio.TimeoutError:
+                        logger.error("⏳ Trading query timed out! Possible database lock?")
                         continue
 
-                    social_data = {"website": website, "telegram": telegram, "twitter": twitter}
-                    social_score = calculate_social_score(social_data, token_name, token_symbol)
-                    combined_score = rugcheck_score + social_score if rugcheck_score is not None else 1001
+                    logger.debug(f"Found {len(rows)} trading opportunities.")
+                    for row in rows:
+                        mint = row['mint']
+                        initial_market_cap = float(row['initial_market_cap'])
+                        initial_v_tokens = float(row['initial_v_tokens'])
+                        initial_v_sol = float(row['initial_v_sol'])
+                        latest_market_cap_sol = float(row['latest_marketcapsol'])
+                        latest_v_tokens = float(row['latest_vtokens'])
+                        latest_v_sol = float(row['latest_vsol'])
+                        token_name = row['name']
+                        token_symbol = row['symbol']
+                        rugcheck_score = row['rugcheck_score']
+                        website = row['website']
+                        telegram = row['telegram']
+                        twitter = row['twitter']
 
-                    if combined_score > DEFAULT_SCORE_THRESHOLD:
-                        await conn.execute("UPDATE tokens SET is_active = FALSE WHERE mint = $1", mint)
-                        if mint in await state.get_subscriptions():
-                            await websocket.send(json.dumps({
-                                "method": "unsubscribeTokenTrade",
-                                "keys": [mint]
-                            }))
-                            await state.remove_subscription(mint)
-                        continue
+                        total_supply = float(await get_total_supply(mint))
+                        if latest_market_cap_sol is None:
+                            latest_market_cap_sol = calculate_market_cap(latest_v_tokens or initial_v_tokens or 0.0, latest_v_sol or initial_v_sol or 0.0, total_supply)
 
-                    price_per_token_sol = latest_market_cap_sol / total_supply
-                    tokens_bought = (SOL_TO_BUY - DEFAULT_BUY_FEE - DEFAULT_BUY_TIP) / price_per_token_sol
+                        volatility = await calculate_volatility(mint)
+                        if volatility < MIN_VOLATILITY:
+                            continue
 
-                    await conn.execute('''
-                        INSERT INTO portfolio 
-                        (mint, tx_type, price, market_cap, sol_amount, tokens, 
-                        fee, tip, remaining_tokens, stop_loss_price, highest_price, status, timestamp)
-                        VALUES ($1, 'buy', $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active', $11)
-                    ''', mint, price_per_token_sol, latest_market_cap_sol, SOL_TO_BUY,
-                        tokens_bought, DEFAULT_BUY_FEE, DEFAULT_BUY_TIP, tokens_bought, 
-                        price_per_token_sol * (1 - DEFAULT_STOP_LOSS), price_per_token_sol, datetime.now(timezone.utc))
+                        social_data = {"website": website, "telegram": telegram, "twitter": twitter}
+                        social_score = calculate_social_score(social_data, token_name, token_symbol)
+                        combined_score = rugcheck_score + social_score if rugcheck_score is not None else 1001
 
-                    asyncio.create_task(play_buy_opportunity_sound())
+                        if combined_score > DEFAULT_SCORE_THRESHOLD:
+                            await conn.execute("UPDATE tokens SET is_active = FALSE WHERE mint = $1", mint)
+                            if mint in await state.get_subscriptions():
+                                try:
+                                    await asyncio.wait_for(websocket.send(json.dumps({
+                                        "method": "unsubscribeTokenTrade",
+                                        "keys": [row['mint']]
+                                    })), timeout=5)  # ⏳ Timeout added
 
-        await state.wait_or_interrupt(timeout=3) 
+                                    logger.debug(f"✅ Unsubscribed {row['mint']} successfully")
+                                except asyncio.TimeoutError:
+                                    logger.error(f"⏳ WebSocket send timeout for {row['mint']}")
+                                    continue
+                                await state.remove_subscription(mint)
+                            continue
+
+                        price_per_token_sol = latest_market_cap_sol / total_supply
+                        tokens_bought = (SOL_TO_BUY - DEFAULT_BUY_FEE - DEFAULT_BUY_TIP) / price_per_token_sol
+
+                        await conn.execute('''
+                            INSERT INTO portfolio 
+                            (mint, tx_type, price, market_cap, sol_amount, tokens, 
+                            fee, tip, remaining_tokens, stop_loss_price, highest_price, status, timestamp)
+                            VALUES ($1, 'buy', $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active', $11)
+                        ''', mint, price_per_token_sol, latest_market_cap_sol, SOL_TO_BUY,
+                            tokens_bought, DEFAULT_BUY_FEE, DEFAULT_BUY_TIP, tokens_bought, 
+                            price_per_token_sol * (1 - DEFAULT_STOP_LOSS), price_per_token_sol, datetime.now(timezone.utc))
+
+                        asyncio.create_task(play_buy_opportunity_sound())
+
+            await state.wait_or_interrupt(timeout=3)
+
+        except Exception as e:
+            logger.error(f"check_trading_opportunities error: {e}")
+            await state.wait_or_interrupt(timeout=5)
 
 async def check_sell_opportunities():
     """Check sell conditions with connection pooling"""

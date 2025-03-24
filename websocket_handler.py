@@ -4,13 +4,14 @@ Handles incoming messages, token subscriptions, and graceful shutdown.
 """
 
 import asyncio
+from asyncio import Queue
 import json
 from datetime import datetime, timezone
 import asyncpg
 import websockets
 
 from config import PUMPPORTAL_WS, INACTIVITY_PERIOD, MIN_MARKET_CAP
-from database import store_token, store_trade, backup_and_delete_token, get_db
+from database import store_token, backup_and_delete_token, get_db
 from logger import logger
 from trading import has_active_position
 #from state import state
@@ -20,6 +21,7 @@ class WebSocketHandler:
         self.state = state 
         self.websocket = None
         self.tasks = []
+        self.trade_queue = Queue()  # 🚀 Trade queue to buffer incoming trades
 
     async def connect(self):
         """Establishes a WebSocket connection and subscribes to new token events."""
@@ -111,8 +113,7 @@ class WebSocketHandler:
                         active_subs = list(await self.state.get_subscriptions())
                         logger.debug(f"✅ Subscribed to {data['mint']} --> {len(active_subs)} active subscriptions")
                     elif 'tokenAmount' in data:
-                        #logger.debug(f"WebSocket got trade message: {data}")
-                        await store_trade(data)
+                        await self.trade_queue.put(data) 
                 except Exception as e:
                     logger.error(f"Message processing error: {e}")
         except websockets.exceptions.ConnectionClosed:
@@ -122,24 +123,28 @@ class WebSocketHandler:
     async def resume_subscriptions(self):
         """Limits active subscriptions to prevent memory leaks."""
         async with (await get_db()).acquire() as conn:
-            rows = await conn.fetch("SELECT mint FROM tokens WHERE is_active = TRUE LIMIT 100")  # Limit subscriptions
-            for row in rows:
-                mint = row['mint']
-                if mint not in await self.state.get_subscriptions():
-                    try:
-                        await self.websocket.send(json.dumps({
-                            "method": "subscribeTokenTrade",
-                            "keys": [mint]
-                        }))
-                        await self.state.add_subscription(mint)
-                        logger.debug(f"✅ Resubscribed to {mint}")
-                    except Exception as e:
-                        logger.error(f"❌ Failed to subscribe to {mint}: {e}")
+            try:
+                rows = await conn.fetch("SELECT mint FROM tokens WHERE is_active = TRUE LIMIT 100")  # Limit subscriptions
+                for row in rows:
+                    mint = row['mint']
+                    if mint not in await self.state.get_subscriptions():
+                        try:
+                            await self.websocket.send(json.dumps({
+                                "method": "subscribeTokenTrade",
+                                "keys": [mint]
+                            }))
+                            await self.state.add_subscription(mint)
+                            logger.debug(f"✅ Resubscribed to {mint}")
+                        except Exception as e:
+                            logger.error(f"❌ Failed to subscribe to {mint}: {e}")
+            except Exception as e:
+                logger.error(f"resume_subscriptions error: {e}")
+                
 
 
     async def unsubscribe_checker(self):
         """Periodically checks for inactive or risky tokens."""
-        await self.state.wait_or_interrupt(timeout=100) 
+        await self.state.wait_or_interrupt(timeout=60) 
         while not await self.state.get_shutdown():
             try:
                 async with (await get_db()).acquire() as conn:
@@ -168,17 +173,21 @@ class WebSocketHandler:
     async def unsubscribe_tokens_from_creator(self, creator: str):
         """Unsubscribes and removes tokens from a suspicious creator."""
         async with (await get_db()).acquire() as conn:
-            rows = await conn.fetch("SELECT mint FROM tokens WHERE traderPublicKey = $1", creator)
-            for row in rows:
-                mint = row['mint']
-                if not await has_active_position(mint):
-                    if mint in await self.state.get_subscriptions():
-                        await self.websocket.send(json.dumps({
-                            "method": "unsubscribeTokenTrade",
-                            "keys": [mint]
-                        }))
-                        await self.state.remove_subscription(mint)
-                    await backup_and_delete_token(mint, datetime.now(timezone.utc))
+            try:
+                rows = await conn.fetch("SELECT mint FROM tokens WHERE traderPublicKey = $1", creator)
+                for row in rows:
+                    mint = row['mint']
+                    if not await has_active_position(mint):
+                        if mint in await self.state.get_subscriptions():
+                            await self.websocket.send(json.dumps({
+                                "method": "unsubscribeTokenTrade",
+                                "keys": [mint]
+                            }))
+                            await self.state.remove_subscription(mint)
+                        await backup_and_delete_token(mint, datetime.now(timezone.utc))
+            except Exception as e:
+                logger.error(f"unsubscribe_tokens_from_creator error: {e}")
+                await self.state.wait_or_interrupt(timeout=5)
 
     async def shutdown(self):
         """Graceful shutdown with explicit unsubscription from all events."""

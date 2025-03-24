@@ -8,17 +8,15 @@ from datetime import datetime, timezone
 from dateutil.parser import isoparse
 import httpx
 from aiolimiter import AsyncLimiter
-import asyncpg
+import traceback
 
-from config import RUGCHECK_RATE_LIMIT, SOL_PRICE_API_URL, RUGCHECK_API
+from config import RUGCHECK_RATE_LIMIT, SOL_PRICE_API_URL, RUGCHECK_API,RUGCHECK_INTERVAL
 from database import get_db
 from logger import logger
-# from state import state
-# from decimal import Decimal
 
 
 # Rate limiter for RugCheck API calls
-limiter = AsyncLimiter(max_rate=RUGCHECK_RATE_LIMIT, time_period=60)
+limiter = AsyncLimiter(max_rate=RUGCHECK_RATE_LIMIT, time_period=RUGCHECK_INTERVAL)
 
 async def update_sol_price(state):
     """Periodically fetches and updates the global SOL price from an external API."""
@@ -34,114 +32,102 @@ async def update_sol_price(state):
                 else:
                     logger.error(f"⚠ Error fetching Solana price: {response.status_code}")
         except Exception as e:
-            logger.error(f"❌ Exception fetching Solana price: {e}")
+            logger.error(f"❌ Exception fetching Solana price: {e}", exc_info=True)
         
         # 🚀 Sleep interruptibly
-        await check_missing_rugcheck_data(state)
         await state.wait_or_interrupt(timeout=3600)
 
 async def refresh_rugcheck_queue(state):
     """Refreshes the RugCheck queue with updated priorities using interruptible sleeping."""
     while not await state.get_shutdown():
-        sol_price = await state.get_sol_price()
-        if sol_price is None:
-            logger.warning("⚠ SOL_PRICE not updated yet; skipping RugCheck queue refresh.")
-            await state.wait_or_interrupt(timeout=5)
-            continue
+        try:
+            sol_price = await state.get_sol_price()
+            if sol_price is None:
+                logger.warning("⚠ SOL_PRICE not updated yet; skipping RugCheck queue refresh.")
+                await state.wait_or_interrupt(timeout=5)
+                continue
 
-        queue = state.get_rugcheck_queue()
-        logger.debug(f"Heartbeat: refresh_rugcheck_queue starting cycle; queue size: {queue.qsize()}")
+            queue = state.get_rugcheck_queue()
+            logger.debug(f"Heartbeat: refresh_rugcheck_queue starting cycle; queue size: {queue.qsize()}")
 
-        # Clear the current queue
-        while not queue.empty():
-            try:
-                queue.get_nowait()
-                queue.task_done()
-            except asyncio.QueueEmpty:
-                break
+            # Clear the current queue
+            while not queue.empty():
+                try:
+                    queue.get_nowait()
+                    queue.task_done()
+                except asyncio.QueueEmpty:
+                    break
 
-        async with (await get_db()).acquire() as conn:
-            async with conn.transaction():
-                rows = await conn.fetch("""
-                    SELECT t.mint, COALESCE(SUM(tr.sol_amount), 0) AS volume
-                    FROM tokens t
-                    LEFT JOIN rugcheck r ON t.mint = r.mint
-                    LEFT JOIN trades tr ON t.mint = tr.mint
-                    WHERE r.mint IS NULL
-                    GROUP BY t.mint
-                    ORDER BY volume DESC
-                """)
+            async with (await get_db()).acquire() as conn:
+                async with conn.transaction():
+                    rows = await conn.fetch("""
+                        SELECT t.mint, COALESCE(SUM(tr.sol_amount), 0) AS volume
+                        FROM tokens t
+                        LEFT JOIN rugcheck r ON t.mint = r.mint
+                        LEFT JOIN trades tr ON t.mint = tr.mint
+                        WHERE r.mint IS NULL
+                        GROUP BY t.mint
+                        ORDER BY volume DESC
+                    """)
 
-                if rows:
-                    for row in rows:
-                        mint = row["mint"]
-                        volume = row["volume"]
-                        priority = -float(volume)
-                        v = float(volume) * float(sol_price)
-                        logger.debug(f"🔄 Refreshing: Token {mint} missing RugCheck data with volume {v} SOL. Enqueuing with priority {priority}.")
-                        await queue.put((priority, mint))
-                else:
-                    logger.debug("✅ All tokens have corresponding RugCheck data after refresh.")
+                    logger.debug(f"🔍 Found {len(rows)} tokens missing RugCheck data")
 
-        logger.debug("Heartbeat: refresh_rugcheck_queue cycle complete; sleeping 30s")
-        # Instead of sleeping xx seconds straight, sleep interruptibly
-        await state.wait_or_interrupt(timeout=30)
+                    if rows:
+                        for row in rows:
+                            mint = row["mint"]
+                            volume = row["volume"]
+                            priority = -float(volume)
+                            v = float(volume) * float(sol_price)
+                            #logger.debug(f"🔄 Refreshing: Token {mint} missing RugCheck data with volume {v} SOL. Enqueuing with priority {priority}.")
+                            await queue.put((priority, mint))
+                    else:
+                        logger.debug("✅ All tokens have corresponding RugCheck data after refresh.")
 
+            logger.debug("Heartbeat: refresh_rugcheck_queue cycle complete; sleeping 30s")
+            # Instead of sleeping xx seconds straight, sleep interruptibly
+
+            await state.wait_or_interrupt(timeout=4)
+        except Exception as e:
+            logger.error(f"❌ Critical error in refresh_rugcheck_queue: {e}", exc_info=True)
+            await state.wait_or_interrupt(timeout=7)
+        
 async def rugcheck_worker(state):
     """Worker task that processes tokens from the RugCheck queue."""
-    queue = state.get_rugcheck_queue()
     while not await state.get_shutdown():
         try:
+            queue = state.get_rugcheck_queue()
             current_size = queue.qsize()
             logger.debug(f"Rugcheck worker: Queue size before get: {current_size}")
-            priority, mint = await queue.get()
+            if queue.empty():
+                logger.debug("Rugcheck queue is empty. Sleeping...")
+                await state.wait_or_interrupt(timeout=5)
+                continue
+
+            try:
+                priority, mint = await asyncio.wait_for(queue.get(), timeout=4)  # ⏳ Timeout added
+            except asyncio.TimeoutError:
+                logger.error("⏳ Rugcheck queue.get() timed out! Possible deadlock?")
+                continue
+
             logger.debug(f"Rugcheck worker: Retrieved token {mint} with priority {priority} from queue")
-            success = await fetch_rugcheck_data(mint)
+
+            try:
+                success = await asyncio.wait_for(fetch_rugcheck_data(mint), timeout=4)  # ⏳ Timeout added
+            except asyncio.TimeoutError:
+                logger.error(f"⏳ RugCheck API call timeout for {mint}")
+                success = False
+
             if not success:
                 logger.info(f"🔄 Requeuing {mint} for RugCheck due to failure.")
-                await state.wait_or_interrupt(timeout=5) 
+                await state.wait_or_interrupt(timeout=3) 
                 await queue.put((priority, mint))
             else:
                 logger.debug(f"✅ Successfully processed RugCheck for {mint}.")
             queue.task_done()
         except Exception as e:
-            logger.error(f"❌ RugCheck worker error: {e}")
+            logger.error(f"❌ RugCheck worker error: {e}\n{traceback.format_exc()}")
             
         await state.wait_or_interrupt(timeout=1) 
-
-async def check_missing_rugcheck_data(state):
-    """Queries the database for tokens missing RugCheck data."""
-    logger.debug("Checking for missing RugCheck data...")
-    sol_price = await state.get_sol_price()
-    if sol_price is None:
-        logger.warning("⚠ SOL_PRICE not updated yet; skipping RugCheck prioritization.")
-        await state.wait_or_interrupt(timeout=5) 
-        return None
-
-    async with (await get_db()).acquire() as conn:
-        async with conn.transaction():
-            rows = await conn.fetch("""
-                SELECT t.mint, COALESCE(SUM(tr.sol_amount), 0) AS volume
-                FROM tokens t
-                LEFT JOIN rugcheck r ON t.mint = r.mint
-                LEFT JOIN trades tr ON t.mint = tr.mint
-                WHERE r.mint IS NULL
-                GROUP BY t.mint
-                ORDER BY volume DESC
-            """)
-
-            logger.debug(f"🔍 Found {len(rows)} tokens missing RugCheck data")
-            if rows:
-                for row in rows:
-                    mint = row["mint"]
-                    volume = row["volume"]
-                    priority = -float(volume)
-                    v = float(volume) * float(sol_price)
-                    logger.info(f"🔍 Token {mint} missing RugCheck data with volume {v} SOL. Enqueuing with priority {priority}.")
-                    await state.get_rugcheck_queue().put((priority, mint))
-            else:
-                logger.debug("✅ All tokens have corresponding RugCheck data.")
-
 
 async def fetch_rugcheck_data(mint: str) -> bool:
     """Fetches and stores RugCheck data."""
@@ -219,7 +205,7 @@ async def fetch_rugcheck_data(mint: str) -> bool:
                     logger.warning(f"⚠ RugCheck API returned {response.status_code} for {mint}")
                     return False
         except Exception as e:
-            logger.error(f"❌ Error fetching RugCheck data for {mint}: {e}")
+            logger.error(f"❌ Error fetching RugCheck data for {mint}: {e}", exc_info=True)
             return False
 
 async def fetch_social_data(uri: str, token_name: str, token_symbol: str):
@@ -237,7 +223,7 @@ async def fetch_social_data(uri: str, token_name: str, token_symbol: str):
             else:
                 logger.warning(f"⚠ Failed to fetch social data for URI {uri}: {response.status_code}")
     except Exception as e:
-        logger.error(f"❌ Error fetching social data for {uri}: {e}")
+        logger.error(f"❌ Error fetching social data for {uri}: {e}", exc_info=True)
     social_score = calculate_social_score(social_data, token_name, token_symbol)
     return social_data, social_score
 

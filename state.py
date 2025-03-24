@@ -3,6 +3,7 @@ state.py - Centralized storage for dynamic global values.
 Manages mutable global state such as SOL price, shutdown flag, active subscriptions, and API rate timestamps.
 """
 import asyncio
+from asyncio import Queue
 from collections import deque
 from logger import logger
 
@@ -18,6 +19,7 @@ class GlobalState:
         self.shutdown_event = asyncio.Event()  # 🚀 Interruptible sleep support
         self.active_subscriptions = set()  # Active token subscriptions
         self.new_token_subscription = False  # WebSocket subscription status
+        self.websocket_handler = None  # 🚀 Store WebSocketHandler instance
 
         # API rate limiting
         self.request_timestamps = deque(maxlen=10)  # API request tracker
@@ -36,6 +38,10 @@ class GlobalState:
             if GlobalState._instance is None:
                 GlobalState._instance = GlobalState()
         return GlobalState._instance
+    
+    async def set_websocket_handler(self, handler):
+        async with self.lock:
+            self.websocket_handler = handler
 
     ## 🚀 SOL Price Management
     async def set_sol_price(self, price: float):
@@ -64,7 +70,7 @@ class GlobalState:
         try:
             await asyncio.wait_for(self.shutdown_event.wait(), timeout=timeout)
         except asyncio.TimeoutError:
-            logger.debug("wait_or_interrupt: timeout expired normally")
+            #logger.debug("wait_or_interrupt: timeout expired normally")
             pass  # This is expected if the timeout expires normally
 
     ## 🚀 Subscription Management
@@ -104,6 +110,3 @@ class GlobalState:
 
     def get_db_write_lock(self):
         return self.db_write_lock
-
-# Singleton instance
-#state = asyncio.run(GlobalState.get_instance())

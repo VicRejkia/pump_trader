@@ -34,203 +34,150 @@ async def init_db():
 
 async def get_db():
     """Return the database connection pool."""
+    if _db_pool is None:
+        logger.error("🚨 Database connection pool is unavailable!")
     return _db_pool
 
 @validate_timezone
 async def store_token(data: dict) -> bool:
     """Store token with creator wallet checks and market cap calculation."""
-    async with _db_pool.acquire() as conn:
-        async with conn.transaction():
-            try:
-                # === Creator wallet check ===
-                creator = data.get('traderPublicKey')
-                if creator:
-                    now = datetime.now(timezone.utc)
-                    row = await conn.fetchrow(
-                        "SELECT token_count, last_token_time FROM creator_wallets WHERE wallet_address = $1",
-                        creator
-                    )
-                    
-                    token_count = 1
-                    if row:
-                        token_count, last_token_time = row
-                        if last_token_time and (now - last_token_time).total_seconds() < 604800:
-                            token_count += 1
+    for attempt in range(3):
+        try:
+            async with _db_pool.acquire() as conn:
+                async with conn.transaction():
+                    try:
+                        # === Creator wallet check ===
+                        creator = data.get('traderPublicKey')
+                        if creator:
+                            now = datetime.now(timezone.utc)
+                            row = await conn.fetchrow(
+                                "SELECT token_count, last_token_time FROM creator_wallets WHERE wallet_address = $1",
+                                creator
+                            )
+                            
+                            token_count = 1
+                            if row:
+                                token_count, last_token_time = row
+                                if last_token_time and (now - last_token_time).total_seconds() < 604800:
+                                    token_count += 1
 
-                        await conn.execute(
-                            "UPDATE creator_wallets SET token_count = $1, last_token_time = $2 WHERE wallet_address = $3",
-                            token_count, now, creator
-                        )
-                    else:
-                        await conn.execute(
-                            "INSERT INTO creator_wallets (wallet_address, token_count, last_token_time) VALUES ($1, $2, $3)",
-                            creator, token_count, now
+                                await conn.execute(
+                                    "UPDATE creator_wallets SET token_count = $1, last_token_time = $2 WHERE wallet_address = $3",
+                                    token_count, now, creator
+                                )
+                            else:
+                                await conn.execute(
+                                    "INSERT INTO creator_wallets (wallet_address, token_count, last_token_time) VALUES ($1, $2, $3)",
+                                    creator, token_count, now
+                                )
+
+                            if token_count > 2:
+                                logger.warning(f"Suspicious creator {creator} for token {data['mint']} with {token_count} tokens in 7 days")
+                                return False
+                        
+                        from api import calculate_market_cap
+                        market_cap_calculated = calculate_market_cap(
+                            data.get('vTokensInBondingCurve', 0),
+                            data.get('vSolInBondingCurve', 0),
+                            data.get('totalSupply', TOTAL_SUPPLY)
                         )
 
-                    if token_count > 2:
-                        logger.warning(f"Suspicious creator {creator} for token {data['mint']} with {token_count} tokens in 7 days")
+                        await conn.execute('''
+                            INSERT INTO tokens (
+                                mint, traderPublicKey, initialBuy, solAmount, bondingCurveKey,
+                                vTokensInBondingCurve, vSolInBondingCurve, marketCapSol,
+                                name, symbol, uri, market_cap_calculated, timestamp, is_active
+                            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, TRUE)
+                            ON CONFLICT (mint) DO NOTHING
+                        ''', 
+                            data['mint'],
+                            data.get('traderPublicKey'),
+                            data.get('initialBuy'),
+                            data.get('solAmount'),
+                            data.get('bondingCurveKey'),
+                            data.get('vTokensInBondingCurve'),
+                            data.get('vSolInBondingCurve'),
+                            data.get('marketCapSol'),
+                            data.get('name'),
+                            data.get('symbol'),
+                            data.get('uri'),
+                            market_cap_calculated,
+                            datetime.now(timezone.utc)
+                        )
+
+                        return True
+                    except Exception as e:
+                        logger.error(f"Token storage failed for {data.get('mint')}: {e}")
                         return False
-                
-                from api import calculate_market_cap
-                market_cap_calculated = calculate_market_cap(
-                    data.get('vTokensInBondingCurve', 0),
-                    data.get('vSolInBondingCurve', 0),
-                    data.get('totalSupply', TOTAL_SUPPLY)
-                )
+        except (asyncpg.PostgresConnectionError, asyncpg.InterfaceError) as e:
+            logger.error(f"DB connection error (attempt {attempt+1}): {e}")
+            await asyncio.sleep(1)
+    return False
 
-                await conn.execute('''
-                    INSERT INTO tokens (
-                        mint, traderPublicKey, initialBuy, solAmount, bondingCurveKey,
-                        vTokensInBondingCurve, vSolInBondingCurve, marketCapSol,
-                        name, symbol, uri, market_cap_calculated, timestamp, is_active
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, TRUE)
-                    ON CONFLICT (mint) DO NOTHING
-                ''', 
-                    data['mint'],
-                    data.get('traderPublicKey'),
-                    data.get('initialBuy'),
-                    data.get('solAmount'),
-                    data.get('bondingCurveKey'),
-                    data.get('vTokensInBondingCurve'),
-                    data.get('vSolInBondingCurve'),
-                    data.get('marketCapSol'),
-                    data.get('name'),
-                    data.get('symbol'),
-                    data.get('uri'),
-                    market_cap_calculated,
-                    datetime.now(timezone.utc)
-                )
-
-                return True
-            except Exception as e:
-                logger.error(f"Token storage failed for {data.get('mint')}: {e}")
-                return False
-
-
-# async def store_trade(data: dict):
-#     """Enqueue trade for batch processing."""
-#     # DEBUG
-#     required_fields = {
-#         'signature', 'mint', 'txtype', 'tokenAmount', 
-#         'solAmount', 'bondingCurveKey',
-#         'vTokensInBondingCurve', 'vSolInBondingCurve',
-#         'marketCapSol'
-#     }
-#     missing = required_fields - data.keys()
-#     if missing:
-#         logger.error(f"Missing trade fields: {missing}")
-#         return
-#     # DEBUG END
-#     await _trade_batch_queue.put(data)
 @validate_timezone
-async def store_trade(data: dict):
-    from api import calculate_market_cap
-    try:
-        async with _db_pool.acquire() as conn:
-            await conn.execute('''
-                INSERT INTO trades (
-                    signature, mint, tx_type, token_amount, sol_amount, price,
-                    bondingCurveKey, vTokensInBondingCurve, vSolInBondingCurve,
-                    marketCapSol, market_cap_calculated, timestamp
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-                ON CONFLICT (signature) DO NOTHING
-            ''',
-            data['signature'],
-            data['mint'],
-            data['txType'],  # Ensure matches column name case
-            Decimal(str(data['tokenAmount'])),
-            Decimal(str(data['solAmount'])),
-            Decimal(str(data['solAmount'] / data['tokenAmount'])) if data['tokenAmount'] else 0,
-            data['bondingCurveKey'],
-            Decimal(str(data['vTokensInBondingCurve'])),
-            Decimal(str(data['vSolInBondingCurve'])),
-            Decimal(str(data['marketCapSol'])),
-            calculate_market_cap(
-                        data.get('vTokensInBondingCurve', 0),
-                        data.get('vSolInBondingCurve', 0),
-                        data.get('totalSupply', TOTAL_SUPPLY)
-                    ),
-            datetime.now(timezone.utc)
-            )
+async def trade_worker(state):
+    """Processes trade messages from queue and writes them in batches to the database."""
+    
+    while not await state.get_shutdown():
+        try:
+            queue = state.websocket_handler.trade_queue  # ✅ Get trade queue
+            BATCH_SIZE = 10  # 🚀 Number of trades per batch
+
+            batch = []
+            for _ in range(BATCH_SIZE):
+                try:
+                    trade = await asyncio.wait_for(queue.get(), timeout=5)  # ⏳ Wait max 5s for new trade
+                    batch.append(trade)
+                except asyncio.TimeoutError:
+                    break  # No more trades available
+
+            if batch:
+                from api import calculate_market_cap
+
+                async with _db_pool.acquire() as conn:
+                    async with conn.transaction():
+                        for data in batch:
+                            await conn.execute(
+                                '''
+                                INSERT INTO trades (
+                                    signature, mint, tx_type, token_amount, sol_amount, price,
+                                    bondingCurveKey, vTokensInBondingCurve, vSolInBondingCurve,
+                                    marketCapSol, market_cap_calculated, timestamp
+                                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                                ON CONFLICT (signature) DO NOTHING
+                                ''',
+                                data['signature'],
+                                data['mint'],
+                                data['txType'],
+                                Decimal(str(data['tokenAmount'])),
+                                Decimal(str(data['solAmount'])),
+                                Decimal(str(data['solAmount'] / data['tokenAmount'])) if data['tokenAmount'] else 0,
+                                data['bondingCurveKey'],
+                                Decimal(str(data['vTokensInBondingCurve'])),
+                                Decimal(str(data['vSolInBondingCurve'])),
+                                Decimal(str(data['marketCapSol'])),
+                                calculate_market_cap(
+                                    data.get('vTokensInBondingCurve', 0),
+                                    data.get('vSolInBondingCurve', 0),
+                                    data.get('totalSupply', TOTAL_SUPPLY)
+                                ),
+                                datetime.now(timezone.utc)
+                            )
+                            queue.task_done()
+
+                logger.debug(f"✅ Processed {len(batch)} trades.")
             
-            # Update tokens.last_trade
-            await conn.execute('''
-                UPDATE tokens SET last_trade = $1 WHERE mint = $2
-            ''', datetime.now(timezone.utc), data['mint'])
-            
-            logger.debug(f"Stored {data['txType']} trade for {data['mint']}")
-    except Exception as e:
-        logger.error(f"Trade storage failed: {e}")
-        raise
+            await asyncio.sleep(1)  # Avoid busy-looping
 
-# async def _process_trade_batches():
-#     """Background task to process trade batches efficiently."""
-#     while True:
-#         batch = []
-#         try:
-#             while len(batch) < 1000:
-#                 batch.append(await asyncio.wait_for(_trade_batch_queue.get(), timeout=1.0))
-#         except asyncio.TimeoutError:
-#             pass
-        
-#         if batch:
-#             async with _db_pool.acquire() as conn:
-#                 async with conn.transaction():
-#                     try:
-#                         trade_params = []
-#                         token_updates = {}
-
-#                         for data in batch:
-#                             from api import calculate_market_cap
-#                             market_cap_calculated = calculate_market_cap(
-#                                 data.get('vTokensInBondingCurve', 0),
-#                                 data.get('vSolInBondingCurve', 0),
-#                                 data.get('totalSupply', TOTAL_SUPPLY)
-#                             )
-
-#                             trade_params.append((
-#                                 data['signature'],
-#                                 data['mint'],
-#                                 data.get('txType', 'unknown'),
-#                                 data.get('tokenAmount', 0),
-#                                 data.get('solAmount', 0),
-#                                 (data['solAmount'] / data['tokenAmount']) if data.get('tokenAmount') else 0.0,
-#                                 data.get('bondingCurveKey'),
-#                                 data.get('vTokensInBondingCurve'),
-#                                 data.get('vSolInBondingCurve'),
-#                                 data.get('marketCapSol'),
-#                                 market_cap_calculated,
-#                                 datetime.now(timezone.utc)
-#                             ))
-
-#                             token_updates[data['mint']] = datetime.now(timezone.utc)
-
-#                         await conn.executemany('''
-#                             INSERT INTO trades (
-#                                 signature, mint, tx_type, token_amount, sol_amount, price,
-#                                 bondingCurveKey, vTokensInBondingCurve, vSolInBondingCurve,
-#                                 marketCapSol, market_cap_calculated, timestamp
-#                             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-#                             ON CONFLICT (signature) DO NOTHING
-#                         ''', trade_params)
-
-#                         await conn.executemany('''
-#                             UPDATE tokens SET last_trade = $1 WHERE mint = $2
-#                         ''', [(ts, mint) for mint, ts in token_updates.items()])
-
-#                         logger.info(f"✅ Processed {len(batch)} trades in batch")
-
-#                     except Exception as e:
-#                         logger.error(f"❌ Batch insert failed: {e}")
-#                         for item in batch:
-#                             await _trade_batch_queue.put(item)
-#                         await asyncio.sleep(1)
+        except Exception as e:
+            logger.error(f"🚨 Trade worker error: {e}")
+            await asyncio.sleep(5)  # Slow retry on failure
 
 async def get_total_supply(mint: str) -> float:
     """Get token supply from rugcheck table."""
     async with _db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT token_supply FROM rugcheck WHERE mint = $1", mint)
-        return row[0] if row else TOTAL_SUPPLY
+        return float(row[0]) if row else TOTAL_SUPPLY
 
 async def backup_and_delete_token(mint: str, archived_at: datetime):
     """Backup and delete token data across all tables."""
