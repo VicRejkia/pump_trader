@@ -121,7 +121,7 @@ async def trade_worker(state):
     while not await state.get_shutdown():
         try:
             queue = state.websocket_handler.trade_queue  # ✅ Get trade queue
-            BATCH_SIZE = 10  # 🚀 Number of trades per batch
+            BATCH_SIZE = 50  # 🚀 Number of trades per batch
 
             batch = []
             for _ in range(BATCH_SIZE):
@@ -137,33 +137,43 @@ async def trade_worker(state):
                 async with _db_pool.acquire() as conn:
                     async with conn.transaction():
                         for data in batch:
-                            await conn.execute(
-                                '''
-                                INSERT INTO trades (
-                                    signature, mint, tx_type, token_amount, sol_amount, price,
-                                    bondingCurveKey, vTokensInBondingCurve, vSolInBondingCurve,
-                                    marketCapSol, market_cap_calculated, timestamp
-                                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-                                ON CONFLICT (signature) DO NOTHING
-                                ''',
-                                data['signature'],
-                                data['mint'],
-                                data['txType'],
-                                Decimal(str(data['tokenAmount'])),
-                                Decimal(str(data['solAmount'])),
-                                Decimal(str(data['solAmount'] / data['tokenAmount'])) if data['tokenAmount'] else 0,
-                                data['bondingCurveKey'],
-                                Decimal(str(data['vTokensInBondingCurve'])),
-                                Decimal(str(data['vSolInBondingCurve'])),
-                                Decimal(str(data['marketCapSol'])),
-                                calculate_market_cap(
-                                    data.get('vTokensInBondingCurve', 0),
-                                    data.get('vSolInBondingCurve', 0),
-                                    data.get('totalSupply', TOTAL_SUPPLY)
-                                ),
-                                datetime.now(timezone.utc)
-                            )
-                            queue.task_done()
+                            mint = data['mint']
+                            # Check if token is still subscribed
+                            if mint not in await state.get_subscriptions():
+                                logger.debug(f"Skipping trade for unsubscribed token {mint}")
+                                queue.task_done()
+                                continue
+                            try:
+                                await conn.execute(
+                                    '''
+                                    INSERT INTO trades (
+                                        signature, mint, tx_type, token_amount, sol_amount, price,
+                                        bondingCurveKey, vTokensInBondingCurve, vSolInBondingCurve,
+                                        marketCapSol, market_cap_calculated, timestamp
+                                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                                    ON CONFLICT (signature) DO NOTHING
+                                    ''',
+                                    data['signature'],
+                                    data['mint'],
+                                    data['txType'],
+                                    Decimal(str(data['tokenAmount'])),
+                                    Decimal(str(data['solAmount'])),
+                                    Decimal(str(data['solAmount'] / data['tokenAmount'])) if data['tokenAmount'] else 0,
+                                    data['bondingCurveKey'],
+                                    Decimal(str(data['vTokensInBondingCurve'])),
+                                    Decimal(str(data['vSolInBondingCurve'])),
+                                    Decimal(str(data['marketCapSol'])),
+                                    calculate_market_cap(
+                                        data.get('vTokensInBondingCurve', 0),
+                                        data.get('vSolInBondingCurve', 0),
+                                        data.get('totalSupply', TOTAL_SUPPLY)
+                                    ),
+                                    datetime.now(timezone.utc)
+                                )
+                            except Exception as e:
+                                logger.error(f"Failed to insert trade {data['signature']}: {e}")
+                            finally:
+                                queue.task_done()
 
                 logger.debug(f"✅ Processed {len(batch)} trades.")
             
