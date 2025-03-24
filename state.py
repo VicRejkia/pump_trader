@@ -106,4 +106,4 @@ class GlobalState:
         return self.db_write_lock
 
 # Singleton instance
-state = asyncio.run(GlobalState.get_instance())
+#state = asyncio.run(GlobalState.get_instance())

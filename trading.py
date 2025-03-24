@@ -15,7 +15,7 @@ from database import get_total_supply, get_db
 from api import calculate_market_cap
 from logger import logger
 from utils import play_buy_opportunity_sound, play_sell_sl_sound_async, play_sell_tp_sound_async, calculate_social_score
-from state import state
+#from state import state
 
 async def calculate_volatility(mint: str) -> float:
     """Calculates price volatility over the last hour"""
@@ -64,7 +64,7 @@ async def has_active_position(mint: str) -> bool:
         ''', mint)
         return count > 0
 
-async def check_trading_opportunities(websocket):
+async def check_trading_opportunities(websocket, state):
     """Check buy opportunities"""
     while not await state.get_shutdown():
         sol_price = await state.get_sol_price()
@@ -119,9 +119,9 @@ async def check_trading_opportunities(websocket):
                 logger.debug(f"Found {len(rows)} trading opportunities.")
                 for row in rows:
                     mint = row['mint']
-                    initial_market_cap = row['initial_market_cap'],
-                    initial_v_tokens = row['initial_v_tokens'],
-                    initial_v_sol = row['initial_v_sol'],
+                    initial_market_cap = row['initial_market_cap']
+                    initial_v_tokens = row['initial_v_tokens']
+                    initial_v_sol = row['initial_v_sol']
                     latest_market_cap_sol = row['latest_marketCapSol']
                     latest_v_tokens = row['latest_vTokens']
                     latest_v_sol = row['latest_vSol']

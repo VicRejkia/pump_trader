@@ -13,14 +13,14 @@ import asyncpg
 from config import RUGCHECK_RATE_LIMIT, SOL_PRICE_API_URL, RUGCHECK_API
 from database import get_db
 from logger import logger
-from state import state
+# from state import state
 # from decimal import Decimal
 
 
 # Rate limiter for RugCheck API calls
 limiter = AsyncLimiter(max_rate=RUGCHECK_RATE_LIMIT, time_period=60)
 
-async def update_sol_price():
+async def update_sol_price(state):
     """Periodically fetches and updates the global SOL price from an external API."""
     while not await state.get_shutdown():
         try:
@@ -37,10 +37,10 @@ async def update_sol_price():
             logger.error(f"❌ Exception fetching Solana price: {e}")
         
         # 🚀 Sleep interruptibly
-        await check_missing_rugcheck_data()
+        await check_missing_rugcheck_data(state)
         await state.wait_or_interrupt(timeout=3600)
 
-async def refresh_rugcheck_queue():
+async def refresh_rugcheck_queue(state):
     """Refreshes the RugCheck queue with updated priorities using interruptible sleeping."""
     while not await state.get_shutdown():
         sol_price = await state.get_sol_price()
@@ -87,7 +87,7 @@ async def refresh_rugcheck_queue():
         # Instead of sleeping xx seconds straight, sleep interruptibly
         await state.wait_or_interrupt(timeout=30)
 
-async def rugcheck_worker():
+async def rugcheck_worker(state):
     """Worker task that processes tokens from the RugCheck queue."""
     queue = state.get_rugcheck_queue()
     while not await state.get_shutdown():
@@ -109,7 +109,7 @@ async def rugcheck_worker():
             
         await state.wait_or_interrupt(timeout=1) 
 
-async def check_missing_rugcheck_data():
+async def check_missing_rugcheck_data(state):
     """Queries the database for tokens missing RugCheck data."""
     logger.debug("Checking for missing RugCheck data...")
     sol_price = await state.get_sol_price()

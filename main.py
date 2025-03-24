@@ -10,9 +10,9 @@ from api import update_sol_price, rugcheck_worker, check_missing_rugcheck_data, 
 from trading import check_trading_opportunities
 from websocket_handler import WebSocketHandler
 from logger import setup_logging, logger
-from state import state  # Singleton state management
+from state import GlobalState
 
-async def monitor_tasks(tasks):
+async def monitor_tasks(state, tasks):
     """Enhanced task monitor with queue metrics and detailed statuses"""
     while not await state.get_shutdown():
         try:
@@ -48,24 +48,29 @@ async def monitor_tasks(tasks):
 async def main(cleanup: bool):
     """Main entry point for the bot's event loop."""
     setup_logging(debug=True)
-    await init_db()  # Initialize connection pool and database schema
+
+    # Instantiate state within the event loop
+    state = await GlobalState.get_instance()
+
+    # Initialize connection pool and database schema
+    await init_db()
 
     # Optionally clean up the database before starting.
     if cleanup:
         logger.info("🗑️ Starting database cleanup...")
         await cleanup_db()
 
-    ws_handler = WebSocketHandler()
+    ws_handler = WebSocketHandler(state)
     await ws_handler.connect()
 
     tasks = [
-        asyncio.create_task(update_sol_price(), name="sol_price_updater"),
-        asyncio.create_task(refresh_rugcheck_queue(), name="rugcheck_queue_refresher"),
-        asyncio.create_task(check_trading_opportunities(ws_handler.websocket), name="trading_opportunities_checker"),
-        asyncio.create_task(rugcheck_worker(), name="rugcheck_worker"),
-        asyncio.create_task(check_missing_rugcheck_data(), name="missing_rugcheck_data_checker")
+        asyncio.create_task(update_sol_price(state), name="sol_price_updater"),
+        asyncio.create_task(refresh_rugcheck_queue(state), name="rugcheck_queue_refresher"),
+        asyncio.create_task(check_trading_opportunities(ws_handler.websocket, state), name="trading_opportunities_checker"),
+        asyncio.create_task(rugcheck_worker(state), name="rugcheck_worker"),
+        asyncio.create_task(check_missing_rugcheck_data(state), name="missing_rugcheck_data_checker")
     ]
-    monitor_task = asyncio.create_task(monitor_tasks(tasks), name="task_monitor")
+    monitor_task = asyncio.create_task(monitor_tasks(state, tasks), name="task_monitor")
     tasks.append(monitor_task)
     tasks.extend(ws_handler.start())  # Add WebSocket handler tasks
 
