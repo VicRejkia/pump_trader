@@ -30,7 +30,7 @@ async def update_sol_price(state):
                     await state.set_sol_price(new_price)
                     logger.info(f"✅ Updated Solana price: {new_price} USD")
                 else:
-                    logger.error(f"⚠ Error fetching Solana price: {response.status_code}")
+                    logger.error(f"⚠️️ Error fetching Solana price: {response.status_code}")
         except Exception as e:
             logger.error(f"❌ Exception fetching Solana price: {e}", exc_info=True)
         
@@ -43,12 +43,11 @@ async def refresh_rugcheck_queue(state):
         try:
             sol_price = await state.get_sol_price()
             if sol_price is None:
-                logger.warning("⚠ SOL_PRICE not updated yet; skipping RugCheck queue refresh.")
+                logger.warning("⚠️️ SOL_PRICE not updated yet; skipping RugCheck queue refresh.")
                 await state.wait_or_interrupt(timeout=5)
                 continue
 
             queue = state.get_rugcheck_queue()
-            logger.debug(f"Heartbeat: refresh_rugcheck_queue starting cycle; queue size: {queue.qsize()}")
 
             # Clear the current queue
             while not queue.empty():
@@ -83,7 +82,6 @@ async def refresh_rugcheck_queue(state):
                     else:
                         logger.debug("✅ All tokens have corresponding RugCheck data after refresh.")
 
-            logger.debug("Heartbeat: refresh_rugcheck_queue cycle complete; sleeping 30s")
             # Instead of sleeping xx seconds straight, sleep interruptibly
 
             await state.wait_or_interrupt(timeout=4)
@@ -99,7 +97,6 @@ async def rugcheck_worker(state):
             current_size = queue.qsize()
             logger.debug(f"Rugcheck worker: Queue size before get: {current_size}")
             if queue.empty():
-                logger.debug("Rugcheck queue is empty. Sleeping...")
                 await state.wait_or_interrupt(timeout=5)
                 continue
 
@@ -108,8 +105,6 @@ async def rugcheck_worker(state):
             except asyncio.TimeoutError:
                 logger.error("⏳ Rugcheck queue.get() timed out! Possible deadlock?")
                 continue
-
-            logger.debug(f"Rugcheck worker: Retrieved token {mint} with priority {priority} from queue")
 
             try:
                 success = await asyncio.wait_for(fetch_rugcheck_data(mint), timeout=4)  # ⏳ Timeout added
@@ -125,7 +120,7 @@ async def rugcheck_worker(state):
                 logger.debug(f"✅ Successfully processed RugCheck for {mint}.")
             queue.task_done()
         except Exception as e:
-            logger.error(f"❌ RugCheck worker error: {e}\n{traceback.format_exc()}")
+            logger.error(f"❌ RugCheck worker error: {e}\n{traceback.format_exc()}", exc_info=True)
             
         await state.wait_or_interrupt(timeout=1) 
 
@@ -140,7 +135,6 @@ async def fetch_rugcheck_data(mint: str) -> bool:
                 return True
             
         try:
-            logger.debug(f"Fetching RugCheck data for token {mint}...")
             # Specify a timeout (in seconds) for the HTTP call.
             async with httpx.AsyncClient(timeout=10) as client:
                 url = f"{RUGCHECK_API}/{mint}/report"
@@ -148,7 +142,7 @@ async def fetch_rugcheck_data(mint: str) -> bool:
                 if response.status_code == 200:
                     data = response.json()
                     if not data or "score" not in data:
-                        logger.warning(f"⚠ RugCheck data incomplete for {mint}")
+                        logger.warning(f"⚠️️ RugCheck data incomplete for {mint}")
                         return False
 
                     token = data.get("token") or {}
@@ -202,7 +196,7 @@ async def fetch_rugcheck_data(mint: str) -> bool:
                             logger.debug(f"✅ RugCheck data stored for {mint}")
                             return True
                 else:
-                    logger.warning(f"⚠ RugCheck API returned {response.status_code} for {mint}")
+                    logger.warning(f"⚠️️ RugCheck API returned {response.status_code} for {mint}")
                     return False
         except Exception as e:
             logger.error(f"❌ Error fetching RugCheck data for {mint}: {e}", exc_info=True)
@@ -221,7 +215,7 @@ async def fetch_social_data(uri: str, token_name: str, token_symbol: str):
                 social_data["telegram"] = data.get("telegram")
                 social_data["twitter"] = data.get("twitter")
             else:
-                logger.warning(f"⚠ Failed to fetch social data for URI {uri}: {response.status_code}")
+                logger.warning(f"⚠️️ Failed to fetch social data for URI {uri}: {response.status_code}")
     except Exception as e:
         logger.error(f"❌ Error fetching social data for {uri}: {e}", exc_info=True)
     social_score = calculate_social_score(social_data, token_name, token_symbol)

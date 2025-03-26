@@ -69,7 +69,7 @@ class GlobalState:
         # logger.debug(f"wait_or_interrupt: waiting for {timeout} seconds")
         try:
             await asyncio.wait_for(self.shutdown_event.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, asyncio.CancelledError):
             #logger.debug("wait_or_interrupt: timeout expired normally")
             pass  # This is expected if the timeout expires normally
 

@@ -72,7 +72,7 @@ async def store_token(data: dict) -> bool:
                                 )
 
                             if token_count > 2:
-                                logger.warning(f"Suspicious creator {creator} for token {data['mint']} with {token_count} tokens in 7 days")
+                                logger.info(f"🤬 Suspicious creator {creator} for token {data['mint']} with {token_count} tokens in 7 days")
                                 return False
                         
                         from api import calculate_market_cap
@@ -107,7 +107,7 @@ async def store_token(data: dict) -> bool:
 
                         return True
                     except Exception as e:
-                        logger.error(f"Token storage failed for {data.get('mint')}: {e}")
+                        logger.error(f"Token storage failed for {data.get('mint')}: {e}", exc_info=True)
                         return False
         except (asyncpg.PostgresConnectionError, asyncpg.InterfaceError) as e:
             logger.error(f"DB connection error (attempt {attempt+1}): {e}")
@@ -117,12 +117,12 @@ async def store_token(data: dict) -> bool:
 @validate_timezone
 async def trade_worker(state):
     """Processes trade messages from queue and writes them in batches to the database."""
-    
     while not await state.get_shutdown():
         try:
             queue = state.websocket_handler.trade_queue  # ✅ Get trade queue
             BATCH_SIZE = 50  # 🚀 Number of trades per batch
 
+            # Collect batch with timeout
             batch = []
             for _ in range(BATCH_SIZE):
                 try:
@@ -130,58 +130,78 @@ async def trade_worker(state):
                     batch.append(trade)
                 except asyncio.TimeoutError:
                     break  # No more trades available
+            
+            if not batch:
+                await asyncio.sleep(0.1)
+                continue
 
-            if batch:
-                from api import calculate_market_cap
+            # Prepare parameters for batch insert
+            trade_params = []
+            mints = []
+            from api import calculate_market_cap
 
-                async with _db_pool.acquire() as conn:
-                    async with conn.transaction():
-                        for data in batch:
+            async with _db_pool.acquire() as conn:
+                async with conn.transaction():
+                    for data in batch:
+                        try:
                             mint = data['mint']
-                            # Check if token is still subscribed
                             if mint not in await state.get_subscriptions():
-                                logger.debug(f"Skipping trade for unsubscribed token {mint}")
+                                logger.debug(f"Skipping unsubscribed token {mint}")
+                                # ⚠️️ Call task_done() here for skipped items
                                 queue.task_done()
                                 continue
-                            try:
-                                await conn.execute(
-                                    '''
-                                    INSERT INTO trades (
-                                        signature, mint, tx_type, token_amount, sol_amount, price,
-                                        bondingCurveKey, vTokensInBondingCurve, vSolInBondingCurve,
-                                        marketCapSol, market_cap_calculated, timestamp
-                                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-                                    ON CONFLICT (signature) DO NOTHING
-                                    ''',
-                                    data['signature'],
-                                    data['mint'],
-                                    data['txType'],
-                                    Decimal(str(data['tokenAmount'])),
-                                    Decimal(str(data['solAmount'])),
-                                    Decimal(str(data['solAmount'] / data['tokenAmount'])) if data['tokenAmount'] else 0,
-                                    data['bondingCurveKey'],
-                                    Decimal(str(data['vTokensInBondingCurve'])),
-                                    Decimal(str(data['vSolInBondingCurve'])),
-                                    Decimal(str(data['marketCapSol'])),
-                                    calculate_market_cap(
-                                        data.get('vTokensInBondingCurve', 0),
-                                        data.get('vSolInBondingCurve', 0),
-                                        data.get('totalSupply', TOTAL_SUPPLY)
-                                    ),
-                                    datetime.now(timezone.utc)
-                                )
-                            except Exception as e:
-                                logger.error(f"Failed to insert trade {data['signature']}: {e}")
-                            finally:
-                                queue.task_done()
+                            
+                            # Process trade
+                            trade_params.append((
+                                data['signature'],
+                                mint,
+                                data['txType'],
+                                Decimal(str(data['tokenAmount'])),
+                                Decimal(str(data['solAmount'])),
+                                Decimal(str(data['solAmount'] / data['tokenAmount'])) if data['tokenAmount'] else 0,
+                                data['bondingCurveKey'],
+                                Decimal(str(data['vTokensInBondingCurve'])),
+                                Decimal(str(data['vSolInBondingCurve'])),
+                                Decimal(str(data['marketCapSol'])),
+                                calculate_market_cap(
+                                    data.get('vTokensInBondingCurve', 0),
+                                    data.get('vSolInBondingCurve', 0),
+                                    data.get('totalSupply', TOTAL_SUPPLY)
+                                ),
+                                datetime.now(timezone.utc)
+                            ))
+                            mints.append(mint)
 
-                logger.debug(f"✅ Processed {len(batch)} trades.")
-            
-            await asyncio.sleep(1)  # Avoid busy-looping
+                        except Exception as e:
+                            logger.error(f"Failed to process trade {data.get('signature')}: {e}", exc_info=True)
+                        finally:
+                            # ✅ Ensure one task_done() per item
+                            queue.task_done()
+
+                    # Batch insert trades (if any)
+                    if trade_params:
+                        await conn.executemany('''
+                        INSERT INTO trades (
+                            signature, mint, tx_type, token_amount, sol_amount, price,
+                            bondingCurveKey, vTokensInBondingCurve, vSolInBondingCurve,
+                            marketCapSol, market_cap_calculated, timestamp
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                        ON CONFLICT (signature) DO NOTHING
+                    ''', trade_params)
+                        
+                    # Batch update last_trade timestamps
+                        if mints:
+                            await conn.execute('''
+                                UPDATE tokens 
+                                SET last_trade = NOW() 
+                                WHERE mint = ANY($1)
+                            ''', mints)
+
+                    logger.debug(f"✅ Processed {len(trade_params)} trades in batch")
 
         except Exception as e:
-            logger.error(f"🚨 Trade worker error: {e}")
-            await asyncio.sleep(5)  # Slow retry on failure
+            logger.error(f"🚨 Trade worker error: {e}", exc_info=True)
+            await asyncio.sleep(5)
 
 async def get_total_supply(mint: str) -> float:
     """Get token supply from rugcheck table."""
@@ -191,30 +211,53 @@ async def get_total_supply(mint: str) -> float:
 
 async def backup_and_delete_token(mint: str, archived_at: datetime):
     """Backup and delete token data across all tables."""
-    async with _db_pool.acquire() as conn:
-        async with conn.transaction():
-            try:
-                await conn.execute('''
-                    INSERT INTO tokens_backup SELECT *, $1 FROM tokens WHERE mint = $2
-                ''', archived_at, mint)
-                
-                await conn.execute('''
-                    INSERT INTO trades_backup SELECT *, $1 FROM trades WHERE mint = $2
-                ''', archived_at, mint)
+    try:
+        async with _db_pool.acquire() as conn:
+            async with conn.transaction():
+                try:
+                    await conn.execute('''
+                        INSERT INTO tokens_backup SELECT *, $1 FROM tokens WHERE mint = $2
+                    ''', archived_at, mint)
+                    
+                    await conn.execute('''
+                        INSERT INTO trades_backup SELECT *, $1 FROM trades WHERE mint = $2
+                    ''', archived_at, mint)
 
-                await conn.execute('''
-                    INSERT INTO rugcheck_backup SELECT *, $1 FROM rugcheck WHERE mint = $2
-                ''', archived_at, mint)
+                    await conn.execute('''
+                        INSERT INTO rugcheck_backup SELECT *, $1 FROM rugcheck WHERE mint = $2
+                    ''', archived_at, mint)
 
-                await conn.execute("DELETE FROM tokens WHERE mint = $1", mint)
-                await conn.execute("DELETE FROM trades WHERE mint = $1", mint)
-                await conn.execute("DELETE FROM rugcheck WHERE mint = $1", mint)
+                    await conn.execute("DELETE FROM tokens WHERE mint = $1", mint)
+                    await conn.execute("DELETE FROM trades WHERE mint = $1", mint)
+                    await conn.execute("DELETE FROM rugcheck WHERE mint = $1", mint)
 
-                logger.info(f"✅ Backup & deletion completed for {mint}")
+                    logger.info(f"✅ Backup & deletion completed for {mint}")
 
-            except Exception as e:
-                logger.error(f"❌ Backup failed for {mint}: {e}")
-                raise
+                except Exception as e:
+                    logger.error(f"❌ Backup failed for {mint}: {e}", exc_info=True)
+                    raise
+    except Exception as e:
+        logger.error(f"🚨 backup_and_delete_token: {e}", exc_info=True)
+        await asyncio.sleep(5)
+
+    # Insert migration transactions
+async def insert_migration(data):
+    try:
+        async with _db_pool.acquire() as conn:
+            async with conn.transaction():
+                try:
+                    await conn.execute('''
+                        INSERT INTO migrations (signature, mint, txType, pool)
+                        VALUES (%s, %s, %s, %s)
+                    ''',data["signature"], data["mint"], data["txType"], data["pool"])
+
+                    logger.info(f"Stored migration event for token {data['mint']}")
+                except Exception as e:
+                    logger.error(f"❌ Storing migration for {data['mint']} failed: {e}", exc_info=True)
+                    raise
+    except Exception as e:
+        logger.error(f"🚨 Error on storing migration: {e}", exc_info=True)
+        await asyncio.sleep(5)
 
 async def _create_tables(conn):
     """Create PostgreSQL tables for the trading bot."""
@@ -260,6 +303,17 @@ async def _create_tables(conn):
         );
         CREATE INDEX IF NOT EXISTS idx_trades_mint ON trades(mint);
     """)
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS migrations (
+            id SERIAL PRIMARY KEY,
+            signature TEXT,
+            mint TEXT,
+            txType TEXT,
+            pool TEXT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
 
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS rugcheck (

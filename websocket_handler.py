@@ -11,7 +11,7 @@ import asyncpg
 import websockets
 
 from config import PUMPPORTAL_WS, INACTIVITY_PERIOD, MIN_MARKET_CAP
-from database import store_token, backup_and_delete_token, get_db
+from database import store_token, backup_and_delete_token, get_db, insert_migration
 from logger import logger
 from trading import has_active_position
 #from state import state
@@ -21,6 +21,7 @@ class WebSocketHandler:
         self.state = state 
         self.websocket = None
         self.tasks = []
+        self.last_update_times = {}
         self.trade_queue = Queue()  # 🚀 Trade queue to buffer incoming trades
 
     async def connect(self):
@@ -29,6 +30,7 @@ class WebSocketHandler:
         logger.info("Connected to PumpPortal WebSocket")
         await self.websocket.send(json.dumps({"method": "subscribeNewToken"}))
         await self.state.set_new_token_subscription(True)
+        await self.resume_subscriptions()  # One-time call on connect
         logger.debug("Subscribed to new token events")
 
     async def monitor_connection(self):
@@ -41,12 +43,12 @@ class WebSocketHandler:
                     await asyncio.wait_for(pong_waiter, timeout=10)
                     logger.debug("✅ WebSocket ping successful")
                 else:
-                    logger.warning("⚠ WebSocket connection lost, reconnecting...")
+                    logger.warning("⚠️ WebSocket connection lost, reconnecting...")
                     await self.reconnect()
             except (asyncio.TimeoutError, websockets.exceptions.ConnectionClosed):
                 logger.error("❌ WebSocket timeout or closure detected. Reconnecting...")
                 await self.reconnect()
-            await asyncio.sleep(60)  # Ping every x seconds
+            await asyncio.sleep(240)  # Ping every x seconds
 
     async def reconnect(self):
         """Handles reconnection logic and resubscription with exponential backoff."""
@@ -56,21 +58,23 @@ class WebSocketHandler:
             if self.websocket:
                 await self.websocket.close()
         except Exception as e:
-            logger.error(f"❌ Error while closing WebSocket: {e}")
+            logger.error(f"❌ Error while closing WebSocket: {e}" , exc_info=True)
 
         attempt = 1
         max_attempts = 5  # Limit retries to avoid infinite loops
 
         while attempt <= max_attempts:
+            logger.info(f"Reconnection attempt {attempt} starting")
             try:
                 await asyncio.sleep(attempt * 2)  # Exponential backoff (2, 4, 8, 16, 32 seconds)
                 async with (await get_db()).acquire() as conn:
                     await conn.execute("SELECT 1")  # Ensure DB connection is alive
                 await self.connect()  # Reconnect WebSocket
 
+                await self.resume_subscriptions()  # One-time call on connect
+
                 # Restart tasks after successful reconnection
                 self.tasks = [
-                    asyncio.create_task(self.resume_subscriptions()),
                     asyncio.create_task(self.message_handler()),
                     asyncio.create_task(self.unsubscribe_checker()),
                     asyncio.create_task(self.monitor_connection())
@@ -79,7 +83,7 @@ class WebSocketHandler:
                 logger.info(f"✅ WebSocket reconnected successfully after {attempt} attempts")
                 return  # Exit the function if reconnection succeeds
             except Exception as e:
-                logger.warning(f"⚠ WebSocket reconnection attempt {attempt} failed: {e}")
+                logger.warning(f"⚠️ WebSocket reconnection attempt {attempt} failed: {e}" , exc_info=True)
                 attempt += 1
 
         logger.error("❌ Failed to reconnect after multiple attempts. Initiating shutdown...")
@@ -112,63 +116,92 @@ class WebSocketHandler:
                         await self.state.add_subscription(data['mint'])
                         active_subs = list(await self.state.get_subscriptions())
                         logger.debug(f"✅ Subscribed to {data['mint']} --> {len(active_subs)} active subscriptions")
-                    elif 'tokenAmount' in data:
+
+                    elif data["txType"] == "migrate":                        
+                        await insert_migration(data)
+
+                    elif data["txType"] == "buy" or data["txType"] == "sell": 
+                        self.last_update_times[data['mint']] = datetime.now(timezone.utc)
                         await self.trade_queue.put(data) 
+                    else:
+                        logger.warning(f"WEBSOCKET - Unknown message type: {data}")                        
+
                 except Exception as e:
-                    logger.error(f"Message processing error: {e}")
+                    logger.error(f"Message processing error: {e}" , exc_info=True)
         except websockets.exceptions.ConnectionClosed:
             logger.error("WebSocket connection closed, reconnecting...")
             await self.reconnect()
+        except Exception as e:
+            logger.error(f"Unexpected error in message_handler: {e}", exc_info=True)
 
     async def resume_subscriptions(self):
-        """Limits active subscriptions to prevent memory leaks."""
-        async with (await get_db()).acquire() as conn:
-            try:
-                rows = await conn.fetch("SELECT mint FROM tokens WHERE is_active = TRUE LIMIT 100")  # Limit subscriptions
+        """Resubscribes to all active tokens from the database (one-time operation)."""
+        if not self.websocket or self.websocket.closed:
+            logger.warning("WebSocket not connected, skipping resubscriptions")
+            return
+
+        try:
+            async with (await get_db()).acquire() as conn:
+                rows = await conn.fetch("SELECT mint FROM tokens WHERE is_active = TRUE LIMIT 100")
                 for row in rows:
                     mint = row['mint']
                     if mint not in await self.state.get_subscriptions():
-                        try:
-                            await self.websocket.send(json.dumps({
-                                "method": "subscribeTokenTrade",
-                                "keys": [mint]
-                            }))
-                            await self.state.add_subscription(mint)
-                            logger.debug(f"✅ Resubscribed to {mint}")
-                        except Exception as e:
-                            logger.error(f"❌ Failed to subscribe to {mint}: {e}")
-            except Exception as e:
-                logger.error(f"resume_subscriptions error: {e}")
-                
-
+                        await self.websocket.send(json.dumps({
+                            "method": "subscribeTokenTrade",
+                            "keys": [mint]
+                        }))
+                        await self.state.add_subscription(mint)
+                        logger.debug(f"✅ Resubscribed to {mint}")
+        except Exception as e:
+            logger.error(f"❌ Failed to resume subscriptions: {e}", exc_info=True)
+            raise  # Let the task fail visibly for debugging
 
     async def unsubscribe_checker(self):
         """Periodically checks for inactive or risky tokens."""
-        await self.state.wait_or_interrupt(timeout=60) 
         while not await self.state.get_shutdown():
+            if not self.websocket or self.websocket.closed:
+                await asyncio.sleep(1)
+                continue
+
+            sol_price = await self.state.get_sol_price()
             try:
                 async with (await get_db()).acquire() as conn:
-                    cutoff = datetime.now(timezone.utc) - INACTIVITY_PERIOD
-                    rows = await conn.fetch("""
-                        SELECT mint FROM tokens 
-                        WHERE (is_active = FALSE OR last_trade < $1 OR marketCapSol < $2)
-                        AND mint NOT IN (SELECT mint FROM portfolio)
-                    """, cutoff, MIN_MARKET_CAP)
+                    async with conn.transaction():
+                        # Fetch tokens meeting unsubscribe criteria
+                        rows = await conn.fetch("""
+                            SELECT t.mint
+                            FROM tokens t
+                            INNER JOIN (
+                                SELECT mint, marketCapSol,
+                                    ROW_NUMBER() OVER (PARTITION BY mint ORDER BY timestamp DESC) AS rn
+                                FROM trades
+                            ) latest ON t.mint = latest.mint AND latest.rn = 1
+                            WHERE 
+                                (latest.marketCapSol * $1) < $2
+                                AND t.timestamp <= NOW() - INTERVAL '5 minutes'
+                                AND t.mint NOT IN (SELECT mint FROM portfolio WHERE status = 'active')
+                        """, sol_price, MIN_MARKET_CAP)
 
-                    for row in rows:
-                        mint = row['mint']
-                        async with self.state.lock:
-                            if mint in await self.state.get_subscriptions():
-                                await self.websocket.send(json.dumps({
-                                    "method": "unsubscribeTokenTrade",
-                                    "keys": [mint]
-                                }))
-                                await self.state.remove_subscription(mint)
-                        await backup_and_delete_token(mint, datetime.now(timezone.utc))
-                await self.state.wait_or_interrupt(timeout=30) 
+                        # Process unsubscribes
+                        for row in rows:
+                            mint = row['mint']
+                            async with self.state.lock:
+                                if mint in await self.state.get_subscriptions():
+                                    try:
+                                        await self.websocket.send(json.dumps({
+                                            "method": "unsubscribeTokenTrade",
+                                            "keys": [mint]
+                                        }))
+                                        await self.state.remove_subscription(mint)
+                                        await backup_and_delete_token(mint)
+                                    except Exception as e:
+                                        logger.error(f"Unsubscribe failed for {mint}: {e}", exc_info=True)
+                                        raise  # Ensure transaction rolls back on failure
+
+                await self.state.wait_or_interrupt(timeout=30)
             except Exception as e:
-                logger.error(f"Unsubscribe checker error: {e}")
-                await self.state.wait_or_interrupt(timeout=5) 
+                logger.error(f"Unsubscribe checker cycle failed: {e}", exc_info=True)
+                await self.state.wait_or_interrupt(timeout=5)
 
     async def unsubscribe_tokens_from_creator(self, creator: str):
         """Unsubscribes and removes tokens from a suspicious creator."""
@@ -186,9 +219,41 @@ class WebSocketHandler:
                             await self.state.remove_subscription(mint)
                         await backup_and_delete_token(mint, datetime.now(timezone.utc))
             except Exception as e:
-                logger.error(f"unsubscribe_tokens_from_creator error: {e}")
+                logger.error(f"unsubscribe_tokens_from_creator error: {e}", exc_info=True)
                 await self.state.wait_or_interrupt(timeout=5)
 
+    async def check_inactive_tokens(self):
+        while not await self.state.get_shutdown():  # Assuming state has a shutdown flag
+            try:
+                current_time = datetime.now(timezone.utc)
+                inactive_tokens = []
+                # Safely access shared state
+                async with self.state.lock:  # Assuming state has a lock for thread safety
+                    for mint, last_update in self.last_update_times.items():
+                        if current_time - last_update > INACTIVITY_PERIOD:
+                            inactive_tokens.append(mint)
+                
+                # Unsubscribe from inactive tokens
+                for mint in inactive_tokens:
+                    logger.info(f"Token {mint} inactive for over {INACTIVITY_PERIOD}. Unsubscribing...")
+                    try:
+                        await self.websocket.send(json.dumps({
+                            "method": "unsubscribeTokenTrade",
+                            "keys": [mint]
+                        }))
+                        async with self.state.lock:
+                            self.state.active_subscriptions.discard(mint)  # Remove from active subscriptions
+                            del self.last_update_times[mint]  # Remove from tracking
+                        logger.debug(f"✅ Unsubscribed from inactive token {mint}")
+                    except Exception as e:
+                        logger.error(f"❌ Failed to unsubscribe from {mint}: {e}" , exc_info=True)
+                
+                # Wait before the next check
+                await self.state.wait_or_interrupt(timeout=60)  # Check every 60 seconds
+            except Exception as e:
+                logger.error(f"Error in check_inactive_tokens: {e}" , exc_info=True)
+                await self.state.wait_or_interrupt(timeout=5)  # Brief pause on error
+                
     async def shutdown(self):
         """Graceful shutdown with explicit unsubscription from all events."""
         await self.state.set_shutdown(True)
@@ -198,17 +263,20 @@ class WebSocketHandler:
         if await self.state.get_new_token_subscription():
             try:
                 if self.websocket and self.websocket.open:
-                    await self.websocket.send(json.dumps({
-                        "method": "unsubscribeNewToken"
-                    }))
+                    try:
+                        await self.websocket.send(json.dumps({
+                            "method": "unsubscribeNewToken"
+                        }))
+                    except websockets.exceptions.ConnectionClosed:
+                        logger.warning("WebSocket already closed during new token unsubscribe")
                 await self.state.set_new_token_subscription(False)
                 logger.info("✅ Unsubscribed from new token events")
             except Exception as e:
-                logger.error(f"❌ Failed to unsubscribe new tokens: {e}")
+                logger.error(f"❌ Failed to unsubscribe new tokens: {e}" , exc_info=True)
 
         # Process active subscriptions individually
         active_subs = list(await self.state.get_subscriptions())
-        if active_subs:
+        if active_subs and self.websocket and self.websocket.open:
             logger.info(f"🔄 Unsubscribing from {len(active_subs)} tokens...")
             for mint in active_subs:
                 try:
@@ -218,11 +286,11 @@ class WebSocketHandler:
                     }))
                     logger.debug(f"Unsubscribed from {mint}")
                 except Exception as e:
-                    logger.error(f"❌ Failed to unsubscribe {mint}: {e}")
+                    logger.error(f"❌ Failed to unsubscribe {mint}: {e}" , exc_info=True)
                 finally:
                     await self.state.remove_subscription(mint)
                 # Short pause between unsubscribes if needed
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(0.1)
 
         # Close WebSocket properly
         if self.websocket:
@@ -230,7 +298,7 @@ class WebSocketHandler:
                 await self.websocket.close()
                 logger.info("🔌 WebSocket connection closed")
             except Exception as e:
-                logger.error(f"❌ WebSocket closure failed: {e}")
+                logger.error(f"❌ WebSocket closure failed: {e}" , exc_info=True)
 
         # Final cleanup
         logger.info("💾 Shutdown complete.")
@@ -239,7 +307,7 @@ class WebSocketHandler:
     def start(self):
         """Starts all WebSocket tasks."""
         return [
-            asyncio.create_task(self.resume_subscriptions(), name="ws_resume_subscriptions"),
+            #asyncio.create_task(self.resume_subscriptions(), name="ws_resume_subscriptions"),
             asyncio.create_task(self.message_handler(), name="ws_message_handler"),
             asyncio.create_task(self.monitor_connection(), name="ws_connection_monitor"),
             asyncio.create_task(self.unsubscribe_checker(), name="ws_unsubscribe_checker")

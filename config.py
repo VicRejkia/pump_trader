@@ -18,8 +18,9 @@ DEFAULT_SELL_TIP = 0.001       # Tip for selling in SOL
 # Database settings
 DB_URL = "postgresql://bot_user:tr4d1ng_b0t_us3r@localhost:5432/trading_bot?options=-c%20timezone%3Dutc"
 
+# UNSUBSCRIBING CONDITIONS
 INACTIVITY_PERIOD = timedelta(minutes=5)
-MIN_MARKET_CAP = 5.0           # Minimum market cap (in SOL)
+MIN_MARKET_CAP = 4000          # Minimum market cap (in USD)
 
 # Subscription tracking
 ACTIVE_SUBSCRIPTIONS = set()
@@ -28,6 +29,7 @@ NEW_TOKEN_SUBSCRIPTION = False
 # Token and API configurations
 TOTAL_SUPPLY = 1000000000   # Assumed total supply if not provided
 PUMPPORTAL_WS = "wss://pumpportal.fun/api/data"
+
 RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens"
 RUGCHECK_RATE_LIMIT = 10       # 10 requests per minute
 RUGCHECK_INTERVAL = 60         # 60 seconds interval for RugCheck checks

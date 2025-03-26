@@ -72,8 +72,6 @@ async def check_trading_opportunities(websocket, state):
                 await state.wait_or_interrupt(timeout=5) 
                 continue
 
-            logger.debug("Checking for trading opportunities...")
-
             async with (await get_db()).acquire() as conn:
                 async with conn.transaction():
                     try:
