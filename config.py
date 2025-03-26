@@ -44,3 +44,8 @@ DEFAULT_MARKETCAP_THRESHOLD = 10000
 MIN_VOLATILITY = 0.00000001       # Minimum volatility threshold
 MAX_DRAWDOWN_SOL = 10          # Maximum allowed 24h loss in SOL
 DRAWDOWN_CHECK_INTERVAL = 3600  # Drawdown check interval (seconds)
+
+# Logging
+LOGGER_NAME = "TradingBot"
+LOG_LEVEL = "INFO"
+LOG_FILE = "data/sniper.log"

@@ -30,7 +30,7 @@ async def update_sol_price(state):
                     await state.set_sol_price(new_price)
                     logger.info(f"✅ Updated Solana price: {new_price} USD")
                 else:
-                    logger.error(f"⚠️️ Error fetching Solana price: {response.status_code}")
+                    logger.error(f"⚠ Error fetching Solana price: {response.status_code}")
         except Exception as e:
             logger.error(f"❌ Exception fetching Solana price: {e}", exc_info=True)
         
@@ -43,7 +43,7 @@ async def refresh_rugcheck_queue(state):
         try:
             sol_price = await state.get_sol_price()
             if sol_price is None:
-                logger.warning("⚠️️ SOL_PRICE not updated yet; skipping RugCheck queue refresh.")
+                logger.warning("⚠ SOL_PRICE not updated yet; skipping RugCheck queue refresh.")
                 await state.wait_or_interrupt(timeout=5)
                 continue
 
@@ -142,7 +142,7 @@ async def fetch_rugcheck_data(mint: str) -> bool:
                 if response.status_code == 200:
                     data = response.json()
                     if not data or "score" not in data:
-                        logger.warning(f"⚠️️ RugCheck data incomplete for {mint}")
+                        logger.warning(f"⚠ RugCheck data incomplete for {mint}")
                         return False
 
                     token = data.get("token") or {}
@@ -196,7 +196,7 @@ async def fetch_rugcheck_data(mint: str) -> bool:
                             logger.debug(f"✅ RugCheck data stored for {mint}")
                             return True
                 else:
-                    logger.warning(f"⚠️️ RugCheck API returned {response.status_code} for {mint}")
+                    logger.warning(f"⚠ RugCheck API returned {response.status_code} for {mint}")
                     return False
         except Exception as e:
             logger.error(f"❌ Error fetching RugCheck data for {mint}: {e}", exc_info=True)
@@ -215,7 +215,7 @@ async def fetch_social_data(uri: str, token_name: str, token_symbol: str):
                 social_data["telegram"] = data.get("telegram")
                 social_data["twitter"] = data.get("twitter")
             else:
-                logger.warning(f"⚠️️ Failed to fetch social data for URI {uri}: {response.status_code}")
+                logger.warning(f"⚠ Failed to fetch social data for URI {uri}: {response.status_code}")
     except Exception as e:
         logger.error(f"❌ Error fetching social data for {uri}: {e}", exc_info=True)
     social_score = calculate_social_score(social_data, token_name, token_symbol)

@@ -68,7 +68,7 @@ async def check_trading_opportunities(websocket, state):
         try:
             sol_price = await state.get_sol_price()
             if sol_price is None:
-                logger.warning("SOL_PRICE not updated yet; skipping buy check.")
+                logger.warning("⚠ SOL_PRICE not updated yet; skipping buy check.")
                 await state.wait_or_interrupt(timeout=5) 
                 continue
 

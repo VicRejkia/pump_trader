@@ -147,7 +147,7 @@ async def trade_worker(state):
                             mint = data['mint']
                             if mint not in await state.get_subscriptions():
                                 logger.debug(f"Skipping unsubscribed token {mint}")
-                                # ⚠️️ Call task_done() here for skipped items
+                                # ⚠ Call task_done() here for skipped items
                                 queue.task_done()
                                 continue
                             
@@ -159,7 +159,7 @@ async def trade_worker(state):
                                 Decimal(str(data['tokenAmount'])),
                                 Decimal(str(data['solAmount'])),
                                 Decimal(str(data['solAmount'] / data['tokenAmount'])) if data['tokenAmount'] else 0,
-                                data['bondingCurveKey'],
+                                data.get('bondingCurveKey', ""),
                                 Decimal(str(data['vTokensInBondingCurve'])),
                                 Decimal(str(data['vSolInBondingCurve'])),
                                 Decimal(str(data['marketCapSol'])),
