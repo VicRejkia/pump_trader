@@ -14,12 +14,11 @@ class GlobalState:
 
     def __init__(self):
         """Initialize state variables."""
-        self.sol_price = None          # SOL price (updated hourly)
-        self.shutdown = False          # Global shutdown flag
         self.shutdown_event = asyncio.Event()  # 🚀 Interruptible sleep support
-        self.active_subscriptions = set()  # Active token subscriptions
-        self.new_token_subscription = False  # WebSocket subscription status
         self.websocket_handler = None  # 🚀 Store WebSocketHandler instance
+        self.new_token_subscription = False  # WebSocket subscription status
+        self.active_subscriptions = set()  # Active token subscriptions
+        self.sol_price = None          # SOL price (updated hourly)
 
         # API rate limiting
         self.request_timestamps = deque(maxlen=10)  # API request tracker
@@ -31,13 +30,17 @@ class GlobalState:
         self.lock = asyncio.Lock()  # General state lock
         self.db_write_lock = asyncio.Lock()  # Database write lock
 
-    @staticmethod
-    async def get_instance():
-        """Returns a singleton instance of GlobalState."""
-        async with GlobalState._lock:
-            if GlobalState._instance is None:
-                GlobalState._instance = GlobalState()
-        return GlobalState._instance
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+    
+    async def wait_for_shutdown(self):
+        await self.shutdown_event.wait()
+
+    def trigger_shutdown(self):
+        self.shutdown_event.set()
     
     async def set_websocket_handler(self, handler):
         async with self.lock:
@@ -51,19 +54,7 @@ class GlobalState:
     async def get_sol_price(self) -> float:
         async with self.lock:
             return self.sol_price
-
-    ## 🚀 Shutdown Control
-    async def set_shutdown(self, status: bool):
-        """Set shutdown flag and notify all sleeping tasks."""
-        async with self.lock:
-            self.shutdown = status
-            if status:
-                self.shutdown_event.set()  # 🚀 Wake up all sleeping tasks immediately
-
-    async def get_shutdown(self) -> bool:
-        async with self.lock:
-            return self.shutdown
-
+        
     async def wait_or_interrupt(self, timeout: float):
         """Waits for a given timeout, but exits early if shutdown is triggered."""
         # logger.debug(f"wait_or_interrupt: waiting for {timeout} seconds")

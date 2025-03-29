@@ -46,6 +46,15 @@ async def store_token(data: dict) -> bool:
             async with _db_pool.acquire() as conn:
                 async with conn.transaction():
                     try:
+                        # === Check previously unsubscription from this token ===
+                        row = await conn.fetchrow(
+                                "SELECT mint FROM tokens_backup WHERE mint = $1",
+                                data['mint']
+                            )
+                        if row:
+                            logger.debug(f"Skip token subscription due to already backed up token: {data['mint']}")
+                            return 'duplicate'
+                            
                         # === Creator wallet check ===
                         creator = data.get('traderPublicKey')
                         if creator:
@@ -73,7 +82,7 @@ async def store_token(data: dict) -> bool:
 
                             if token_count > 2:
                                 logger.info(f"🤬 Suspicious creator {creator} for token {data['mint']} with {token_count} tokens in 7 days")
-                                return False
+                                return 'creator_suspicious'
                         
                         from api import calculate_market_cap
                         market_cap_calculated = calculate_market_cap(
@@ -105,19 +114,19 @@ async def store_token(data: dict) -> bool:
                             datetime.now(timezone.utc)
                         )
 
-                        return True
+                        return'stored'
                     except Exception as e:
                         logger.error(f"Token storage failed for {data.get('mint')}: {e}", exc_info=True)
-                        return False
+                        return 'error'
         except (asyncpg.PostgresConnectionError, asyncpg.InterfaceError) as e:
             logger.error(f"DB connection error (attempt {attempt+1}): {e}")
             await asyncio.sleep(1)
-    return False
+    return 'error'
 
 @validate_timezone
 async def trade_worker(state):
     """Processes trade messages from queue and writes them in batches to the database."""
-    while not await state.get_shutdown():
+    while not state.shutdown_event.is_set():
         try:
             queue = state.websocket_handler.trade_queue  # ✅ Get trade queue
             BATCH_SIZE = 50  # 🚀 Number of trades per batch
@@ -142,15 +151,14 @@ async def trade_worker(state):
 
             async with _db_pool.acquire() as conn:
                 async with conn.transaction():
-                    for data in batch:
+                    for data in batch:                        
+                        mint = data['mint']
+                        if mint not in await state.get_subscriptions():
+                            logger.debug(f"Skipping unsubscribed token {mint}")
+                            # ⚠ Call task_done() here for skipped items
+                            queue.task_done()
+                            continue
                         try:
-                            mint = data['mint']
-                            if mint not in await state.get_subscriptions():
-                                logger.debug(f"Skipping unsubscribed token {mint}")
-                                # ⚠ Call task_done() here for skipped items
-                                queue.task_done()
-                                continue
-                            
                             # Process trade
                             trade_params.append((
                                 data['signature'],

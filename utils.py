@@ -63,12 +63,11 @@ async def play_sell_tp_sound_async():
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, play_sell_tp_sound)
 
-def format_buy_order_log(mint: str, price_per_token: float, tokens_bought: float, market_cap: float) -> str:
+def format_buy_order_log(state, mint: str, price_per_token: float, tokens_bought: float, market_cap: float, sol_price: float) -> str:
     """Formats the log message for a buy order."""
-    from config import SOL_PRICE
-    if SOL_PRICE:
-        price_usd = price_per_token * SOL_PRICE
-        market_cap_usd = market_cap * SOL_PRICE
+    if sol_price:
+        price_usd = price_per_token * sol_price
+        market_cap_usd = market_cap * sol_price
         return (
             f"★★★ BUY Order ★★★\n"
             f"│ Token: {mint}\n"

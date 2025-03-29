@@ -13,7 +13,7 @@ from config import (SOL_TO_BUY, DEFAULT_STOP_LOSS, DEFAULT_TRAILING_TP, DEFAULT_
 from database import get_total_supply, get_db
 from api import calculate_market_cap
 from logger import logger
-from utils import play_buy_opportunity_sound, play_sell_sl_sound_async, play_sell_tp_sound_async, calculate_social_score
+from utils import play_buy_opportunity_sound, play_sell_sl_sound_async, play_sell_tp_sound_async, calculate_social_score, format_buy_order_log
 
 async def calculate_volatility(mint: str) -> float:
     """Calculates price volatility over the last hour"""
@@ -64,7 +64,7 @@ async def has_active_position(mint: str) -> bool:
 
 async def check_trading_opportunities(websocket, state):
     """Check buy opportunities"""
-    while not await state.get_shutdown():
+    while not state.shutdown_event.is_set():
         try:
             sol_price = await state.get_sol_price()
             if sol_price is None:
@@ -173,6 +173,7 @@ async def check_trading_opportunities(websocket, state):
                             tokens_bought, DEFAULT_BUY_FEE, DEFAULT_BUY_TIP, tokens_bought, 
                             price_per_token_sol * (1 - DEFAULT_STOP_LOSS), price_per_token_sol, datetime.now(timezone.utc))
 
+                        logger.info(format_buy_order_log(state, mint=mint, price_per_token=price_per_token_sol, tokens_bought=tokens_bought, market_cap=latest_market_cap_sol, sol_price=sol_price))
                         asyncio.create_task(play_buy_opportunity_sound())
 
             await state.wait_or_interrupt(timeout=3)
