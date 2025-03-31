@@ -4,6 +4,11 @@ Configuration constants and settings for the trading bot.
 
 from datetime import timedelta
 
+""" Configuration constants and settings for the trading bot. """
+# PumpPortal
+WS_HOST: str = "wss://pumpportal.fun/api/data"
+MAX_SUBSCRIPTION_BATCH: int = 100  # For batch unsubscription
+
 # Trading configuration
 SOL_TO_BUY = 0.1
 DEFAULT_STOP_LOSS = 0.45       # 45% stop loss threshold
@@ -47,5 +52,6 @@ DRAWDOWN_CHECK_INTERVAL = 3600  # Drawdown check interval (seconds)
 
 # Logging
 LOGGER_NAME = "TradingBot"
-LOG_LEVEL = "INFO"
-LOG_FILE = "data/sniper.log"
+LOG_LEVEL_CONSOLE: str = "DEBUG"
+LOG_LEVEL_FILE: str = "DEBUG"
+LOG_STORAGE_PATH = "data"

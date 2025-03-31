@@ -118,3 +118,10 @@ def calculate_social_score(social_data: dict, token_name: str, token_symbol: str
             total_penalty += 10
             
     return min(max(total_penalty, 0), 100)
+
+def calculate_market_cap(vTokensInBondingCurve: float, vSolInBondingCurve: float, totalSupply: float) -> float:
+    """Calculates the market cap of a token using bonding curve data."""
+    if vTokensInBondingCurve <= 0 or totalSupply <= 0:
+        return 0.0
+    price_per_token = vSolInBondingCurve / vTokensInBondingCurve
+    return price_per_token * totalSupply

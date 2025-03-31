@@ -1,10 +1,6 @@
 import asyncio
 import signal
-import logging
-
-# Configure logging
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger("AsyncApp")
+from logger import logger
 
 # Global shutdown event that tasks can wait on
 shutdown_event = asyncio.Event()

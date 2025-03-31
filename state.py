@@ -13,12 +13,16 @@ class GlobalState:
     _lock = asyncio.Lock()  # Ensures only one instance is created
 
     def __init__(self):
+        if GlobalState._instance is not None:
+            raise Exception("This class is a singleton!")
+
         """Initialize state variables."""
         self.shutdown_event = asyncio.Event()  # 🚀 Interruptible sleep support
         self.websocket_handler = None  # 🚀 Store WebSocketHandler instance
         self.new_token_subscription = False  # WebSocket subscription status
-        self.active_subscriptions = set()  # Active token subscriptions
+        self.active_token_subscriptions = set()  # Active token subscriptions
         self.sol_price = None          # SOL price (updated hourly)
+        self.db_client = None          # Database client instance
 
         # API rate limiting
         self.request_timestamps = deque(maxlen=10)  # API request tracker
@@ -35,16 +39,20 @@ class GlobalState:
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
-    
+
     async def wait_for_shutdown(self):
         await self.shutdown_event.wait()
 
     def trigger_shutdown(self):
         self.shutdown_event.set()
-    
+
     async def set_websocket_handler(self, handler):
         async with self.lock:
             self.websocket_handler = handler
+
+    async def set_db_client(self, client):
+        async with self.lock:
+            self.db_client = client
 
     ## 🚀 SOL Price Management
     async def set_sol_price(self, price: float):
@@ -54,7 +62,7 @@ class GlobalState:
     async def get_sol_price(self) -> float:
         async with self.lock:
             return self.sol_price
-        
+
     async def wait_or_interrupt(self, timeout: float):
         """Waits for a given timeout, but exits early if shutdown is triggered."""
         # logger.debug(f"wait_or_interrupt: waiting for {timeout} seconds")
@@ -65,17 +73,17 @@ class GlobalState:
             pass  # This is expected if the timeout expires normally
 
     ## 🚀 Subscription Management
-    async def add_subscription(self, mint: str):
+    async def add_token_subscription(self, mint: str):
         async with self.lock:
-            self.active_subscriptions.add(mint)
+            self.active_token_subscriptions.add(mint)
 
-    async def remove_subscription(self, mint: str):
+    async def remove_token_subscription(self, mint: str):
         async with self.lock:
-            self.active_subscriptions.discard(mint)
+            self.active_token_subscriptions.discard(mint)
 
-    async def get_subscriptions(self):
+    async def get_token_subscriptions(self):
         async with self.lock:
-            return set(self.active_subscriptions)
+            return set(self.active_token_subscriptions)
 
     ## 🚀 WebSocket Subscription Flag
     async def set_new_token_subscription(self, status: bool):
