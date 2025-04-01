@@ -100,16 +100,17 @@ class WebSocketHandler:
                         continue
 
                     # Handle new token events
-                    if data['txType'] == "create":
+                    if data.get('txType') == "create": # Use .get() for safety
+                        mint = data.get('mint', 'N/A') # Get mint for logging
+                        logger.debug(f"➕ Received 'create' event for token: {mint}") # Log reception immediately
                         try:
                             token_stored = await self.db_client.insert_token(data)
                             if not token_stored:
-                                #logger.error(f"Token {data.get('mint')} failed to store (business rule violation).")
-                                continue
+                                logger.warning(f"⚠️ Token {mint} not stored (business rule violation in insert_token). Skipping subscription.")
+                                continue # Skip if DB insert logic rejects it
                         except Exception as e:
-                            logger.error(f"Unexpected error storing token {data.get('mint')}: {e}", exc_info=True)
-                            # Handle or retry as needed
-                            continue
+                            logger.error(f"❌ DB Error storing new token {mint}: {e}", exc_info=True)
+                            continue # Skip on DB error
 
                         await self.websocket.send(json.dumps({
                             "method": "subscribeTokenTrade",
