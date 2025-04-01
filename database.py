@@ -125,7 +125,7 @@ class DatabaseClient:
                     try:
                         await conn.execute('''
                             INSERT INTO migrations (signature, mint, txType, pool)
-                            VALUES (%s, %s, %s, %s)
+                            VALUES ($1, $2, $3, $4)
                         ''',data["signature"], data["mint"], data["txType"], data["pool"])
 
                         logger.info(f"Stored migration event for token {data['mint']}")
@@ -222,7 +222,7 @@ class DatabaseClient:
                         await conn.execute("DELETE FROM trades WHERE mint = $1", mint)
                         await conn.execute("DELETE FROM rugcheck WHERE mint = $1", mint)
 
-                        logger.info(f"✅ Backup & deletion completed for {mint}")
+                        #logger.info(f"✅ Backup & deletion completed for {mint}")
 
                     except Exception as e:
                         logger.error(f"❌ Backup failed for {mint}: {e}", exc_info=True)

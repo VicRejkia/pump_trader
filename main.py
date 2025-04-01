@@ -4,12 +4,13 @@ import signal
 import traceback
 import config
 from database import DatabaseClient
-# from api import update_sol_price, rugcheck_worker, refresh_rugcheck_queue
+# from api import rugcheck_worker, refresh_rugcheck_queue # Removed update_sol_price from here if it existed
 # from trading import check_trading_opportunities
 from websocket_handler import WebSocketHandler
 from logger import setup_logging, logger, rotate_log_file
 from state import GlobalState
 from trade_processor import trade_worker # Import the trade worker
+from sol_price_fetcher import update_sol_price # Import the SOL price fetcher
 
 class TradingBot:
     def __init__(self, cleanup: bool = False):
@@ -52,13 +53,13 @@ class TradingBot:
         logger.info("⏹ Shutdown initiated. Cleaning up resources...")
         try:
             await asyncio.wait_for(self.ws_handler.shutdown(), timeout=60)
-            logger.info("WebSocket shutdown complete.")
+            logger.info("🛑 WebSocket shutdown complete.")
         except Exception as e:
             logger.error(f"WebSocket shutdown error: {e}", exc_info=True)
         
         for task in self.tasks:
             task.cancel()
-            logger.debug(f"Cancelling task: {task.get_name()}")
+            logger.debug(f"🛑 Cancelling task: {task.get_name()}")
 
         await self.db_client.pool.close()
         logger.info("🔌 Database connection closed.")
@@ -67,7 +68,7 @@ class TradingBot:
         for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
-        logger.info("Shutdown complete.")
+        logger.info("🛑 Shutdown complete.")
 
     async def main(self):
         """Main execution loop of the bot."""
@@ -87,7 +88,8 @@ class TradingBot:
         await self.state.set_websocket_handler(self.ws_handler)
         
         self.tasks = [
-            asyncio.create_task(self.monitor_tasks(), name="task_monitor")
+            asyncio.create_task(self.monitor_tasks(), name="task_monitor"),
+            asyncio.create_task(update_sol_price(self.state), name="sol_price_updater") # Start the SOL price updater
         ]
         self.tasks.extend(self.ws_handler.start())
         self.tasks.append(asyncio.create_task(trade_worker(), name="trade_worker")) # Start the trade worker

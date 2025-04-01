@@ -161,6 +161,7 @@ class WebSocketHandler:
 
     async def unsubscribe_checker(self):
         """Periodically checks for inactive or risky tokens."""
+        logger.debug("Starting unsubscribe checker")
         while not self.state.shutdown_event.is_set():
             if not self.websocket or self.websocket.closed:
                 await asyncio.sleep(1)
@@ -174,22 +175,48 @@ class WebSocketHandler:
             try:
                 rows = await self.db_client.get_tokens_to_unsubscribe(sol_price, MIN_MARKET_CAP)
 
-                # Process unsubscribes
-                for row in rows:
-                    mint = row['mint']
-                    async with self.state.lock:
-                        if mint in await self.state.get_token_subscriptions():
-                            try:
-                                await self.websocket.send(json.dumps({
-                                    "method": "unsubscribeTokenTrade",
-                                    "keys": [mint]
-                                }))
-                                await self.state.remove_token_subscriptions(mint)
-                                await self.db_client.backup_and_delete_token(mint)
-                            except Exception as e:
-                                logger.error(f"Unsubscribe failed for {mint}: {e}", exc_info=True)
-                                raise  # Ensure transaction rolls back on failure
+                # Identify candidate mints from DB
+                candidate_mints = [row['mint'] for row in rows]
+                mints_to_process_batch = []
 
+                # --- Critical section: Check and remove from shared state ---
+                if candidate_mints:
+                    async with self.state.lock:
+                        for mint in candidate_mints:
+                            if mint in self.state.active_token_subscriptions:
+                                # Remove from shared state immediately while holding lock
+                                self.state.active_token_subscriptions.discard(mint)
+                                mints_to_process_batch.append(mint) # Add to batch for I/O ops
+                # --- End Critical section ---
+
+                # --- Perform slow I/O operations *outside* the lock ---
+                if mints_to_process_batch:
+                    # 1. Send batch unsubscribe message
+                    try:
+                        if self.websocket and self.websocket.open:
+                            logger.info(f"👋 Unsubscribing batch of {len(mints_to_process_batch)} tokens...")
+                            await self.websocket.send(json.dumps({
+                                "method": "unsubscribeTokenTrade",
+                                "keys": mints_to_process_batch
+                            }))
+                        else:
+                            logger.warning(f"WebSocket closed, cannot send batch unsubscribe for {len(mints_to_process_batch)} tokens.")
+                    except Exception as e:
+                        logger.error(f"Failed to send batch unsubscribe message: {e}", exc_info=True)
+                        # Note: Even if sending fails, we proceed to DB cleanup as the tokens
+                        # are already removed from the in-memory active set.
+
+                    # 2. Backup and delete from DB individually
+                    deleted_count = 0
+                    for mint in mints_to_process_batch:
+                        try:
+                            await self.db_client.backup_and_delete_token(mint, datetime.now(timezone.utc))
+                            deleted_count += 1
+                        except Exception as e:
+                            logger.error(f"DB backup/delete failed for {mint}: {e}", exc_info=True)
+                            # Log error and continue with the next mint
+
+                    logger.info(f"💾 Processed unsubscribe batch: {deleted_count}/{len(mints_to_process_batch)} tokens backed up and cleaned from DB.")
                 await self.state.wait_or_interrupt(timeout=30)
             except Exception as e:
                 logger.error(f"Unsubscribe checker cycle failed: {e}", exc_info=True)
@@ -314,6 +341,6 @@ class WebSocketHandler:
         """Starts all WebSocket tasks."""
         return [
             asyncio.create_task(self.message_handler(), name="ws_message_handler"),
-            #asyncio.create_task(self.monitor_connection(), name="ws_connection_monitor"),
-            #asyncio.create_task(self.unsubscribe_checker(), name="ws_unsubscribe_checker")
+            asyncio.create_task(self.monitor_connection(), name="ws_connection_monitor"),
+            asyncio.create_task(self.unsubscribe_checker(), name="ws_unsubscribe_checker")
         ]
