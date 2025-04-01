@@ -128,7 +128,7 @@ class DatabaseClient:
                             VALUES ($1, $2, $3, $4)
                         ''',data["signature"], data["mint"], data["txType"], data["pool"])
 
-                        logger.info(f"Stored migration event for token {data['mint']}")
+                        logger.debug(f"Stored migration event for token {data['mint']}")
                     except Exception as e:
                         logger.error(f"❌ Storing migration for {data['mint']} failed: {e}", exc_info=True)
                         raise
@@ -222,7 +222,7 @@ class DatabaseClient:
                         await conn.execute("DELETE FROM trades WHERE mint = $1", mint)
                         await conn.execute("DELETE FROM rugcheck WHERE mint = $1", mint)
 
-                        #logger.info(f"✅ Backup & deletion completed for {mint}")
+                        logger.debug(f"🧹 Backup & deletion completed for {mint}")
 
                     except Exception as e:
                         logger.error(f"❌ Backup failed for {mint}: {e}", exc_info=True)
@@ -241,7 +241,7 @@ class DatabaseClient:
                     ]
                     for table in tables_to_cleanup:
                         await conn.execute(f"TRUNCATE TABLE {table} RESTART IDENTITY CASCADE;")
-                        logger.info("Truncated table %s", table)
+                        logger.info("🧹 Truncated table %s", table)
                     # Backup tables can be handled similarly if needed.
                 except Exception as e:
                     logger.exception("Error during database cleanup: %s", e)

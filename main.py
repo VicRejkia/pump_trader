@@ -11,7 +11,8 @@ from logger import setup_logging, logger, rotate_log_file
 from state import GlobalState
 from trade_processor import trade_worker # Import the trade worker
 from sol_price_api import update_sol_price # Corrected import for SOL price fetcher
-from rugcheck_api import Rugcheck # Import the new Rugcheck class
+from rugcheck import Rugcheck # Import the Rugcheck class
+from socials_processor import SocialsProcessor # Import the SocialsProcessor class
 
 class TradingBot:
     def __init__(self, cleanup: bool = False):
@@ -94,6 +95,7 @@ class TradingBot:
         self.register_signal_handlers()
         await self.db_client.connect()
         await self.state.set_db_client(self.db_client) # Store db_client in GlobalState
+        await self.db_client.init_db()
         
         if self.cleanup:
             logger.info("🗑️ Starting database cleanup...")
@@ -105,8 +107,10 @@ class TradingBot:
         await self.ws_handler.connect()
         await self.state.set_websocket_handler(self.ws_handler) # Store ws_handler in GlobalState
 
-        # Instantiate Rugcheck after dependencies are ready
-        rugchecker = Rugcheck(self.state, self.db_client, self.ws_handler)
+        # Instantiate Processors after dependencies are ready
+        socials_proc = SocialsProcessor(self.state, self.db_client)
+        # Pass socials_proc to Rugcheck constructor (will require updating Rugcheck.__init__)
+        rugchecker = Rugcheck(self.state, self.db_client, self.ws_handler, socials_proc)
 
         # Start background tasks
         self.tasks = [

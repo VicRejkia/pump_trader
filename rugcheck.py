@@ -12,21 +12,24 @@ from decimal import Decimal
 
 from config import (
     RUGCHECK_RATE_LIMIT, RUGCHECK_API, RUGCHECK_INTERVAL,
-    RUGCHECK_SCORE_THRESHOLD # Import the new threshold
+    RUGCHECK_SCORE_THRESHOLD # Import the threshold
 )
 from database import DatabaseClient
 from logger import logger
 from state import GlobalState
-from websocket_handler import WebSocketHandler # Assuming websocket_handler.py defines WebSocketHandler
+from websocket_handler import WebSocketHandler
+from socials_processor import SocialsProcessor # Import the SocialsProcessor
 
 class Rugcheck:
-    def __init__(self, state: GlobalState, db_client: DatabaseClient, websocket_handler: WebSocketHandler):
+    # Accept SocialsProcessor instance during initialization
+    def __init__(self, state: GlobalState, db_client: DatabaseClient, websocket_handler: WebSocketHandler, socials_processor: SocialsProcessor):
         self.state = state
         self.db_client = db_client
         self.websocket_handler = websocket_handler
         # Rate limiter: RUGCHECK_RATE_LIMIT calls per RUGCHECK_INTERVAL seconds
         self.limiter = AsyncLimiter(max_rate=RUGCHECK_RATE_LIMIT, time_period=RUGCHECK_INTERVAL)
         self.queue = self.state.get_rugcheck_queue() # Use the queue from GlobalState
+        self.socials_processor = socials_processor # Store socials processor instance
 
     async def _refresh_queue(self):
         """Refreshes the RugCheck priority queue based on token volume."""
@@ -70,7 +73,7 @@ class Rugcheck:
                         priority = -float(volume)
                         # logger.debug(f"🔄 Refreshing Queue: Token {mint}, Volume: {volume:.4f} SOL, Priority: {priority}")
                         await self.queue.put((priority, mint))
-                    logger.info(f"🔄 Refreshed RugCheck queue with {len(rows)} tokens.")
+                    logger.debug(f"🔄 Refreshed RugCheck queue with {len(rows)} tokens.")
                 else:
                     logger.debug("✅ No active tokens found needing RugCheck data during refresh.")
             return True # Indicate refresh completed
@@ -211,12 +214,12 @@ class Rugcheck:
         # --- Score Check and Deactivation ---
         score = fetched_data.get("score")
         if score is not None and score > RUGCHECK_SCORE_THRESHOLD:
-            logger.warning(f"🚨 High RugCheck score ({score} > {RUGCHECK_SCORE_THRESHOLD}) for {mint}. Deactivating and unsubscribing.")
+            logger.debug(f"🚨 High RugCheck score ({score} > {RUGCHECK_SCORE_THRESHOLD}) for {mint}. Deactivating and unsubscribing.")
             try:
                 # 1. Deactivate in DB
                 async with self.db_client.pool.acquire() as conn:
                     await conn.execute("UPDATE tokens SET is_active = FALSE WHERE mint = $1", mint)
-                logger.info(f"🔒 Deactivated token {mint} in DB due to high score.")
+                logger.debug(f"🔒 Deactivated token {mint} in DB due to high score.")
 
                 # 2. Unsubscribe via WebSocket (if connected and subscribed)
                 unsubscribed_ws = False
@@ -234,7 +237,7 @@ class Rugcheck:
                                 "method": "unsubscribeTokenTrade",
                                 "keys": [mint]
                             })), timeout=5.0)
-                            logger.info(f"👋 Sent unsubscribe request for high-score token {mint}.")
+                            logger.debug(f"👋 Sent unsubscribe request for high-score token {mint}.")
                             unsubscribed_ws = True
                         except asyncio.TimeoutError:
                             logger.error(f"⏳ Timeout sending unsubscribe for high-score token {mint}.")
@@ -246,7 +249,7 @@ class Rugcheck:
                 # 3. Backup and Delete (Optional - consider if needed immediately)
                 # This was in the original code, but might be redundant if unsubscribe_checker handles it
                 await self.db_client.backup_and_delete_token(mint, datetime.now(timezone.utc))
-                logger.info(f"🧹 Backed up and deleted high-score token {mint}.")
+                logger.debug(f"🧹 Backed up and deleted high-score token {mint}.")
 
                 # Even if unsubscribe fails, we consider processing successful as it's deactivated in DB
                 return True # Indicate success (deactivation handled)
@@ -259,6 +262,16 @@ class Rugcheck:
         else:
             # Score is acceptable or not present
             logger.debug(f"✅ RugCheck score OK for {mint} (Score: {score})")
+
+            # --- Process Socials AFTER successful RugCheck (if score is OK) ---
+            if self.socials_processor:
+                logger.debug(f"Triggering socials processing for {mint} after successful RugCheck.")
+                # Run social processing in the background to avoid blocking the rugcheck worker
+                asyncio.create_task(self.socials_processor.process_token(mint))
+            else:
+                # This case should ideally not happen if initialized correctly in main.py
+                logger.warning("Socials processor not available in Rugcheck class.")
+
             return True # Indicate success
 
     async def _worker(self):
@@ -272,7 +285,7 @@ class Rugcheck:
                 # --- Refresh Queue Periodically ---
                 current_time = asyncio.get_event_loop().time()
                 if self.queue.empty() or (current_time - last_refresh_time > refresh_interval):
-                    logger.info("🔄 Triggering RugCheck queue refresh...")
+                    logger.debug("🔄 Triggering RugCheck queue refresh...")
                     refreshed = await self._refresh_queue()
                     if refreshed:
                         last_refresh_time = current_time

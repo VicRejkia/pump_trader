@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS trades (
     vTokensInBondingCurve NUMERIC,
     vSolInBondingCurve NUMERIC,
     marketCapSol NUMERIC,
+    market_cap_calculated NUMERIC,
     timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 

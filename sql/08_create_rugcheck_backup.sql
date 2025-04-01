@@ -1,6 +1,6 @@
 -- Create the rugcheck_backup table with an extra column for the backup timestamp
 CREATE TABLE IF NOT EXISTS rugcheck_backup (
-    mint TEXT,
+    mint TEXT PRIMARY KEY REFERENCES tokens(mint) ON DELETE CASCADE,
     tokenProgram TEXT,
     creator TEXT,
     token_mintAuthority TEXT,
@@ -17,6 +17,20 @@ CREATE TABLE IF NOT EXISTS rugcheck_backup (
     mintAuthority TEXT,
     risks TEXT,
     score INTEGER,
-    last_checked TIMESTAMP,
-    timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    fileMeta_description TEXT,
+    fileMeta_name TEXT,
+    fileMeta_symbol TEXT,
+    fileMeta_image TEXT,
+    totalMarketLiquidity NUMERIC,
+    totalLPProviders INTEGER,
+    rugged BOOLEAN,
+    tokenType TEXT,
+    transferFee_pct NUMERIC,
+    transferFee_maxAmount NUMERIC,
+    transferFee_authority TEXT,
+    graphInsidersDetected INTEGER,
+    detectedAt TIMESTAMP WITH TIME ZONE,
+    full_data TEXT,
+    last_checked TIMESTAMP WITH TIME ZONE,
+    backup_timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );

@@ -42,7 +42,7 @@ class WebSocketHandler:
                     logger.debug("🔍 Sending WebSocket ping...")
                     pong_waiter = await self.websocket.ping()
                     await asyncio.wait_for(pong_waiter, timeout=10)
-                    logger.debug("✅ WebSocket ping successful")
+                    logger.debug("📡 WebSocket ping successful")
                 else:
                     logger.warning("⚠️ WebSocket connection lost, reconnecting...")
                     await self.reconnect()
@@ -96,7 +96,7 @@ class WebSocketHandler:
                     
                     # Handle messages
                     if 'message' in data:
-                        logger.info(f"📡 WebSocket confirmation: {data['message']}")
+                        logger.debug(f"📡 WebSocket confirmation: {data['message']}")
                         continue
 
                     # Handle new token events
@@ -106,7 +106,7 @@ class WebSocketHandler:
                         try:
                             token_stored = await self.db_client.insert_token(data)
                             if not token_stored:
-                                logger.warning(f"⚠️ Token {mint} not stored (business rule violation in insert_token). Skipping subscription.")
+                                #logger.warning(f"⚠️ Token {mint} not stored (business rule violation in insert_token). Skipping subscription.")
                                 continue # Skip if DB insert logic rejects it
                         except Exception as e:
                             logger.error(f"❌ DB Error storing new token {mint}: {e}", exc_info=True)
@@ -128,7 +128,7 @@ class WebSocketHandler:
                         self.last_update_times[data['mint']] = datetime.now(timezone.utc)
                         await self.trade_queue.put(data) 
                     else:
-                        logger.warning(f"WEBSOCKET - Unknown message type: {data}")                        
+                        logger.warning(f"❔ WEBSOCKET - Unknown message type: {data}")                        
 
                 except Exception as e:
                     logger.error(f"Message processing error: {e}" , exc_info=True)
@@ -154,14 +154,13 @@ class WebSocketHandler:
                         "keys": [mint]
                     }))
                     await self.state.add_token_subscription(mint)
-                    logger.debug(f"✅ Resubscribed to {mint}")
+                    logger.debug(f"🔄 Resubscribed to {mint}")
         except Exception as e:
             logger.error(f"❌ Failed to resume subscriptions: {e}", exc_info=True)
             raise  # Let the task fail visibly for debugging
 
     async def unsubscribe_checker(self):
         """Periodically checks for inactive or risky tokens."""
-        logger.debug("Starting unsubscribe checker")
         while not self.state.shutdown_event.is_set():
             if not self.websocket or self.websocket.closed:
                 await asyncio.sleep(1)
@@ -194,7 +193,7 @@ class WebSocketHandler:
                     # 1. Send batch unsubscribe message
                     try:
                         if self.websocket and self.websocket.open:
-                            logger.info(f"👋 Unsubscribing batch of {len(mints_to_process_batch)} tokens...")
+                            logger.debug(f"👋 Unsubscribing batch of {len(mints_to_process_batch)} tokens...")
                             await self.websocket.send(json.dumps({
                                 "method": "unsubscribeTokenTrade",
                                 "keys": mints_to_process_batch
@@ -216,7 +215,7 @@ class WebSocketHandler:
                             logger.error(f"DB backup/delete failed for {mint}: {e}", exc_info=True)
                             # Log error and continue with the next mint
 
-                    logger.info(f"🧹 Processed unsubscribe batch: {deleted_count}/{len(mints_to_process_batch)} tokens backed up and cleaned from DB.")
+                    logger.debug(f"🧹 Processed unsubscribe batch: {deleted_count}/{len(mints_to_process_batch)} tokens backed up and cleaned from DB.")
                 await self.state.wait_or_interrupt(timeout=30)
             except Exception as e:
                 logger.error(f"Unsubscribe checker cycle failed: {e}", exc_info=True)
@@ -254,7 +253,7 @@ class WebSocketHandler:
                 
                 # Unsubscribe from inactive tokens
                 for mint in inactive_tokens:
-                    logger.info(f"Token {mint} inactive for over {INACTIVITY_PERIOD}. Unsubscribing...")
+                    logger.info(f"💀 Token {mint} inactive for over {INACTIVITY_PERIOD}. Unsubscribing...")
                     try:
                         await self.websocket.send(json.dumps({
                             "method": "unsubscribeTokenTrade",

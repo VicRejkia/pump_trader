@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS tokens (
     telegram TEXT,
     twitter TEXT,
     socials_score INTEGER,
+    socials_last_checked TIMESTAMP,
     is_active BOOLEAN DEFAULT TRUE,
     last_trade TIMESTAMP,
     timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP

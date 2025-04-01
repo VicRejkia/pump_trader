@@ -5,5 +5,5 @@ CREATE TABLE IF NOT EXISTS migrations_backup (
             txType TEXT,
             pool TEXT,
             timestamp TIMESTAMP,
-            timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            backup_timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );

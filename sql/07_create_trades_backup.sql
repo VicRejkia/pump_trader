@@ -10,8 +10,9 @@ CREATE TABLE IF NOT EXISTS trades_backup (
     vTokensInBondingCurve NUMERIC,
     vSolInBondingCurve NUMERIC,
     marketCapSol NUMERIC,
+    market_cap_calculated NUMERIC,
     timestamp TIMESTAMP,
-    timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    backup_timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Optional index on backup_timestamp
