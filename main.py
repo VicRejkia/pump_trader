@@ -4,13 +4,14 @@ import signal
 import traceback
 import config
 from database import DatabaseClient
-# from api import rugcheck_worker, refresh_rugcheck_queue # Removed update_sol_price from here if it existed
+# Old rugcheck imports removed
 # from trading import check_trading_opportunities
 from websocket_handler import WebSocketHandler
 from logger import setup_logging, logger, rotate_log_file
 from state import GlobalState
 from trade_processor import trade_worker # Import the trade worker
-from sol_price_fetcher import update_sol_price # Import the SOL price fetcher
+from sol_price_api import update_sol_price # Corrected import for SOL price fetcher
+from rugcheck_api import Rugcheck # Import the new Rugcheck class
 
 class TradingBot:
     def __init__(self, cleanup: bool = False):
@@ -38,13 +39,30 @@ class TradingBot:
         try:
             while not self.state.shutdown_event.is_set():
                 try:
-                    queue_size = self.state.get_rugcheck_queue().qsize()
-                    task_status = [f"{task.get_name()}: {'done' if task.done() else 'running'}" for task in self.tasks]
-                    logger.debug(f"📟 Task Monitor: Queue size: {queue_size}, Tasks: {', '.join(task_status)}")
+                    rug_queue_size = self.state.get_rugcheck_queue().qsize()
+                    tokens_subscribed = list(await self.state.get_token_subscriptions())
+                    task_status = [f"{task.get_name()}: {'done' if task.done() else 'running'}\n" for task in self.tasks]
+                    #logger.debug(f"📟 Task Monitor: Queue size: {rug_queue_size}, Tasks: {', '.join(task_status)}")
+
+                    logger.debug(
+                        f"\n"
+                        f"┌────────────────────────────────────\n"
+                        f"│📟 Task Monitor 📟\n"
+                        f"│────────────────────────────────────\n"
+                        f"│ Subscibed tokens: {len(tokens_subscribed)}\n"
+                        f"│ RugCheck Queue size: {rug_queue_size}\n"
+                        f"│ Active tasks: {len([t for t in self.tasks if not t.done()])}/{len(self.tasks)}\n"
+                        f"│ Tasks:\n"
+                        f"├── {'├── '.join(task_status)}"
+                        f"└────────────────────────────────────\n"
+                    )
+            
+
+
                     await asyncio.sleep(5)
                 except Exception as e:
                     logger.error(f"Monitor task error: {e}\n{traceback.format_exc()}")
-                await asyncio.sleep(15)
+                await asyncio.sleep(60)
         except asyncio.CancelledError:
             logger.info("Monitor task shutting down")
 
@@ -85,22 +103,26 @@ class TradingBot:
             rotate_log_file()
         
         await self.ws_handler.connect()
-        await self.state.set_websocket_handler(self.ws_handler)
-        
+        await self.state.set_websocket_handler(self.ws_handler) # Store ws_handler in GlobalState
+
+        # Instantiate Rugcheck after dependencies are ready
+        rugchecker = Rugcheck(self.state, self.db_client, self.ws_handler)
+
+        # Start background tasks
         self.tasks = [
             asyncio.create_task(self.monitor_tasks(), name="task_monitor"),
-            asyncio.create_task(update_sol_price(self.state), name="sol_price_updater") # Start the SOL price updater
+            asyncio.create_task(update_sol_price(self.state), name="sol_price_updater"),
+            asyncio.create_task(trade_worker(), name="trade_worker"),
+            rugchecker.start() # Start the rugcheck worker task
         ]
-        self.tasks.extend(self.ws_handler.start())
-        self.tasks.append(asyncio.create_task(trade_worker(), name="trade_worker")) # Start the trade worker
+        self.tasks.extend(self.ws_handler.start()) # Start WebSocket handler tasks
         
         try:
             logger.info("🚀 Trading bot started successfully. Listening for market updates...")
             await self.state.wait_for_shutdown()
         except Exception as e:
-            logger.error(f"Main encountered an error: {e}")
-        finally:
-            await self.shutdown()
+            logger.error(f"Main encountered an error: {e}", exc_info=True) # Added exc_info for better debugging
+        # Removed await self.shutdown() from here - it's handled in the main execution block's finally clause
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PumpTrader Bot")

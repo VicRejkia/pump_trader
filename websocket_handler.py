@@ -15,7 +15,6 @@ from database import DatabaseClient
 from logger import logger
 # from trading import has_active_position
 from state import GlobalState
-#from state import state
 
 class WebSocketHandler:
     def __init__(self, db_client: DatabaseClient):
@@ -216,7 +215,7 @@ class WebSocketHandler:
                             logger.error(f"DB backup/delete failed for {mint}: {e}", exc_info=True)
                             # Log error and continue with the next mint
 
-                    logger.info(f"💾 Processed unsubscribe batch: {deleted_count}/{len(mints_to_process_batch)} tokens backed up and cleaned from DB.")
+                    logger.info(f"🧹 Processed unsubscribe batch: {deleted_count}/{len(mints_to_process_batch)} tokens backed up and cleaned from DB.")
                 await self.state.wait_or_interrupt(timeout=30)
             except Exception as e:
                 logger.error(f"Unsubscribe checker cycle failed: {e}", exc_info=True)

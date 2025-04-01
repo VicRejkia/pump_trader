@@ -38,6 +38,7 @@ PUMPPORTAL_WS = "wss://pumpportal.fun/api/data"
 RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens"
 RUGCHECK_RATE_LIMIT = 10       # 10 requests per minute
 RUGCHECK_INTERVAL = 60         # 60 seconds interval for RugCheck checks
+RUGCHECK_SCORE_THRESHOLD = 1000 # Score above which a token is considered high risk and deactivated
 
 # SOL price configuration
 SOL_PRICE_API_URL = "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd"
