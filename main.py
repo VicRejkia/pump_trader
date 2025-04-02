@@ -2,10 +2,10 @@ import argparse
 import asyncio
 import signal
 import traceback
-import config
+import config # Import the config module
+# Removed load_config import
 from database import DatabaseClient
-# Old rugcheck imports removed
-# from trading import check_trading_opportunities
+from trading import TradingManager # Import the refactored manager
 from websocket_handler import WebSocketHandler
 from logger import setup_logging, logger, rotate_log_file
 from state import GlobalState
@@ -23,6 +23,8 @@ class TradingBot:
         self.db_client = DatabaseClient()
         self.ws_handler = WebSocketHandler(db_client=self.db_client)
         self.tasks = []
+        self.config = {} # Initialize config dict
+        self.trading_manager = None # Initialize trading manager
 
     def register_signal_handlers(self):
         """Register signal handlers for graceful shutdown."""
@@ -93,6 +95,32 @@ class TradingBot:
         """Main execution loop of the bot."""
         setup_logging()
         self.register_signal_handlers()
+
+        # Create configuration dictionary from config module attributes
+        try:
+            # Explicitly list required config keys to avoid issues
+            required_keys = [
+                'SOL_TO_BUY', 'DEFAULT_STOP_LOSS', 'DEFAULT_TRAILING_TP',
+                'DEFAULT_BUY_FEE', 'DEFAULT_BUY_TIP', 'DEFAULT_SELL_FEE',
+                'DEFAULT_SELL_TIP', 'DEFAULT_VOLUME_THRESHOLD',
+                'DEFAULT_MARKETCAP_THRESHOLD', 'MIN_VOLATILITY',
+                'DEFAULT_RUGCHECK_SCORE_THRESHOLD', 'DEFAULT_SOCIAL_SCORE_THRESHOLD',
+                'DEFAULT_TIME_INTERVALL', 'FIRST_SELL_PERCENT', 'PROFIT_MARGIN'
+            ]
+            self.config = {key: getattr(config, key) for key in required_keys if hasattr(config, key)}
+            # Verify all required keys were found
+            if len(self.config) != len(required_keys):
+                 missing_keys = [key for key in required_keys if key not in self.config]
+                 logger.error(f"❌ Missing required configuration keys in config.py: {missing_keys}")
+                 return # Cannot proceed without full config
+            logger.info("⚙️ Configuration created successfully from module.")
+        except AttributeError as e:
+             logger.error(f"❌ Failed to create configuration dictionary: Missing attribute in config.py - {e}", exc_info=True)
+             return
+        except Exception as e:
+            logger.error(f"❌ Failed to create configuration dictionary: {e}", exc_info=True)
+            return # Cannot proceed without config
+
         await self.db_client.connect()
         await self.state.set_db_client(self.db_client) # Store db_client in GlobalState
         await self.db_client.init_db()
@@ -111,13 +139,16 @@ class TradingBot:
         socials_proc = SocialsProcessor(self.state, self.db_client)
         # Pass socials_proc to Rugcheck constructor (will require updating Rugcheck.__init__)
         rugchecker = Rugcheck(self.state, self.db_client, self.ws_handler, socials_proc)
+        self.trading_manager = TradingManager(self.db_client.pool, self.config, self.state) # Instantiate TradingManager
 
         # Start background tasks
         self.tasks = [
             asyncio.create_task(self.monitor_tasks(), name="task_monitor"),
             asyncio.create_task(update_sol_price(self.state), name="sol_price_updater"),
             asyncio.create_task(trade_worker(), name="trade_worker"),
-            rugchecker.start() # Start the rugcheck worker task
+            rugchecker.start(), # Start the rugcheck worker task
+            asyncio.create_task(self.run_buy_checks(), name="buy_opportunity_checker"), # Add buy check task
+            asyncio.create_task(self.run_sell_checks(), name="sell_opportunity_checker") # Add sell check task
         ]
         self.tasks.extend(self.ws_handler.start()) # Start WebSocket handler tasks
         
@@ -128,6 +159,35 @@ class TradingBot:
             logger.error(f"Main encountered an error: {e}", exc_info=True) # Added exc_info for better debugging
         # Removed await self.shutdown() from here - it's handled in the main execution block's finally clause
 
+    async def run_buy_checks(self):
+        """Periodically check for buy opportunities."""
+        logger.info("📈 Starting buy opportunity checker...")
+        while not self.state.shutdown_event.is_set():
+            try:
+                await self.trading_manager.check_trading_opportunities()
+                # Use a configurable interval later, e.g., self.config.get('BUY_CHECK_INTERVAL', 10)
+                await asyncio.sleep(10) # Check every 10 seconds
+            except asyncio.CancelledError:
+                logger.info("Buy checker task cancelled.")
+                break
+            except Exception as e:
+                logger.error(f"❌ Error in buy checker loop: {e}", exc_info=True)
+                await asyncio.sleep(30) # Longer sleep on error
+
+    async def run_sell_checks(self):
+        """Periodically check for sell opportunities."""
+        logger.info("📉 Starting sell opportunity checker...")
+        while not self.state.shutdown_event.is_set():
+            try:
+                await self.trading_manager.check_sell_opportunities()
+                # Use a configurable interval later, e.g., self.config.get('SELL_CHECK_INTERVAL', 5)
+                await asyncio.sleep(5) # Check every 5 seconds
+            except asyncio.CancelledError:
+                logger.info("Sell checker task cancelled.")
+                break
+            except Exception as e:
+                logger.error(f"❌ Error in sell checker loop: {e}", exc_info=True)
+                await asyncio.sleep(30) # Longer sleep on error
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PumpTrader Bot")
     parser.add_argument("--cleanup", action="store_true", help="Clean up database before starting the bot.")

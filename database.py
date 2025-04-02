@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import asyncio
 import asyncpg
 from logger import logger
-from config import DB_URL
+from config import DB_URL, TOTAL_SUPPLY
 
 class DatabaseClient:
     """Client to manage database connections and operations."""
@@ -199,6 +199,15 @@ class DatabaseClient:
         """
         async with self.pool.acquire() as conn:
             return await conn.fetch(query, limit)
+        
+    async def get_total_supply(self, mint: str):
+        """Fetch the total supply of a token."""
+        query = """
+            SELECT total_supply FROM rugcheck WHERE mint = $1
+        """
+        async with self.pool.acquire() as conn:
+            result = await conn.fetchrow(query, mint)
+            return result['total_supply'] if result else TOTAL_SUPPLY
 
     async def backup_and_delete_token(self, mint: str, archived_at: datetime):
         """Backup core table data to a corresponding backup table."""

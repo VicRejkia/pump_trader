@@ -20,6 +20,11 @@ from state import GlobalState
 from websocket_handler import WebSocketHandler
 from socials_processor import SocialsProcessor # Import the SocialsProcessor
 
+# --- Configuration for Retries ---
+MAX_FETCH_ATTEMPTS = 2 # Allow 2 attempts (initial + 1 retry)
+DEPRIORITIZED_PRIORITY = float('inf') # Very low priority for requeueing after max attempts
+RUGCHECK_REQUEST_TIMEOUT = 20.0 # Increased timeout for RugCheck API calls
+
 class Rugcheck:
     # Accept SocialsProcessor instance during initialization
     def __init__(self, state: GlobalState, db_client: DatabaseClient, websocket_handler: WebSocketHandler, socials_processor: SocialsProcessor):
@@ -30,6 +35,7 @@ class Rugcheck:
         self.limiter = AsyncLimiter(max_rate=RUGCHECK_RATE_LIMIT, time_period=RUGCHECK_INTERVAL)
         self.queue = self.state.get_rugcheck_queue() # Use the queue from GlobalState
         self.socials_processor = socials_processor # Store socials processor instance
+        self.fetch_attempts = {} # Track fetch attempts for tokens not found or timing out
 
     async def _refresh_queue(self):
         """Refreshes the RugCheck priority queue based on token volume."""
@@ -66,14 +72,21 @@ class Rugcheck:
                 logger.debug(f"🔍 Found {len(rows)} active tokens missing RugCheck data for refresh.")
 
                 if rows:
+                    tokens_added = 0 # Initialize counter
                     for row in rows:
                         mint = row["mint"]
                         volume = row["volume"] or Decimal(0)
-                        # Higher volume = lower negative number = higher priority
                         priority = -float(volume)
-                        # logger.debug(f"🔄 Refreshing Queue: Token {mint}, Volume: {volume:.4f} SOL, Priority: {priority}")
-                        await self.queue.put((priority, mint))
-                    logger.debug(f"🔄 Refreshed RugCheck queue with {len(rows)} tokens.")
+                        current_attempts = self.fetch_attempts.get(mint, 0)
+
+                        # Only add if not already deprioritized (reached max attempts)
+                        if current_attempts < MAX_FETCH_ATTEMPTS:
+                             await self.queue.put((priority, mint))
+                             tokens_added += 1
+                        # else:
+                        #      logger.debug(f"Token {mint} previously reached max fetch attempts ({current_attempts}), not adding during refresh.")
+
+                    logger.debug(f"🔄 Refreshed RugCheck queue. Added {tokens_added} tokens (current size: {self.queue.qsize()}).")
                 else:
                     logger.debug("✅ No active tokens found needing RugCheck data during refresh.")
             return True # Indicate refresh completed
@@ -82,19 +95,27 @@ class Rugcheck:
             logger.error(f"❌ Critical error in _refresh_queue: {e}", exc_info=True)
             return False # Indicate refresh failed
 
-    async def _fetch_and_store_data(self, mint: str) -> dict | None:
-        """Fetches RugCheck data from the API and stores it in the database."""
+    async def _fetch_and_store_data(self, mint: str) -> dict | None | str:
+        """
+        Fetches RugCheck data from the API and stores it in the database.
+        Returns:
+            - dict: The fetched data on success.
+            - 'NOT_FOUND': If the API returns 404.
+            - 'TIMEOUT': If the API request times out.
+            - None: On other errors (invalid JSON, DB error, other HTTP errors, etc.).
+        """
         url = f"{RUGCHECK_API}/{mint}/report"
+        response = None # Define response outside try block
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client: # Increased timeout slightly
-                logger.debug(f"📡 Fetching RugCheck for {mint}")
+            async with httpx.AsyncClient(timeout=RUGCHECK_REQUEST_TIMEOUT) as client:
+                logger.debug(f"📡 Fetching RugCheck for {mint} from {url}")
                 response = await client.get(url)
 
             if response.status_code == 200:
                 data = response.json()
                 if not data or "score" not in data: # Basic validation
                     logger.warning(f"⚠ RugCheck data incomplete or invalid for {mint}. Response: {data}")
-                    return None
+                    return None # Treat incomplete data as a general error for now
 
                 # --- Store data in DB ---
                 try:
@@ -183,35 +204,54 @@ class Rugcheck:
 
             elif response.status_code == 404:
                 logger.warning(f"❓ RugCheck API returned 404 (Not Found) for {mint}. Maybe too new?")
-                # Consider storing a minimal record indicating 'not found' or 'pending'
-                # For now, treat as failure to fetch valid data.
-                return None
+                return 'NOT_FOUND' # Specific status for 404
             else:
                 logger.warning(f"⚠ RugCheck API returned {response.status_code} for {mint}. Response: {response.text}")
-                return None # Indicate failure
+                return None # Indicate general API failure
 
         except httpx.TimeoutException:
-            logger.error(f"⏳ Timeout fetching RugCheck data for {mint} from {url}")
-            return None
+            logger.error(f"⏳ Timeout fetching RugCheck data for {mint} after {RUGCHECK_REQUEST_TIMEOUT}s")
+            return 'TIMEOUT' # Specific status for timeout
         except httpx.RequestError as req_err:
             logger.error(f"❌ HTTP Request Error fetching RugCheck for {mint}: {req_err}", exc_info=True)
             return None
         except json.JSONDecodeError as json_err:
-            logger.error(f"❌ JSON Decode Error for RugCheck response {mint}: {json_err}. Response: {response.text}")
+            # Need access to response variable here, ensure it's defined even on error
+            response_text = "N/A"
+            if response: # Check if response object exists
+                try:
+                    response_text = response.text
+                except Exception:
+                    pass # Handle potential issues accessing response.text
+            logger.error(f"❌ JSON Decode Error for RugCheck response {mint}: {json_err}. Response: {response_text}")
             return None
         except Exception as e:
             logger.error(f"❌ Unexpected Error fetching RugCheck data for {mint}: {e}", exc_info=True)
             return None
 
-    async def _process_token(self, mint: str) -> bool:
-        """Fetches, stores, and processes RugCheck data for a single token, including score check."""
-        fetched_data = await self._fetch_and_store_data(mint)
+    async def _process_token(self, mint: str) -> bool | str:
+        """
+        Fetches, stores, and processes RugCheck data for a single token.
+        Returns:
+            - True: If processing was successful (data fetched/stored, score checked, deactivation handled).
+            - 'NOT_FOUND': If the fetch attempt resulted in a 404 from the API.
+            - 'TIMEOUT': If the fetch attempt resulted in a timeout.
+            - False: If there was another error during fetching, storing, or processing.
+        """
+        fetch_result = await self._fetch_and_store_data(mint)
 
-        if fetched_data is None:
-            logger.warning(f"Processing failed for {mint}: Could not fetch/store RugCheck data.")
-            return False # Indicate failure for potential requeueing
+        if fetch_result == 'NOT_FOUND':
+            return 'NOT_FOUND' # Propagate the specific status
+        if fetch_result == 'TIMEOUT':
+            return 'TIMEOUT' # Propagate the specific status
+
+        if fetch_result is None:
+            logger.warning(f"Processing failed for {mint}: Could not fetch/store RugCheck data due to an error (not 404 or timeout).")
+            return False # Indicate general failure
 
         # --- Score Check and Deactivation ---
+        # --- Score Check and Deactivation (only if data was fetched successfully) ---
+        fetched_data = fetch_result # We know it's a dict here
         score = fetched_data.get("score")
         if score is not None and score > RUGCHECK_SCORE_THRESHOLD:
             logger.debug(f"🚨 High RugCheck score ({score} > {RUGCHECK_SCORE_THRESHOLD}) for {mint}. Deactivating and unsubscribing.")
@@ -221,15 +261,14 @@ class Rugcheck:
                     await conn.execute("UPDATE tokens SET is_active = FALSE WHERE mint = $1", mint)
                 logger.debug(f"🔒 Deactivated token {mint} in DB due to high score.")
 
-                # 2. Unsubscribe via WebSocket (if connected and subscribed)
+                # 2. Unsubscribe via WebSocket
                 unsubscribed_ws = False
                 if self.websocket_handler.websocket and self.websocket_handler.websocket.open:
-                     # Check if we are actually subscribed before trying to unsubscribe
                     is_subscribed = False
                     async with self.state.lock:
                          is_subscribed = mint in self.state.active_token_subscriptions
                          if is_subscribed:
-                             self.state.active_token_subscriptions.discard(mint) # Remove optimistically
+                             self.state.active_token_subscriptions.discard(mint)
 
                     if is_subscribed:
                         try:
@@ -246,8 +285,7 @@ class Rugcheck:
                     else:
                          logger.debug(f"Token {mint} already removed from active subscriptions, skipping WS unsubscribe.")
 
-                # 3. Backup and Delete (Optional - consider if needed immediately)
-                # This was in the original code, but might be redundant if unsubscribe_checker handles it
+                # 3. Backup and Delete
                 await self.db_client.backup_and_delete_token(mint, datetime.now(timezone.utc))
                 logger.debug(f"🧹 Backed up and deleted high-score token {mint}.")
 
@@ -315,43 +353,75 @@ class Rugcheck:
                 # --- Rate Limit Check ---
                 async with self.limiter:
                     # --- Process Token ---
+                    task_completed = False # Flag to ensure task_done is called correctly
                     try:
                         # Check if token still exists and is active before fetching
                         async with self.db_client.pool.acquire() as conn:
                             is_active = await conn.fetchval("SELECT is_active FROM tokens WHERE mint = $1", mint)
 
                         if is_active is None:
-                            logger.debug(f"Token {mint} no longer exists in tokens table. Skipping RugCheck.")
+                            logger.debug(f"Token {mint} no longer exists. Skipping RugCheck.")
                             self.queue.task_done()
+                            task_completed = True
+                            self.fetch_attempts.pop(mint, None) # Clear attempts
                             continue
                         if not is_active:
                              logger.debug(f"Token {mint} is no longer active. Skipping RugCheck.")
                              self.queue.task_done()
+                             task_completed = True
+                             self.fetch_attempts.pop(mint, None) # Clear attempts
                              continue
 
-                        # Fetch, store, check score, potentially deactivate/unsubscribe
-                        success = await self._process_token(mint)
+                        # Fetch, store, check score, etc.
+                        process_status = await self._process_token(mint)
 
-                        if not success:
-                            logger.warning(f"🔄 RugCheck processing failed for {mint}. Requeuing might be needed if it was temporary.")
-                            # Simple Requeue Logic (Consider adding max retries)
-                            # await self.queue.put((priority, mint)) # Be careful with infinite requeues
-                        else:
+                        # --- Handle Retry/Deprioritize Logic ---
+                        if process_status in ['NOT_FOUND', 'TIMEOUT']:
+                            status_reason = "404 (Not Found)" if process_status == 'NOT_FOUND' else "Timeout"
+                            current_attempts = self.fetch_attempts.get(mint, 0) + 1
+                            self.fetch_attempts[mint] = current_attempts
+                            logger.warning(f"🔄 RugCheck API failed for {mint} ({status_reason}). Attempt {current_attempts}/{MAX_FETCH_ATTEMPTS}.")
+
+                            if current_attempts < MAX_FETCH_ATTEMPTS:
+                                # Requeue with original priority for retry
+                                await self.queue.put((priority, mint))
+                                logger.info(f"Retrying {mint} later (attempt {current_attempts}).")
+                            else:
+                                # Max attempts reached, requeue with very low priority
+                                await self.queue.put((DEPRIORITIZED_PRIORITY, mint))
+                                logger.warning(f"Max fetch attempts ({MAX_FETCH_ATTEMPTS}) reached for {mint} due to {status_reason}. Deprioritizing.")
+                                # Keep attempt count high so refresh doesn't re-add with high priority
+
+                        elif process_status is False:
+                            # General processing error (not 404 or timeout)
+                            logger.warning(f"📉 RugCheck processing failed for {mint} (not 404/timeout). Requeuing with original priority.")
+                            await self.queue.put((priority, mint)) # Requeue
+                            self.fetch_attempts.pop(mint, None) # Clear attempts counter
+
+                        else: # process_status is True (Success)
                             logger.debug(f"✅ Successfully processed RugCheck for {mint}.")
+                            self.fetch_attempts.pop(mint, None)
+
+                        # Mark task as done regardless of outcome (requeueing handles retries)
+                        self.queue.task_done()
+                        task_completed = True
 
                     except Exception as proc_err:
                         logger.error(f"❌ Unexpected error processing token {mint}: {proc_err}", exc_info=True)
-                        # Consider requeueing or moving to a dead-letter queue
-                        # await self.queue.put((priority, mint)) # Example requeue
+                        # Requeue on unexpected errors during processing block
+                        await self.queue.put((priority, mint))
+                        # Clear fetch attempts counter as it was an unexpected error
+                        self.fetch_attempts.pop(mint, None)
 
                     finally:
-                         # Ensure task_done is called even if processing fails
-                         try:
-                            self.queue.task_done()
-                         except ValueError:
-                             logger.warning(f"Task_done already called for item related to {mint}?")
-                         except Exception as td_err:
-                             logger.error(f"Error calling task_done for {mint}: {td_err}")
+                         # Ensure task_done is called even if processing fails, unless already called
+                         if not task_completed:
+                             try:
+                                self.queue.task_done()
+                             except ValueError:
+                                 logger.warning(f"Task_done already called for {mint} in finally block?")
+                             except Exception as td_err:
+                                 logger.error(f"Error calling task_done for {mint} in finally block: {td_err}")
 
 
             except asyncio.CancelledError:

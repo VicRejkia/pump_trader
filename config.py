@@ -13,6 +13,7 @@ MAX_SUBSCRIPTION_BATCH: int = 100  # For batch unsubscription
 SOL_TO_BUY = 0.1
 DEFAULT_STOP_LOSS = 0.45       # 45% stop loss threshold
 DEFAULT_TRAILING_TP = 0.75     # 75% trailing take profit threshold
+FINAL_TP = 1.5                 # 150% final take profit threshold
 FIRST_SELL_PERCENT = 0.3       # Sell 30% of tokens initially
 PROFIT_MARGIN = 0.10           # 10% profit target
 DEFAULT_BUY_FEE = 0.001        # Fee for buying in SOL
@@ -44,10 +45,12 @@ RUGCHECK_SCORE_THRESHOLD = 1000 # Score above which a token is considered high r
 SOL_PRICE_API_URL = "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd"
 
 # Trading thresholds
-DEFAULT_SCORE_THRESHOLD = 581
+DEFAULT_RUGCHECK_SCORE_THRESHOLD = 600
+DEFAULT_SOCIAL_SCORE_THRESHOLD = 50
 DEFAULT_VOLUME_THRESHOLD = 10000
 DEFAULT_MARKETCAP_THRESHOLD = 10000
-MIN_VOLATILITY = 0.00000001       # Minimum volatility threshold
+MIN_VOLATILITY = 0.05       # Minimum volatility threshold in %
+DEFAULT_TIME_INTERVALL = 10 # Time interval for checking volatility, volume and marketcap in minutes
 MAX_DRAWDOWN_SOL = 10          # Maximum allowed 24h loss in SOL
 DRAWDOWN_CHECK_INTERVAL = 3600  # Drawdown check interval (seconds)
 

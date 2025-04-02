@@ -36,6 +36,55 @@ DISALLOWED_WEBSITE_DOMAINS = {
     "kick.com",
     # Add other generic platforms if needed
 }
+ALLOWED_NEWS_WEBSITE_DOMAINS = {
+    "bbc.com",
+    "cnn.com",
+    "reuters.com",
+    "apnews.com",  # Associated Press
+    "nytimes.com",  # The New York Times
+    "washingtonpost.com",
+    "theguardian.com",
+    "bloomberg.com",
+    "forbes.com",
+    "wsj.com",  # The Wall Street Journal
+    "ft.com",  # Financial Times
+    "npr.org",  # National Public Radio
+    "cnbc.com",
+    "abcnews.go.com",
+    "nbcnews.com",
+    "cbsnews.com",
+    "latimes.com",  # Los Angeles Times
+    "usatoday.com",
+    "politico.com",
+    "aljazeera.com",
+    "theatlantic.com",
+    "newsweek.com",
+    "time.com",
+    "economist.com",
+    "sky.com",  # Sky News
+    "independent.co.uk",
+    "telegraph.co.uk",
+    "dailymail.co.uk",
+    "mirror.co.uk",
+    "huffpost.com",  # Huffington Post
+    "vox.com",
+    "slate.com",
+    "buzzfeednews.com",
+    "axios.com",
+    "thehill.com",
+    "scmp.com",  # South China Morning Post
+    "japantimes.co.jp",
+    "hindustantimes.com",
+    "indiatoday.in",
+    "timesofindia.indiatimes.com",
+    "straitstimes.com",
+    "smh.com.au",  # Sydney Morning Herald
+    "theage.com.au",
+    "globalnews.ca",
+    "cbc.ca",  # Canadian Broadcasting Corporation
+    "bitcointalk.org",
+    "cnbcnews.us",
+}
 
 class SocialsProcessor:
     def __init__(self, state: GlobalState, db_client: DatabaseClient):
@@ -166,25 +215,25 @@ class SocialsProcessor:
         # --- Website Check (using verification results) ---
         website = social_data.get("website") or social_data.get("homepage") or social_data.get("url") or social_data.get("external_url") # Consolidate check
         if not website:
-            total_penalty += 30  # Major penalty for no website
+            total_penalty += 40  # Major penalty for no website
             logger.debug("Social Score Penalty: +30 (No Website URL provided)")
         elif not isinstance(website, str):
-            total_penalty += 30 # Invalid type
+            total_penalty += 35 # Invalid type
             logger.debug(f"Social Score Penalty: +30 (Invalid Website type: {type(website)})")
         elif verification_results is None:
             # Should not happen if website URL exists, but handle defensively
-            total_penalty += 25 # Penalty if verification wasn't run
+            total_penalty += 35 # Penalty if verification wasn't run
             logger.warning(f"Social Score Penalty: +25 (Website verification skipped for {website})")
         elif verification_results['error']:
             # Add penalty based on error type
             if "Invalid URL" in verification_results['error']:
-                total_penalty += 25
+                total_penalty += 35
             elif "Timeout" in verification_results['error']:
-                total_penalty += 20
+                total_penalty += 35
             elif "HTTP Error" in verification_results['error']:
-                total_penalty += 15 # Maybe temporary server issue
+                total_penalty += 35 # Maybe temporary server issue
             else: # Other request errors, unexpected errors
-                total_penalty += 20
+                total_penalty += 35
             logger.debug(f"Social Score Penalty: +{total_penalty} (Website verification failed: {verification_results['error']})")
         else:
             # Website is reachable, apply finer penalties/bonuses
@@ -200,11 +249,11 @@ class SocialsProcessor:
                 parsed = urlparse(website)
                 domain = parsed.netloc.lower().replace('www.', '') # Normalize domain
                 if token_name and (domain.startswith(token_name) or token_name in domain):
-                    total_penalty -= 5 # Small bonus
-                    logger.debug(f"Social Score Bonus: -5 (Website domain '{domain}' matches name '{token_name}')")
+                    total_penalty -= 10 # Small bonus
+                    logger.debug(f"Social Score Bonus: -10 (Website domain '{domain}' matches name '{token_name}')")
                 elif token_symbol and (domain.startswith(token_symbol) or token_symbol in domain):
-                    total_penalty -= 5 # Small bonus
-                    logger.debug(f"Social Score Bonus: -5 (Website domain '{domain}' matches symbol '{token_symbol}')")
+                    total_penalty -= 10 # Small bonus
+                    logger.debug(f"Social Score Bonus: -10 (Website domain '{domain}' matches symbol '{token_symbol}')")
             except Exception:
                 pass # Ignore parsing errors for bonus check
  
@@ -215,6 +264,19 @@ class SocialsProcessor:
                 if any(parsed_domain == disallowed or parsed_domain.endswith('.' + disallowed) for disallowed in DISALLOWED_WEBSITE_DOMAINS):
                     total_penalty += 10 # Significant penalty
                     logger.debug(f"Social Score Penalty: +10 (Website URL points to common platform: {parsed_domain})")
+            except Exception:
+                pass # Ignore parsing errors for this check too 
+
+            # Bonus if website is from major news outlet
+            try:
+                parsed_domain = urlparse(website).netloc.lower().replace('www.', '')
+                # Check against base domains
+                if (
+                    any(parsed_domain == allowed or parsed_domain.endswith('.' + allowed) for allowed in ALLOWED_NEWS_WEBSITE_DOMAINS)
+                    or parsed_domain.endswith('.gov')  # Allow all government websites
+                ):
+                    total_penalty += 0 # Significant penalty
+                    logger.debug(f"Social Score Bonus: +0 (Website URL points to common news outlet: {parsed_domain})")
             except Exception:
                 pass # Ignore parsing errors for this check too
 

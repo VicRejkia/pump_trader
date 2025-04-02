@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS portfolio (
             profit NUMERIC,
             status TEXT,
             reason TEXT,
+            initial_tokens NUMERIC,
             remaining_tokens NUMERIC,
             highest_price NUMERIC NOT NULL DEFAULT 0.0,
             stop_loss_price NUMERIC,
