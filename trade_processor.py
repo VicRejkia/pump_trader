@@ -22,11 +22,6 @@ async def trade_worker():
         logger.error("Trade worker cannot start: DatabaseClient not initialized in GlobalState.")
         return # Exit if db_client is not ready
 
-    # Add check for db_client
-    if not db_client:
-        logger.error("Trade worker cannot start: DatabaseClient not initialized in GlobalState.")
-        return # Exit if db_client is not ready
-
     if not websocket_handler:
         logger.error("Trade worker cannot start: WebSocketHandler not initialized in GlobalState.")
         return # Exit if websocket_handler is not ready

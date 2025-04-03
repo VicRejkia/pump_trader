@@ -52,7 +52,7 @@ class TradingBot:
                         f"┌────────────────────────────────────\n"
                         f"│📟 Task Monitor 📟\n"
                         f"│────────────────────────────────────\n"
-                        f"│ Subscibed tokens: {len(tokens_subscribed)}\n"
+                        f"│ Subscribed tokens: {len(tokens_subscribed)}\n"
                         f"│ RugCheck Queue size: {rug_queue_size}\n"
                         f"│ Active tasks: {len([t for t in self.tasks if not t.done()])}/{len(self.tasks)}\n"
                         f"│ Tasks:\n"
