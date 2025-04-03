@@ -8,8 +8,19 @@ import glob
 from datetime import datetime, timezone
 import asyncio
 import asyncpg
+from dotenv import load_dotenv
 from logger import logger
-from config import DB_URL, TOTAL_SUPPLY
+from config import TOTAL_SUPPLY # Removed DB_URL import
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Construct the database URL from environment variables
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_HOST = os.getenv("DB_HOST")
+DB_DATABASE = os.getenv("DB_DATABASE")
+DB_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}/{DB_DATABASE}?options=-c%20timezone%3Dutc"
 
 class DatabaseClient:
     """Client to manage database connections and operations."""
@@ -20,6 +31,7 @@ class DatabaseClient:
     async def connect(self):
         """Establish a connection pool to the PostgreSQL database."""
         try:
+            # Use the DB_URL constructed from environment variables
             self.pool = await asyncpg.create_pool(dsn=DB_URL)
             logger.info("Connected to the database successfully.")
         except Exception as e:

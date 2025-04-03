@@ -21,8 +21,7 @@ DEFAULT_BUY_TIP = 0.001        # Tip for buying in SOL
 DEFAULT_SELL_FEE = 0.001       # Fee for selling in SOL
 DEFAULT_SELL_TIP = 0.001       # Tip for selling in SOL
 
-# Database settings
-DB_URL = "postgresql://bot_user:tr4d1ng_b0t_us3r@localhost:5432/trading_bot?options=-c%20timezone%3Dutc"
+# Database settings (Credentials moved to .env)
 
 # UNSUBSCRIBING CONDITIONS
 INACTIVITY_PERIOD = timedelta(minutes=5)
