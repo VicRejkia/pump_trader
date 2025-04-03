@@ -34,6 +34,7 @@ DISALLOWED_WEBSITE_DOMAINS = {
     "reddit.com",
     "twitch.tv",
     "kick.com",
+    "google.com",
     # Add other generic platforms if needed
 }
 ALLOWED_NEWS_WEBSITE_DOMAINS = {

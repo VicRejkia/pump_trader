@@ -3,15 +3,20 @@ rugcheck.py - Manages fetching RugCheck data, prioritization, and processing.
 """
 
 import asyncio
+import os
 import json
+import time
 from datetime import datetime, timezone
 import traceback
 import httpx
+import base58
+from dotenv import load_dotenv
 from aiolimiter import AsyncLimiter
 from decimal import Decimal
+from solders.keypair import Keypair
 
 from config import (
-    RUGCHECK_RATE_LIMIT, RUGCHECK_API, RUGCHECK_INTERVAL,
+    RUGCHECK_AUTH_API, RUGCHECK_RATE_LIMIT, RUGCHECK_API, RUGCHECK_INTERVAL,
     RUGCHECK_SCORE_THRESHOLD # Import the threshold
 )
 from database import DatabaseClient
@@ -31,12 +36,103 @@ class Rugcheck:
         self.state = state
         self.db_client = db_client
         self.websocket_handler = websocket_handler
-        # Rate limiter: RUGCHECK_RATE_LIMIT calls per RUGCHECK_INTERVAL seconds
         self.limiter = AsyncLimiter(max_rate=RUGCHECK_RATE_LIMIT, time_period=RUGCHECK_INTERVAL)
-        self.queue = self.state.get_rugcheck_queue() # Use the queue from GlobalState
-        self.socials_processor = socials_processor # Store socials processor instance
-        self.fetch_attempts = {} # Track fetch attempts for tokens not found or timing out
+        self.queue = self.state.get_rugcheck_queue()
+        self.socials_processor = socials_processor
+        self.fetch_attempts = {}
+        self.jwt_token: str | None = None
+        self.wallet: Keypair | None = None
 
+        # Load wallet from environment variable
+        load_dotenv()
+        private_key_str = os.getenv("SOLANA_PRIVATE_KEY")
+        if private_key_str:
+            try:
+                self.wallet = Keypair.from_base58_string(private_key_str)
+                logger.info("🔑 Solana wallet loaded successfully for RugCheck authentication.")
+            except Exception as e:
+                logger.error(f"❌ Failed to load Solana wallet from private key: {e}")
+                self.wallet = None # Ensure wallet is None if loading fails
+        else:
+            logger.warning("⚠️ SOLANA_PRIVATE_KEY not set. RugCheck API calls will be unauthenticated.")
+
+    # --- Authentication Methods ---
+
+    def _sign_message(self, message: str) -> dict | None:
+        """Signs a message using the loaded Solana wallet."""
+        if not self.wallet:
+            logger.error("Cannot sign message: Wallet not loaded.")
+            return None
+        try:
+            message_bytes = message.encode("utf-8")
+            signature = self.wallet.sign_message(message_bytes)
+            signature_base58 = str(signature)
+            signature_data = list(base58.b58decode(signature_base58))
+            return {
+                "data": signature_data,
+                "type": "ed25519",
+            }
+        except Exception as e:
+            logger.error(f"❌ Error signing message: {e}", exc_info=True)
+            return None
+
+    async def _login_to_rugcheck(self) -> bool:
+        """Logs into RugCheck API using Solana wallet signature and stores the JWT."""
+        if not self.wallet:
+            logger.warning("Skipping RugCheck login: Wallet not loaded.")
+            return False
+
+        logger.info("🔑 Attempting to login to RugCheck API...")
+        try:
+            message_data = {
+                "message": "Sign-in to Rugcheck.xyz",
+                "timestamp": int(time.time() * 1000),
+                "publicKey": str(self.wallet.pubkey()),
+            }
+            message_json = json.dumps(message_data, separators=(',', ':'))
+            signature = self._sign_message(message_json)
+
+            if not signature:
+                return False # Signing failed
+
+            payload = {
+                "signature": signature,
+                "wallet": str(self.wallet.pubkey()),
+                "message": message_data,
+            }
+            login_url = RUGCHECK_AUTH_API
+            logger.debug(f"🔑 Signing message for RugCheck login: {message_json}")
+
+            async with httpx.AsyncClient(timeout=RUGCHECK_REQUEST_TIMEOUT) as client:
+                response = await client.post(
+                    login_url,
+                    headers={"Content-Type": "application/json"},
+                    json=payload, # Use json parameter for automatic serialization
+                )
+
+            if response.status_code == 200:
+                response_data = response.json()
+                self.jwt_token = response_data.get("token")
+                if self.jwt_token:
+                    logger.info("✅ RugCheck API login successful.")
+                    return True
+                else:
+                    logger.error("❌ RugCheck login response missing token.")
+                    self.jwt_token = None
+                    return False
+            else:
+                logger.error(f"❌ Failed to login to RugCheck API: {response.status_code} - {response.text}")
+                self.jwt_token = None
+                return False
+        except httpx.TimeoutException:
+             logger.error(f"⏳ Timeout during RugCheck API login.")
+             self.jwt_token = None
+             return False
+        except Exception as e:
+            logger.error(f"❌ Unexpected error during RugCheck API login: {e}", exc_info=True)
+            self.jwt_token = None
+            return False
+        
     async def _refresh_queue(self):
         """Refreshes the RugCheck priority queue based on token volume."""
         try:
@@ -95,7 +191,9 @@ class Rugcheck:
             logger.error(f"❌ Critical error in _refresh_queue: {e}", exc_info=True)
             return False # Indicate refresh failed
 
-    async def _fetch_and_store_data(self, mint: str) -> dict | None | str:
+    # --- Data Fetching and Processing ---
+
+    async def _fetch_and_store_data(self, mint: str, is_retry: bool = False) -> dict | None | str:
         """
         Fetches RugCheck data from the API and stores it in the database.
         Returns:
@@ -106,10 +204,16 @@ class Rugcheck:
         """
         url = f"{RUGCHECK_API}/{mint}/report"
         response = None # Define response outside try block
+        headers = {}
+        if self.jwt_token:
+            headers["Authorization"] = f"Bearer {self.jwt_token}"
+        else:
+            logger.debug(f"Making unauthenticated RugCheck request for {mint}")
+
         try:
             async with httpx.AsyncClient(timeout=RUGCHECK_REQUEST_TIMEOUT) as client:
                 logger.debug(f"📡 Fetching RugCheck for {mint} from {url}")
-                response = await client.get(url)
+                response = await client.get(url, headers=headers)
 
             if response.status_code == 200:
                 data = response.json()
@@ -205,6 +309,20 @@ class Rugcheck:
             elif response.status_code == 404:
                 logger.warning(f"❓ RugCheck API returned 404 (Not Found) for {mint}. Maybe too new?")
                 return 'NOT_FOUND' # Specific status for 404
+            elif response.status_code in [401, 403]: # Unauthorized or Forbidden
+                 logger.warning(f"🔑 RugCheck API returned {response.status_code} (Authorization Error) for {mint}. Attempting re-login.")
+                 self.jwt_token = None # Clear potentially invalid token
+                 if not is_retry:
+                     login_success = await self._login_to_rugcheck()
+                     if login_success:
+                         logger.info(f"Re-login successful. Retrying fetch for {mint}.")
+                         return await self._fetch_and_store_data(mint, is_retry=True) # Retry once
+                     else:
+                         logger.error(f"Re-login failed. Cannot fetch authenticated data for {mint}.")
+                         return None # Indicate failure after failed re-login
+                 else:
+                     logger.error(f"Authorization error persisted after re-login attempt for {mint}.")
+                     return None # Indicate failure after retry
             else:
                 logger.warning(f"⚠ RugCheck API returned {response.status_code} for {mint}. Response: {response.text}")
                 return None # Indicate general API failure
@@ -316,7 +434,12 @@ class Rugcheck:
         """Worker task that processes tokens from the RugCheck queue with rate limiting."""
         logger.info("🚀 RugCheck worker started.")
         last_refresh_time = 0
-        refresh_interval = 30 # Refresh queue every 30 seconds if needed
+        refresh_interval = 30 # Refresh queue every 30 seconds
+
+        # --- Initial Login Attempt ---
+        if self.wallet:
+            await self._login_to_rugcheck()
+        # Continue even if login fails, will use unauthenticated requests
 
         while not self.state.shutdown_event.is_set():
             try:
@@ -436,5 +559,6 @@ class Rugcheck:
 
     def start(self) -> asyncio.Task:
         """Creates and returns the asyncio task for the RugCheck worker."""
-        logger.info("Starting RugCheck background task...")
+        logger.info("Creating RugCheck background task...")
+        # Ensure worker starts after initial setup (like wallet loading) is done
         return asyncio.create_task(self._worker(), name="rugcheck_worker")

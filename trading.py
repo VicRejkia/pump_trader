@@ -360,12 +360,14 @@ class TradingManager:
             # Calculate financials
             gross_sol_received = tokens_to_sell * current_price
             # Pro-rate sell fees based on the fraction of the *initial* buy being sold now
-            sell_fee_share = self.config['DEFAULT_SELL_FEE'] * (tokens_to_sell / initial_tokens)
-            sell_tip_share = self.config['DEFAULT_SELL_TIP'] * (tokens_to_sell / initial_tokens)
+            # Convert config Decimals to float for calculation with float token amounts
+            sell_fee_share = float(self.config['DEFAULT_SELL_FEE']) * (tokens_to_sell / initial_tokens)
+            sell_tip_share = float(self.config['DEFAULT_SELL_TIP']) * (tokens_to_sell / initial_tokens)
             net_sol_received = gross_sol_received - sell_fee_share - sell_tip_share
 
             # Calculate cost basis for the sold portion
             # Pro-rate original buy fees/tips based on the fraction of the *initial* buy being sold now
+            # buy_fee and buy_tip are already floats from the DB fetch
             buy_fee_share = buy_fee * (tokens_to_sell / initial_tokens)
             buy_tip_share = buy_tip * (tokens_to_sell / initial_tokens)
             cost_basis = (buy_price * tokens_to_sell) + buy_fee_share + buy_tip_share
@@ -453,7 +455,8 @@ class TradingManager:
 
                     # Log only if insert happened (check affected rows?) - fetchval might be better
                     # For simulation, we assume insert worked if no exception
-                    logger.info(format_buy_order_log(self.state, mint=mint, price_per_token=current_price, tokens_bought=tokens_bought, market_cap=market_cap_sol))
+                    sol_price = await self.state.get_sol_price()
+                    logger.info(format_buy_order_log(self.state, mint=mint, price_per_token=current_price, tokens_bought=tokens_bought, market_cap=market_cap_sol, sol_price=sol_price))
                     asyncio.create_task(play_buy_opportunity_sound()) # Run sound concurrently
 
                 except Exception as e:
