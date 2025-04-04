@@ -135,7 +135,7 @@ class TradingBot:
 
         if self.backup:
             logger.info("💾 Starting database backup...")
-            await self.db_client.backup_db() # Call the correct backup function
+            await self.db_client.backup_db(backup_flag=True) # Call the correct backup function
             logger.info("✅ Database backup completed.")
         
         await self.ws_handler.connect()

@@ -27,6 +27,7 @@ async def trade_worker():
         return # Exit if websocket_handler is not ready
 
     trade_queue = websocket_handler.trade_queue # Get trade queue
+    logger.debug(f"Trade queue: {trade_queue}")
 
     BATCH_SIZE = 50  # Number of trades per batch
     BATCH_TIMEOUT = 5 # Seconds to wait for new trades before processing batch
