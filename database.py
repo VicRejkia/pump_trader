@@ -191,14 +191,16 @@ class DatabaseClient:
             SELECT t.mint
             FROM tokens t
             INNER JOIN (
-                SELECT mint, marketCapSol,
+                SELECT mint, marketCapSol, timestamp AS lt,
                     ROW_NUMBER() OVER (PARTITION BY mint ORDER BY timestamp DESC) AS rn
                 FROM trades
             ) latest ON t.mint = latest.mint AND latest.rn = 1
             WHERE 
-                (latest.marketCapSol * $1) < $2
-                AND t.timestamp <= NOW() - INTERVAL '5 minutes'
+                ((latest.marketCapSol * $1) < $2 AND
+                t.timestamp <= NOW() - INTERVAL '15 minutes') OR
+				latest.lt <= NOW() - INTERVAL '60 minutes'
                 AND t.mint NOT IN (SELECT mint FROM portfolio WHERE status = 'active')
+			ORDER BY timestamp DESC
         """
         async with self.pool.acquire() as conn:
             return await conn.fetch(query, sol_price, min_market_cap)
@@ -239,9 +241,14 @@ class DatabaseClient:
                             INSERT INTO rugcheck_backup SELECT *, $1 FROM rugcheck WHERE mint = $2
                         ''', archived_at, mint)
 
+                        await conn.execute('''
+                            INSERT INTO migrations_backup SELECT *, $1 FROM migrations WHERE mint = $2
+                        ''', archived_at, mint)
+
                         await conn.execute("DELETE FROM tokens WHERE mint = $1", mint)
                         await conn.execute("DELETE FROM trades WHERE mint = $1", mint)
                         await conn.execute("DELETE FROM rugcheck WHERE mint = $1", mint)
+                        await conn.execute("DELETE FROM migrations WHERE mint = $1", mint)
 
                         logger.debug(f"🧹 Backup & deletion completed for {mint}")
 
@@ -266,4 +273,21 @@ class DatabaseClient:
                     # Backup tables can be handled similarly if needed.
                 except Exception as e:
                     logger.exception("Error during database cleanup: %s", e)
+                    raise
+
+    async def backup_db(self, backup_flag: bool):
+        """Backup tables based on backup_flag."""
+        if backup_flag:
+            async with self.pool.acquire() as conn:
+                try:
+                    tables_to_backup = [
+                        'tokens', 'trades', 'rugcheck', 'migrations'
+                    ]
+                    for table in tables_to_backup:
+                        await conn.execute(f"INSERT INTO {table}_backup SELECT * FROM {table};")
+                        logger.info("🗄️ Backed up table %s", table)
+                        await conn.execute(f"TRUNCATE TABLE {table} RESTART IDENTITY CASCADE;")
+                        logger.info("🧹 Truncated table %s", table)
+                except Exception as e:
+                    logger.exception("Error during database backup: %s", e)
                     raise

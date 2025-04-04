@@ -15,11 +15,12 @@ from rugcheck import Rugcheck # Import the Rugcheck class
 from socials_processor import SocialsProcessor # Import the SocialsProcessor class
 
 class TradingBot:
-    def __init__(self, cleanup: bool = False):
+    def __init__(self, cleanup: bool = False, backup: bool = False):
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         self.state = GlobalState.get_instance()
         self.cleanup = cleanup
+        self.backup = backup
         self.db_client = DatabaseClient()
         self.ws_handler = WebSocketHandler(db_client=self.db_client)
         self.tasks = []
@@ -130,7 +131,12 @@ class TradingBot:
             await self.db_client.cleanup_db(cleanup_flag=True)
             logger.info("🔄 Rotating log file...")
             logger.handlers.clear()
-            rotate_log_file()
+            rotate_log_file() 
+
+        if self.backup:
+            logger.info("💾 Starting database backup...")
+            await self.db_client.backup_db() # Call the correct backup function
+            logger.info("✅ Database backup completed.")
         
         await self.ws_handler.connect()
         await self.state.set_websocket_handler(self.ws_handler) # Store ws_handler in GlobalState
@@ -190,10 +196,11 @@ class TradingBot:
                 await asyncio.sleep(30) # Longer sleep on error
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PumpTrader Bot")
-    parser.add_argument("--cleanup", action="store_true", help="Clean up database before starting the bot.")
+    parser.add_argument("--cleanup", action="store_true", help="Clean up database before starting the bot. Delets data permanently!")
+    parser.add_argument("--backup", action="store_true", help="Backup database before starting the bot.")
     args = parser.parse_args()
 
-    bot = TradingBot(cleanup=args.cleanup)
+    bot = TradingBot(cleanup=args.cleanup, backup=args.backup)
     try:
         bot.loop.run_until_complete(bot.main())
     except (KeyboardInterrupt, SystemExit):
