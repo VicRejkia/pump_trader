@@ -1,6 +1,6 @@
 -- Create the tokens_backup table with an extra column for the backup timestamp
 CREATE TABLE IF NOT EXISTS tokens_backup (
-    mint TEXT,
+    mint TEXT PRIMARY KEY, -- Add PRIMARY KEY constraint
     traderPublicKey TEXT,
     initialBuy NUMERIC,
     solAmount NUMERIC,

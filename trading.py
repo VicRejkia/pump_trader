@@ -172,9 +172,10 @@ class TradingManager:
             # Use a single transaction for checking and potentially selling multiple positions
             async with conn.transaction():
                 try:
+                    # Fetch active buy positions with new TP/SL fields
                     positions = await conn.fetch('''
-                        SELECT id, mint, price AS buy_price, initial_tokens, highest_price,
-                               stop_loss_price, remaining_tokens
+                        SELECT id, mint, price AS buy_price, initial_tokens, remaining_tokens,
+                               stop_loss_price, highest_price, initial_tp_price, second_tp_price, first_tp_hit
                         FROM portfolio
                         WHERE status = 'active' AND tx_type = 'buy' -- Only check original buy entries
                     ''')
@@ -208,10 +209,13 @@ class TradingManager:
                         pos_id = position['id']
                         mint = position['mint']
                         buy_price = float(position['buy_price'])
-                        initial_tokens = float(position['initial_tokens']) # Use the stored initial amount
-                        highest_price = float(position['highest_price'])
-                        stop_loss_price = float(position['stop_loss_price'])
+                        initial_tokens = float(position['initial_tokens'])
                         remaining_tokens = float(position['remaining_tokens'])
+                        active_stop_loss_price = float(position['stop_loss_price']) # The currently active SL
+                        highest_price = float(position['highest_price'])
+                        initial_tp_price = float(position['initial_tp_price'])
+                        second_tp_price = float(position['second_tp_price'])
+                        first_tp_hit = position['first_tp_hit'] # Boolean
 
                         if initial_tokens <= 0: # Should not happen for a buy entry, but safety check
                             continue
@@ -232,47 +236,52 @@ class TradingManager:
                             # logger.debug(f"Updated highest price for {mint} to {current_price:.6f}")
 
 
-                        # --- Calculate Sell Thresholds ---
-                        sol_invested = self.config['SOL_TO_BUY'] # Assumes fixed buy amount per config
-                        fees_tips_sol = (self.config['DEFAULT_BUY_FEE'] + self.config['DEFAULT_BUY_TIP'] +
-                                         self.config['DEFAULT_SELL_FEE'] + self.config['DEFAULT_SELL_TIP'])
-                        # Calculate fee percentage relative to the initial SOL investment
-                        fees_tips_percentage = (fees_tips_sol / sol_invested) * 100 if sol_invested > 0 else 0
-
-                        total_tp_percentage = (self.config['DEFAULT_TRAILING_TP'] + # Base TP %
-                                               self.config['PROFIT_MARGIN'] +       # Profit Margin %
-                                               fees_tips_percentage)                # Estimated Fee %
-                        first_tp_price = buy_price * (1 + total_tp_percentage / 100.0)
-
-                        # Trailing stop price (based on potentially updated highest_price)
-                        # Ensure trailing TP doesn't go above current price immediately after first TP adjustment
-                        trailing_stop_price = highest_price * (1 - self.config['DEFAULT_TRAILING_TP'] / 100.0)
+                        # --- Calculate Trailing SL Price (only relevant if first TP was hit) ---
+                        trailing_sl_price = 0 # Default
+                        if first_tp_hit:
+                            # Calculate trailing SL based on highest price since the buy
+                            trailing_sl_price = highest_price * (1 - self.config['TRAILING_STOP_LOSS_PERCENT'] / 100.0)
+                            # Note: The active SL is either the initial SL, breakeven (buy_price), or potentially this trailing_sl_price
+                            # depending on the exact logic chosen after first TP hit.
+                            # For now, we assume SL moves to buy_price after first TP, and trailing SL is checked separately.
 
                         # --- Check Sell Conditions ---
+                        # --- Check Sell Conditions (Order Matters!) ---
                         sell_reason = None
                         sell_all = False
                         sell_partial = False
+                        sell_percentage = 0.0
 
-                        # Condition 1: First Take Profit
-                        # Check if TP is reached AND the first sell hasn't happened yet (remaining == initial)
-                        # Use a small tolerance for floating point comparison
-                        if current_price >= first_tp_price and abs(remaining_tokens - initial_tokens) < 1e-9:
-                             sell_reason = "First TP"
-                             sell_partial = True
-                             logger.info(f"🎯 First TP hit for {mint} (ID: {pos_id}) at price {current_price:.6f} (Threshold: {first_tp_price:.6f})")
-
-
-                        # Condition 2: Stop Loss (Use the potentially updated SL from First TP if it happened)
-                        elif current_price <= stop_loss_price:
-                            sell_reason = "Stop Loss"
+                        # 1. Initial Stop Loss / Breakeven Stop Loss
+                        if current_price <= active_stop_loss_price:
+                            sell_reason = "Stop Loss" if not first_tp_hit else "Breakeven SL"
                             sell_all = True
-                            logger.info(f"🛑 Stop Loss hit for {mint} (ID: {pos_id}) at price {current_price:.6f} (SL: {stop_loss_price:.6f})")
+                            sell_percentage = 1.0
+                            logger.info(f"🛑 {sell_reason} hit for {mint} (ID: {pos_id}) at price {current_price:.9f} (SL: {active_stop_loss_price:.9f})")
 
-                        # Condition 3: Trailing Stop Loss (only if not already stopped out by SL)
-                        elif current_price <= trailing_stop_price:
-                            sell_reason = "Trailing TP" # Keep user's term, but it's a trailing SL
+                        # 2. Second Take Profit (Sell Remaining)
+                        elif current_price >= second_tp_price:
+                             # Check if first TP was hit is implicit, as remaining_tokens would be < initial_tokens
+                             # Sell remaining regardless of whether first TP was hit or not if price reaches this high
+                            sell_reason = "Second TP"
                             sell_all = True
-                            logger.info(f"📉 Trailing TP hit for {mint} (ID: {pos_id}) at price {current_price:.6f} (Trailing SL: {trailing_stop_price:.6f}, Highest: {highest_price:.6f})")
+                            sell_percentage = 1.0 # Sell all remaining
+                            logger.info(f"🚀 Second TP hit for {mint} (ID: {pos_id}) at price {current_price:.9f} (Threshold: {second_tp_price:.9f})")
+
+                        # 3. First Take Profit (Partial Sell, only if not hit before)
+                        elif not first_tp_hit and current_price >= initial_tp_price:
+                            sell_reason = "First TP"
+                            sell_partial = True
+                            # Sell configured percentage of the *initial* amount
+                            sell_percentage = self.config['FIRST_TAKE_PROFIT_SELL_PERCENT'] / 100.0
+                            logger.info(f"🎯 First TP hit for {mint} (ID: {pos_id}) at price {current_price:.9f} (Threshold: {initial_tp_price:.9f}). Selling {sell_percentage*100}%.")
+
+                        # 4. Trailing Stop Loss (Only active *after* First TP is hit)
+                        elif first_tp_hit and current_price <= trailing_sl_price:
+                            sell_reason = "Trailing SL"
+                            sell_all = True
+                            sell_percentage = 1.0 # Sell all remaining
+                            logger.info(f"📉 Trailing SL hit for {mint} (ID: {pos_id}) at price {current_price:.9f} (Trailing SL: {trailing_sl_price:.9f}, Highest: {highest_price:.9f})")
 
 
                         # --- Execute Sell ---
@@ -285,15 +294,16 @@ class TradingManager:
                                     current_price=current_price,
                                     market_cap_sol=current_market_cap,
                                     reason=sell_reason,
-                                    sell_percentage=self.config['FIRST_SELL_PERCENT'] / 100.0, # Convert percentage
+                                    sell_percentage=sell_percentage, # Use calculated percentage
                                     position_id_to_update=pos_id
                                 )
-                                if profit is not None: # Check if sell was successful (profit can be 0 or negative)
-                                     # Adjust SL to current price after successful partial sell
+                                if profit is not None: # Check if sell was successful
+                                    # --- Post-First TP Actions ---
+                                    # Mark first TP as hit and adjust SL to breakeven (buy_price)
                                     await conn.execute('''
-                                        UPDATE portfolio SET stop_loss_price = $1 WHERE id = $2
-                                    ''', current_price, pos_id)
-                                    logger.info(f"📈 Adjusted Stop Loss for {mint} (ID: {pos_id}) to {current_price:.6f} after First TP.")
+                                        UPDATE portfolio SET first_tp_hit = TRUE, stop_loss_price = $1 WHERE id = $2
+                                    ''', buy_price, pos_id)
+                                    logger.info(f"📈 Marked First TP as hit for {mint} (ID: {pos_id}) and adjusted Stop Loss to breakeven ({buy_price:.9f}).")
                             except Exception as e:
                                 logger.error(f"Error executing partial sell for {mint} (ID: {pos_id}): {e}", exc_info=True)
                                 # Allow transaction to potentially rollback or continue with other positions
@@ -306,7 +316,7 @@ class TradingManager:
                                     current_price=current_price,
                                     market_cap_sol=current_market_cap,
                                     reason=sell_reason,
-                                    sell_percentage=1.0, # Sell all remaining
+                                    sell_percentage=sell_percentage, # Should be 1.0 for SL/TP2/Trailing SL
                                     position_id_to_update=pos_id
                                 )
                             except Exception as e:
@@ -314,8 +324,8 @@ class TradingManager:
                                 # Allow transaction to potentially rollback or continue with other positions
 
                         # Add a small delay if a sell occurred to allow logs/state to settle? Optional.
-                        # if sell_partial or sell_all:
-                        #    await asyncio.sleep(0.1)
+                        if sell_partial or sell_all:
+                            await asyncio.sleep(0.1)
 
 
                 except Exception as e:
@@ -350,11 +360,19 @@ class TradingManager:
                 logger.warning(f"⚠ Invalid token amounts for position ID {position_id_to_update} ({mint}). Remaining: {remaining_tokens}, Initial: {initial_tokens}")
                 return None # Indicate nothing was sold
 
-            # Determine amount to sell
-            tokens_to_sell = remaining_tokens * sell_percentage
+            # Determine amount to sell based on the reason
+            if reason == "First TP":
+                # Sell a percentage of the *initial* amount for First TP
+                tokens_to_sell = initial_tokens * sell_percentage
+                # Safety check: ensure we don't try to sell more than what's remaining
+                tokens_to_sell = min(tokens_to_sell, remaining_tokens)
+            else:
+                # Sell all remaining tokens for SL, Breakeven SL, Second TP, Trailing SL
+                tokens_to_sell = remaining_tokens
+
             if tokens_to_sell <= 1e-9: # Avoid selling dust
-                 logger.info(f"ℹ Sell amount for {mint} (ID: {position_id_to_update}, Reason: {reason}) is negligible ({tokens_to_sell:.12f}). Skipping.")
-                 return None
+                 logger.info(f"ℹ Sell amount for {mint} (ID: {position_id_to_update}, Reason: {reason}) is negligible ({tokens_to_sell:.12f}). Skipping sell execution.")
+                 return None # Return None as nothing was effectively sold
 
 
             # Calculate financials
@@ -401,8 +419,10 @@ class TradingManager:
             # Use run_in_executor or similar if sounds block async loop
             if reason == "Stop Loss":
                 asyncio.create_task(play_sell_sl_sound_async())
-            elif reason in ["Trailing TP", "First TP"]:
+            # Updated sound logic for new reasons
+            elif reason in ["First TP", "Second TP", "Trailing SL"]: # Play TP sound for all profit-taking/trailing scenarios
                 asyncio.create_task(play_sell_tp_sound_async())
+            # Note: "Breakeven SL" will play the SL sound as it's a stop-loss trigger.
 
             return profit
 
@@ -439,19 +459,25 @@ class TradingManager:
                         return
 
                     tokens_bought = sol_for_tokens / current_price
-                    initial_stop_loss_price = current_price * (1 - self.config['DEFAULT_STOP_LOSS'] / 100.0)
+                    # Calculate initial SL and TP levels based on config percentages
+                    initial_stop_loss_price = current_price * (1 - self.config['INITIAL_STOP_LOSS_PERCENT'] / 100.0)
+                    initial_tp_price = current_price * (1 + self.config['INITIAL_TAKE_PROFIT_PERCENT'] / 100.0)
+                    second_tp_price = current_price * (1 + self.config['SECOND_TAKE_PROFIT_PERCENT'] / 100.0)
 
-                    # Assumes 'initial_tokens' column exists in portfolio table
+                    # Assumes 'initial_tokens', 'initial_tp_price', 'second_tp_price', 'first_tp_hit' columns exist
                     await conn.execute("""
                         INSERT INTO portfolio
                             (mint, tx_type, price, market_cap, sol_amount, tokens,
-                             fee, tip, remaining_tokens, stop_loss_price, highest_price, status, timestamp, initial_tokens)
-                        VALUES ($1, 'buy', $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active', $11, $12)
-                        -- Removed ON CONFLICT clause as it requires a specific partial unique index
-                        -- The check before this insert already prevents duplicate active buys.
+                             fee, tip, remaining_tokens, stop_loss_price, highest_price,
+                             initial_tp_price, second_tp_price, first_tp_hit,
+                             status, timestamp, initial_tokens)
+                        VALUES ($1, 'buy', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, FALSE, 'active', $13, $14)
+                        -- The check before this insert prevents duplicate active buys.
                     """, mint, current_price, market_cap_sol, sol_to_spend,
-                       tokens_bought, buy_fee, buy_tip, tokens_bought, # remaining_tokens = tokens_bought initially
-                       initial_stop_loss_price, current_price, datetime.now(timezone.utc), tokens_bought) # highest_price = current_price initially, store initial_tokens
+                       tokens_bought, buy_fee, buy_tip, tokens_bought, # remaining_tokens = initial_tokens initially
+                       initial_stop_loss_price, current_price, # highest_price = current_price initially
+                       initial_tp_price, second_tp_price,
+                       datetime.now(timezone.utc), tokens_bought) # Store initial_tokens
 
                     # Log only if insert happened (check affected rows?) - fetchval might be better
                     # For simulation, we assume insert worked if no exception

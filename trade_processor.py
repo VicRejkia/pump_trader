@@ -1,5 +1,5 @@
 """
-Processes trade messages from the queue and writes them in batches to the database.
+Processes trade messages from the PumpPortal queue and writes them in batches to the database.
 """
 
 import asyncio

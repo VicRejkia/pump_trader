@@ -85,6 +85,7 @@ ALLOWED_NEWS_WEBSITE_DOMAINS = {
     "cbc.ca",  # Canadian Broadcasting Corporation
     "bitcointalk.org",
     "cnbcnews.us",
+    "truthsocial.com"
 }
 
 class SocialsProcessor:

@@ -241,13 +241,16 @@ class DatabaseClient:
                             INSERT INTO rugcheck_backup SELECT *, $1 FROM rugcheck WHERE mint = $2
                         ''', archived_at, mint)
 
+                        # Backup migrations, ignoring conflicts on the primary key
                         await conn.execute('''
                             INSERT INTO migrations_backup SELECT *, $1 FROM migrations WHERE mint = $2
+                            ON CONFLICT (signature) DO NOTHING -- Conflict check on signature
                         ''', archived_at, mint)
 
                         await conn.execute("DELETE FROM tokens WHERE mint = $1", mint)
                         await conn.execute("DELETE FROM trades WHERE mint = $1", mint)
                         await conn.execute("DELETE FROM rugcheck WHERE mint = $1", mint)
+                        # Delete original migrations entry
                         await conn.execute("DELETE FROM migrations WHERE mint = $1", mint)
 
                         logger.debug(f"🧹 Backup & deletion completed for {mint}")
@@ -260,20 +263,34 @@ class DatabaseClient:
             await asyncio.sleep(5)
 
     async def cleanup_db(self, cleanup_flag: bool):
-        """Truncate tables based on cleanup_flag while preserving certain tables."""
+        """Drop all application tables if cleanup_flag is True."""
         if cleanup_flag:
+            logger.warning("🚨 Starting full database cleanup - Dropping all application tables...")
             async with self.pool.acquire() as conn:
-                try:
-                    tables_to_cleanup = [
-                        'tokens', 'trades', 'rugcheck', 'portfolio', 'migrations', ' tokens_backup', ' trades_backup',' rugcheck_backup'
-                    ]
-                    for table in tables_to_cleanup:
-                        await conn.execute(f"TRUNCATE TABLE {table} RESTART IDENTITY CASCADE;")
-                        logger.info("🧹 Truncated table %s", table)
-                    # Backup tables can be handled similarly if needed.
-                except Exception as e:
-                    logger.exception("Error during database cleanup: %s", e)
-                    raise
+                # List all known application tables (main and backup)
+                # Add any other tables managed by the application if necessary (e.g., creator_wallets)
+                tables_to_drop = [
+                    'rugcheck',           # Depends on tokens
+                    'trades',             # No explicit FK, but related to tokens
+                    'migrations',         # Standalone or related? Assuming standalone for drop order
+                    'tokens',             # Drop after dependents
+                    'rugcheck_backup',
+                    'trades_backup',
+                    'migrations_backup',
+                    'tokens_backup'
+                ]
+                # Drop tables in an order that respects potential dependencies, or use CASCADE
+                # Using DROP TABLE IF EXISTS ... CASCADE is generally safer
+                for table in tables_to_drop:
+                    try:
+                        # Use CASCADE to handle potential foreign key dependencies automatically
+                        await conn.execute(f"DROP TABLE IF EXISTS {table} CASCADE;")
+                        logger.info(f"🗑️ Dropped table {table}")
+                    except Exception as e:
+                        # Log error but continue trying to drop other tables
+                        logger.error(f"Error dropping table {table}: {e}", exc_info=False) # Keep log concise
+
+            logger.warning("✅ Full database cleanup finished.")
 
     async def backup_db(self, backup_flag: bool):
         """Backup tables based on backup_flag."""
@@ -284,7 +301,28 @@ class DatabaseClient:
                         'tokens', 'trades', 'rugcheck', 'migrations'
                     ]
                     for table in tables_to_backup:
-                        await conn.execute(f"INSERT INTO {table}_backup SELECT * FROM {table};")
+                        # Insert into backup table, ignoring rows that already exist based on primary key 'id'
+                        # Determine the correct primary key for conflict resolution based on table schema
+                        if table == 'tokens':
+                            conflict_key = 'mint'
+                        elif table == 'trades':
+                            conflict_key = 'signature'
+                        elif table == 'rugcheck':
+                            conflict_key = 'mint'
+                        elif table == 'migrations':
+                            conflict_key = 'signature'
+                        else:
+                            # Should not happen with the current list, but add a warning
+                            logger.warning(f"Unexpected table '{table}' in backup_db conflict handling.")
+                            # If other tables are added later, their PK needs to be handled here.
+                            # For now, skip conflict handling for unknown tables to avoid errors.
+                            await conn.execute(f"INSERT INTO {table}_backup SELECT * FROM {table};") # Original insert without ON CONFLICT
+                            logger.info("🗄️ Backed up table %s (without conflict check)", table)
+                            await conn.execute(f"TRUNCATE TABLE {table} RESTART IDENTITY CASCADE;")
+                            continue # Skip the rest of the loop for this table
+
+                        # Execute the INSERT with the correct ON CONFLICT clause
+                        await conn.execute(f"INSERT INTO {table}_backup SELECT * FROM {table} ON CONFLICT ({conflict_key}) DO NOTHING;")
                         logger.info("🗄️ Backed up table %s", table)
                         await conn.execute(f"TRUNCATE TABLE {table} RESTART IDENTITY CASCADE;")
                         logger.info("🧹 Truncated table %s", table)

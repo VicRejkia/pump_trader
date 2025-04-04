@@ -1,6 +1,6 @@
 -- Create the trades_backup table with an extra column for the backup timestamp
 CREATE TABLE IF NOT EXISTS trades_backup (
-    signature TEXT,
+    signature TEXT PRIMARY KEY, -- Add PRIMARY KEY constraint
     mint TEXT,
     tx_type TEXT,
     token_amount NUMERIC,

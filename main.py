@@ -101,12 +101,14 @@ class TradingBot:
         try:
             # Explicitly list required config keys to avoid issues
             required_keys = [
-                'SOL_TO_BUY', 'DEFAULT_STOP_LOSS', 'DEFAULT_TRAILING_TP',
-                'DEFAULT_BUY_FEE', 'DEFAULT_BUY_TIP', 'DEFAULT_SELL_FEE',
-                'DEFAULT_SELL_TIP', 'DEFAULT_VOLUME_THRESHOLD',
-                'DEFAULT_MARKETCAP_THRESHOLD', 'MIN_VOLATILITY',
+                'SOL_TO_BUY',
+                'INITIAL_STOP_LOSS_PERCENT', 'INITIAL_TAKE_PROFIT_PERCENT',
+                'FIRST_SELL_PERCENT', 'TRAILING_STOP_LOSS_PERCENT', 'SECOND_TAKE_PROFIT_PERCENT',
+                'DEFAULT_BUY_FEE', 'DEFAULT_BUY_TIP', 'DEFAULT_SELL_FEE', 'DEFAULT_SELL_TIP',
+                'DEFAULT_VOLUME_THRESHOLD', 'DEFAULT_MARKETCAP_THRESHOLD', 'MIN_VOLATILITY',
                 'DEFAULT_RUGCHECK_SCORE_THRESHOLD', 'DEFAULT_SOCIAL_SCORE_THRESHOLD',
-                'DEFAULT_TIME_INTERVALL', 'FIRST_SELL_PERCENT', 'PROFIT_MARGIN'
+                'DEFAULT_TIME_INTERVALL'
+                # Note: PROFIT_MARGIN was removed as TP levels are now explicit percentages
             ]
             self.config = {key: getattr(config, key) for key in required_keys if hasattr(config, key)}
             # Verify all required keys were found
@@ -124,19 +126,26 @@ class TradingBot:
 
         await self.db_client.connect()
         await self.state.set_db_client(self.db_client) # Store db_client in GlobalState
-        await self.db_client.init_db()
-        
-        if self.cleanup:
-            logger.info("🗑️ Starting database cleanup...")
-            await self.db_client.cleanup_db(cleanup_flag=True)
-            logger.info("🔄 Rotating log file...")
-            logger.handlers.clear()
-            rotate_log_file() 
 
+        # --- Backup Phase (Run before potential cleanup) ---
         if self.backup:
             logger.info("💾 Starting database backup...")
-            await self.db_client.backup_db(backup_flag=True) # Call the correct backup function
+            await self.db_client.backup_db(backup_flag=True)
             logger.info("✅ Database backup completed.")
+
+        # --- Cleanup Phase (Run before init_db) ---
+        if self.cleanup:
+            logger.info("🗑️ Starting database cleanup (dropping tables)...")
+            await self.db_client.cleanup_db(cleanup_flag=True)
+            # Log rotation might be better placed after successful startup or during shutdown
+            logger.info("🔄 Rotating log file...")
+            logger.handlers.clear()
+            rotate_log_file()
+
+        # --- Initialization Phase (Run after potential cleanup) ---
+        logger.info("🚀 Initializing database schema...")
+        await self.db_client.init_db()
+        logger.info("✅ Database schema initialized.")
         
         await self.ws_handler.connect()
         await self.state.set_websocket_handler(self.ws_handler) # Store ws_handler in GlobalState
