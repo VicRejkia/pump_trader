@@ -2,8 +2,11 @@
 
 ## LICENSE  
 
+<<<<<<< HEAD
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/VicRejkia/pump_trader/blob/main/LICENSE)
 
+=======
+>>>>>>> 149d44a71051e58cc9b8b25f57d4f65433174650
 
 
    Copyright 2025 - Vic Rejkia
