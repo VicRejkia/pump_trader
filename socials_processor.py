@@ -16,83 +16,42 @@ from state import GlobalState
 # Assuming these validation functions exist in utils.py
 from utils import is_valid_website, is_valid_telegram, is_valid_twitter
 
-# Domains that are generally not acceptable as a primary project website
-DISALLOWED_WEBSITE_DOMAINS = {
-    "youtube.com", "youtu.be",
-    "tiktok.com",
-    "spotify.com",
-    "soundcloud.com",
-    "discord.com", "discord.gg", # Discord invite links are not websites
-    "medium.com",
-    "substack.com",
-    "linktr.ee",
-    "t.me", # Handled separately
-    "twitter.com", "x.com", # Handled separately
-    "facebook.com",
-    "instagram.com",
-    "linkedin.com",
-    "reddit.com",
-    "twitch.tv",
-    "kick.com",
-    "google.com",
-    # Add other generic platforms if needed
-}
-ALLOWED_NEWS_WEBSITE_DOMAINS = {
-    "bbc.com",
-    "cnn.com",
-    "reuters.com",
-    "apnews.com",  # Associated Press
-    "nytimes.com",  # The New York Times
-    "washingtonpost.com",
-    "theguardian.com",
-    "bloomberg.com",
-    "forbes.com",
-    "wsj.com",  # The Wall Street Journal
-    "ft.com",  # Financial Times
-    "npr.org",  # National Public Radio
-    "cnbc.com",
-    "abcnews.go.com",
-    "nbcnews.com",
-    "cbsnews.com",
-    "latimes.com",  # Los Angeles Times
-    "usatoday.com",
-    "politico.com",
-    "aljazeera.com",
-    "theatlantic.com",
-    "newsweek.com",
-    "time.com",
-    "economist.com",
-    "sky.com",  # Sky News
-    "independent.co.uk",
-    "telegraph.co.uk",
-    "dailymail.co.uk",
-    "mirror.co.uk",
-    "huffpost.com",  # Huffington Post
-    "vox.com",
-    "slate.com",
-    "buzzfeednews.com",
-    "axios.com",
-    "thehill.com",
-    "scmp.com",  # South China Morning Post
-    "japantimes.co.jp",
-    "hindustantimes.com",
-    "indiatoday.in",
-    "timesofindia.indiatimes.com",
-    "straitstimes.com",
-    "smh.com.au",  # Sydney Morning Herald
-    "theage.com.au",
-    "globalnews.ca",
-    "cbc.ca",  # Canadian Broadcasting Corporation
-    "bitcointalk.org",
-    "cnbcnews.us",
-    "truthsocial.com"
-}
+# Domain lists and scoring values are now loaded from config in __init__
 
 class SocialsProcessor:
-    def __init__(self, state: GlobalState, db_client: DatabaseClient):
+    def __init__(self, state: GlobalState, db_client: DatabaseClient, config: dict):
         self.state = state
         self.db_client = db_client
-        logger.info("SocialsProcessor initialized.")
+        self.config = config # Store config
+
+        # Load scoring values from config
+        self.penalty_no_website = config.get('SOCIALS_PENALTY_NO_WEBSITE', 40)
+        self.penalty_invalid_website_type = config.get('SOCIALS_PENALTY_INVALID_WEBSITE_TYPE', 35)
+        self.penalty_website_verify_skipped = config.get('SOCIALS_PENALTY_WEBSITE_VERIFY_SKIPPED', 35)
+        self.penalty_website_invalid_url = config.get('SOCIALS_PENALTY_WEBSITE_INVALID_URL', 35)
+        self.penalty_website_timeout = config.get('SOCIALS_PENALTY_WEBSITE_TIMEOUT', 35)
+        self.penalty_website_http_error = config.get('SOCIALS_PENALTY_WEBSITE_HTTP_ERROR', 35)
+        self.penalty_website_other_error = config.get('SOCIALS_PENALTY_WEBSITE_OTHER_ERROR', 35)
+        self.penalty_no_https = config.get('SOCIALS_PENALTY_NO_HTTPS', 10)
+        self.penalty_website_no_mention = config.get('SOCIALS_PENALTY_WEBSITE_NO_MENTION', 15)
+        self.penalty_common_platform_website = config.get('SOCIALS_PENALTY_COMMON_PLATFORM_WEBSITE', 10)
+        self.penalty_no_telegram = config.get('SOCIALS_PENALTY_NO_TELEGRAM', 20)
+        self.penalty_invalid_telegram_type = config.get('SOCIALS_PENALTY_INVALID_TELEGRAM_TYPE', 20)
+        self.penalty_invalid_telegram_url = config.get('SOCIALS_PENALTY_INVALID_TELEGRAM_URL', 10)
+        self.penalty_no_twitter = config.get('SOCIALS_PENALTY_NO_TWITTER', 30)
+        self.penalty_invalid_twitter_type = config.get('SOCIALS_PENALTY_INVALID_TWITTER_TYPE', 20)
+        self.penalty_invalid_twitter_url = config.get('SOCIALS_PENALTY_INVALID_TWITTER_URL', 20)
+        self.penalty_duplicate_links = config.get('SOCIALS_PENALTY_DUPLICATE_LINKS', 15)
+
+        self.bonus_domain_match = config.get('SOCIALS_BONUS_DOMAIN_MATCH', -10)
+        # self.bonus_news_gov_website = config.get('SOCIALS_BONUS_NEWS_GOV_WEBSITE', 0) # Currently 0 in config
+
+        self.score_failed_metadata = config.get('SOCIALS_SCORE_FAILED_METADATA', 90)
+
+        # Load domain sets from config
+        self.disallowed_domains = config.get('SOCIALS_DISALLOWED_WEBSITE_DOMAINS', set())
+        self.allowed_news_domains = config.get('SOCIALS_ALLOWED_NEWS_DOMAINS', set())
+
         # Shared HTTP client for website verification
         self._verify_client = httpx.AsyncClient(timeout=10.0, follow_redirects=True, limits=httpx.Limits(max_connections=5))
 
@@ -214,103 +173,138 @@ class SocialsProcessor:
         token_name = (token_name or "").lower()
         token_symbol = (token_symbol or "").lower()
 
-        # --- Website Check (using verification results) ---
-        website = social_data.get("website") or social_data.get("homepage") or social_data.get("url") or social_data.get("external_url") # Consolidate check
-        if not website:
-            total_penalty += 40  # Major penalty for no website
-            logger.debug("Social Score Penalty: +30 (No Website URL provided)")
-        elif not isinstance(website, str):
-            total_penalty += 35 # Invalid type
-            logger.debug(f"Social Score Penalty: +30 (Invalid Website type: {type(website)})")
-        elif verification_results is None:
-            # Should not happen if website URL exists, but handle defensively
-            total_penalty += 35 # Penalty if verification wasn't run
-            logger.warning(f"Social Score Penalty: +25 (Website verification skipped for {website})")
-        elif verification_results['error']:
-            # Add penalty based on error type
-            if "Invalid URL" in verification_results['error']:
-                total_penalty += 35
-            elif "Timeout" in verification_results['error']:
-                total_penalty += 35
-            elif "HTTP Error" in verification_results['error']:
-                total_penalty += 35 # Maybe temporary server issue
-            else: # Other request errors, unexpected errors
-                total_penalty += 35
-            logger.debug(f"Social Score Penalty: +{total_penalty} (Website verification failed: {verification_results['error']})")
-        else:
-            # Website is reachable, apply finer penalties/bonuses
-            if not verification_results['uses_https']:
-                total_penalty += 10
-                logger.debug("Social Score Penalty: +10 (Website does not use HTTPS)")
-            if not verification_results['mentions_token']:
-                total_penalty += 15 # Penalty if site doesn't mention token
-                logger.debug("Social Score Penalty: +15 (Website does not mention token name/symbol)")
+        logger.debug(f"Social Links: {social_data}")
 
-            # Bonus for domain matching (keep this logic)
-            try:
-                parsed = urlparse(website)
-                domain = parsed.netloc.lower().replace('www.', '') # Normalize domain
-                if token_name and (domain.startswith(token_name) or token_name in domain):
-                    total_penalty -= 10 # Small bonus
-                    logger.debug(f"Social Score Bonus: -10 (Website domain '{domain}' matches name '{token_name}')")
-                elif token_symbol and (domain.startswith(token_symbol) or token_symbol in domain):
-                    total_penalty -= 10 # Small bonus
-                    logger.debug(f"Social Score Bonus: -10 (Website domain '{domain}' matches symbol '{token_symbol}')")
-            except Exception:
-                pass # Ignore parsing errors for bonus check
- 
-            # Penalty if website is just a link to a common platform
+        # --- Website Check ---
+        website = social_data.get("website") or social_data.get("homepage") or social_data.get("url") or social_data.get("external_url") # Consolidate check
+        is_disallowed_website = False
+        parsed_domain = None
+
+        if not website:
+            total_penalty += self.penalty_no_website
+            logger.debug(f"Social Score Penalty: +{self.penalty_no_website} (No Website URL provided)")
+        elif not isinstance(website, str):
+            total_penalty += self.penalty_invalid_website_type
+            logger.debug(f"Social Score Penalty: +{self.penalty_invalid_website_type} (Invalid Website type: {type(website)})")
+        else:
+            # 1. Parse domain and check if disallowed FIRST
             try:
                 parsed_domain = urlparse(website).netloc.lower().replace('www.', '')
-                # Check against base domains
-                if any(parsed_domain == disallowed or parsed_domain.endswith('.' + disallowed) for disallowed in DISALLOWED_WEBSITE_DOMAINS):
-                    total_penalty += 10 # Significant penalty
-                    logger.debug(f"Social Score Penalty: +10 (Website URL points to common platform: {parsed_domain})")
-            except Exception:
-                pass # Ignore parsing errors for this check too 
+                if parsed_domain: # Ensure domain was parsed
+                    is_disallowed_website = any(parsed_domain == disallowed or parsed_domain.endswith('.' + disallowed) for disallowed in self.disallowed_domains)
+                    if is_disallowed_website:
+                        total_penalty += self.penalty_common_platform_website
+                        logger.debug(f"Social Score Penalty: +{self.penalty_common_platform_website} (Website URL domain '{parsed_domain}' is disallowed, skipping further checks)")
+                else:
+                    logger.warning(f"Could not parse domain from website URL: {website}")
+                    # Treat as invalid URL? Apply penalty? For now, just log.
+                    # total_penalty += self.penalty_website_invalid_url # Or a specific penalty for parsing failure
+
+            except Exception as e:
+                 logger.warning(f"Error parsing website URL '{website}' for disallowed check: {e}")
+                 # Apply penalty? For now, just log.
+                 # total_penalty += self.penalty_website_invalid_url
+
+            # 2. If NOT disallowed, proceed with verification results
+            if not is_disallowed_website:
+                if verification_results is None:
+                    # Should not happen if website URL exists and isn't disallowed, but handle defensively
+                    total_penalty += self.penalty_website_verify_skipped
+                    logger.warning(f"Social Score Penalty: +{self.penalty_website_verify_skipped} (Website verification skipped for {website})")
+                elif verification_results['error']:
+                    # Add penalty based on error type
+                    if "Invalid URL" in verification_results['error']:
+                        total_penalty += self.penalty_website_invalid_url
+                    elif "Timeout" in verification_results['error']:
+                        total_penalty += self.penalty_website_timeout
+                    elif "HTTP Error" in verification_results['error']:
+                        total_penalty += self.penalty_website_http_error
+                    else: # Other request errors, unexpected errors
+                        total_penalty += self.penalty_website_other_error
+                    logger.debug(f"Social Score Penalty: +{total_penalty} (Website verification failed: {verification_results['error']})")
+                else:
+                    # Website is reachable, apply finer penalties/bonuses
+                    if not verification_results['uses_https']:
+                        total_penalty += self.penalty_no_https
+                        logger.debug(f"Social Score Penalty: +{self.penalty_no_https} (Website does not use HTTPS)")
+                    if not verification_results['mentions_token']:
+                        total_penalty += self.penalty_website_no_mention
+                        logger.debug(f"Social Score Penalty: +{self.penalty_website_no_mention} (Website does not mention token name/symbol)")
+
+                    # Bonus for domain matching (only if not disallowed)
+                    try:
+                        # Domain already parsed as parsed_domain
+                        if parsed_domain:
+                            if token_name and (parsed_domain.startswith(token_name) or token_name in parsed_domain):
+                                total_penalty += self.bonus_domain_match
+                                logger.debug(f"Social Score Bonus: {self.bonus_domain_match} (Website domain '{parsed_domain}' matches name '{token_name}')")
+                            elif token_symbol and (parsed_domain.startswith(token_symbol) or token_symbol in parsed_domain):
+                                total_penalty += self.bonus_domain_match
+                                logger.debug(f"Social Score Bonus: {self.bonus_domain_match} (Website domain '{parsed_domain}' matches symbol '{token_symbol}')")
+                    except Exception:
+                        pass # Ignore errors during bonus check
+
+            # 3. Check for allowed news/gov domains (runs regardless of disallowed status)
+            if parsed_domain: # Only check if domain was successfully parsed
+                try:
+                    is_allowed_news_gov = (
+                        any(parsed_domain == allowed or parsed_domain.endswith('.' + allowed) for allowed in self.allowed_news_domains)
+                        or parsed_domain.endswith('.gov')
+                    )
+                    if is_allowed_news_gov:
+                        # total_penalty += self.bonus_news_gov_website # Apply bonus/penalty if configured
+                        logger.debug(f"Social Score Info: Website URL domain '{parsed_domain}' is an allowed news/gov domain.")
+                    # else: # Optional: Log if domain is NOT allowed news/gov
+                    #    logger.debug(f"Social Score Info: Website URL domain '{parsed_domain}' is not in allowed news/gov list.")
+                except Exception:
+                    pass # Ignore parsing errors for this check too
 
             # Bonus if website is from major news outlet
             try:
                 parsed_domain = urlparse(website).netloc.lower().replace('www.', '')
                 # Check against base domains
-                if (
-                    any(parsed_domain == allowed or parsed_domain.endswith('.' + allowed) for allowed in ALLOWED_NEWS_WEBSITE_DOMAINS)
-                    or parsed_domain.endswith('.gov')  # Allow all government websites
-                ):
-                    total_penalty += 0 # Significant penalty
-                    logger.debug(f"Social Score Bonus: +0 (Website URL points to common news outlet: {parsed_domain})")
+                # Check against allowed news/gov domains
+                is_allowed_news_gov = (
+                    any(parsed_domain == allowed or parsed_domain.endswith('.' + allowed) for allowed in self.allowed_news_domains)
+                    or parsed_domain.endswith('.gov')
+                )
+                if is_allowed_news_gov:
+                    # total_penalty += self.bonus_news_gov_website # Apply bonus/penalty if configured
+                    logger.debug(f"Social Score Info: Website URL domain '{parsed_domain}' is an allowed news/gov domain.")
+                # else: # Optional: Log if domain is NOT allowed news/gov
+                #    logger.debug(f"Social Score Info: Website URL domain '{parsed_domain}' is not in allowed news/gov list.")
             except Exception:
                 pass # Ignore parsing errors for this check too
 
         # --- Telegram Check ---
         telegram = social_data.get("telegram") or social_data.get("tg") # Common keys
         if not telegram:
-            total_penalty += 20
-            logger.debug("Social Score Penalty: +20 (No Telegram)")
+            total_penalty += self.penalty_no_telegram
+            logger.debug(f"Social Score Penalty: +{self.penalty_no_telegram} (No Telegram)")
         elif not isinstance(telegram, str):
-             total_penalty += 20 # Invalid type
-             logger.debug(f"Social Score Penalty: +20 (Invalid Telegram type: {type(telegram)})")
+             total_penalty += self.penalty_invalid_telegram_type
+             logger.debug(f"Social Score Penalty: +{self.penalty_invalid_telegram_type} (Invalid Telegram type: {type(telegram)})")
         elif not is_valid_telegram(telegram):
-            total_penalty += 10 # Penalty for invalid format/URL
-            logger.debug(f"Social Score Penalty: +10 (Invalid Telegram URL: {telegram})")
+            total_penalty += self.penalty_invalid_telegram_url
+            logger.debug(f"Social Score Penalty: +{self.penalty_invalid_telegram_url} (Invalid Telegram URL: {telegram})")
 
         # --- Twitter Check ---
         twitter = social_data.get("twitter") or social_data.get("x") # Common keys
         if not twitter:
-            total_penalty += 30
-            logger.debug("Social Score Penalty: +30 (No Twitter/X)")
+            total_penalty += self.penalty_no_twitter
+            logger.debug(f"Social Score Penalty: +{self.penalty_no_twitter} (No Twitter/X)")
         elif not isinstance(twitter, str):
-             total_penalty += 20 # Invalid type
-             logger.debug(f"Social Score Penalty: +20 (Invalid Twitter type: {type(twitter)})")
+             total_penalty += self.penalty_invalid_twitter_type
+             logger.debug(f"Social Score Penalty: +{self.penalty_invalid_twitter_type} (Invalid Twitter type: {type(twitter)})")
         elif not is_valid_twitter(twitter):
-            total_penalty += 20 # Penalty for invalid format/URL
-            logger.debug(f"Social Score Penalty: +20 (Invalid Twitter URL: {twitter})")
+            total_penalty += self.penalty_invalid_twitter_url
+            logger.debug(f"Social Score Penalty: +{self.penalty_invalid_twitter_url} (Invalid Twitter URL: {twitter})")
 
         # --- Duplicate Link Check ---
         valid_links = [link for link in [website, telegram, twitter] if link] # Get non-null links
         if len(valid_links) > len(set(valid_links)): # Check if number of links > number of unique links
-            total_penalty += 15 # Significant penalty for duplicate links
-            logger.debug("Social Score Penalty: +15 (Duplicate URLs found for different social types)")
+            total_penalty += self.penalty_duplicate_links
+            logger.debug(f"Social Score Penalty: +{self.penalty_duplicate_links} (Duplicate URLs found for different social types)")
 
         # Ensure score is within 0-100 range
         final_score = min(max(total_penalty, 0), 100)
@@ -365,7 +359,7 @@ class SocialsProcessor:
             if not metadata:
                 logger.warning(f"Could not fetch or parse metadata for {mint} from {token_info['uri']}. Cannot process socials.")
                  # Update DB to mark as checked but failed? Score as high penalty?
-                await self._update_token_socials(mint, None, None, None, 90) # High penalty for failed fetch
+                await self._update_token_socials(mint, None, None, None, self.score_failed_metadata)
                 return
 
             # 3. Extract social links (handle different possible keys)
@@ -389,13 +383,37 @@ class SocialsProcessor:
                 "telegram": telegram_url,
                 "twitter": twitter_url
             }
-
-            # 4. Verify Website Details (if URL exists)
+            # 4. Check if website is disallowed and Verify Details (if applicable)
             verification_results = None
+            is_disallowed_website = False
+            parsed_domain = None # Define parsed_domain here for broader scope
+
             if website_url:
-                verification_results = await self._verify_website_details(website_url, token_info['name'], token_info['symbol'])
+                # Parse domain and check if disallowed FIRST
+                try: # Inner try for parsing
+                    parsed_domain = urlparse(website_url).netloc.lower().replace('www.', '')
+                    if parsed_domain: # Ensure domain was parsed
+                        is_disallowed_website = any(parsed_domain == disallowed or parsed_domain.endswith('.' + disallowed) for disallowed in self.disallowed_domains)
+                        if is_disallowed_website:
+                             logger.debug(f"Website domain '{parsed_domain}' is disallowed for {mint}. Skipping verification.")
+                    else:
+                        logger.warning(f"Could not parse domain from website URL for {mint}: {website_url}")
+                except Exception as e: # Inner except for parsing
+                    logger.warning(f"Error parsing website URL '{website_url}' for disallowed check for {mint}: {e}")
+
+                # Log the decision logic
+                #logger.debug(f"Disallowed check for {mint}: URL='{website_url}', Parsed Domain='{parsed_domain}', Is Disallowed={is_disallowed_website}")
+
+                # Only verify if the website exists AND it's NOT disallowed
+                if not is_disallowed_website:
+                    logger.debug(f"Executing website verification for {mint} (URL: {website_url})")
+                    # Correctly indented under the outer `if website_url:`
+                    verification_results = await self._verify_website_details(website_url, token_info['name'], token_info['symbol'])
+                else:
+                     logger.debug(f"Skipping website verification for {mint} as domain '{parsed_domain}' is disallowed.")
 
             # 5. Calculate score (passing verification results)
+            # Correctly indented under the main `try:`
             social_score = self._calculate_social_score(
                 social_links_for_scoring,
                 token_info['name'],
@@ -404,6 +422,7 @@ class SocialsProcessor:
             )
 
             # 6. Update DB
+            # Correctly indented under the main `try:`
             await self._update_token_socials(
                 mint,
                 website_url, # Use validated/extracted URLs
@@ -411,6 +430,7 @@ class SocialsProcessor:
                 twitter_url,
                 social_score
             )
-
+        # Correctly aligned with the main `try:` at line 338
         except Exception as e:
+            # Correctly indented under the `except:`
             logger.error(f"💥 Unexpected error processing socials for {mint}: {e}", exc_info=True)

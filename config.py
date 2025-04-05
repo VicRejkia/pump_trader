@@ -65,76 +65,50 @@ LOG_LEVEL_CONSOLE: str = "DEBUG"
 LOG_LEVEL_FILE: str = "DEBUG"
 LOG_STORAGE_PATH = "data"
 
-
-
-# Domains that are generally not acceptable as a primary project website
-DISALLOWED_WEBSITE_DOMAINS = {
-    "youtube.com", "youtu.be",
-    "tiktok.com",
-    "spotify.com",
-    "soundcloud.com",
-    "discord.com", "discord.gg", # Discord invite links are not websites
-    "medium.com",
-    "substack.com",
-    "linktr.ee",
-    "t.me", # Handled separately
-    "twitter.com", "x.com", # Handled separately
-    "facebook.com",
-    "instagram.com",
-    "linkedin.com",
-    "reddit.com",
-    "twitch.tv",
-    "kick.com",
-    "google.com",
-    # Add other generic platforms if needed
+# --- Socials Processor Configuration ---
+SOCIALS_DISALLOWED_WEBSITE_DOMAINS = {
+    "youtube.com", "youtu.be", "tiktok.com", "spotify.com", "soundcloud.com",
+    "discord.com", "discord.gg", "medium.com", "substack.com", "linktr.ee",
+    "t.me", "twitter.com", "x.com", "facebook.com", "instagram.com",
+    "linkedin.com", "reddit.com", "twitch.tv", "kick.com", "google.com",
 }
-ALLOWED_NEWS_WEBSITE_DOMAINS = {
-    "bbc.com",
-    "cnn.com",
-    "reuters.com",
-    "apnews.com",  # Associated Press
-    "nytimes.com",  # The New York Times
-    "washingtonpost.com",
-    "theguardian.com",
-    "bloomberg.com",
-    "forbes.com",
-    "wsj.com",  # The Wall Street Journal
-    "ft.com",  # Financial Times
-    "npr.org",  # National Public Radio
-    "cnbc.com",
-    "abcnews.go.com",
-    "nbcnews.com",
-    "cbsnews.com",
-    "latimes.com",  # Los Angeles Times
-    "usatoday.com",
-    "politico.com",
-    "aljazeera.com",
-    "theatlantic.com",
-    "newsweek.com",
-    "time.com",
-    "economist.com",
-    "sky.com",  # Sky News
-    "independent.co.uk",
-    "telegraph.co.uk",
-    "dailymail.co.uk",
-    "mirror.co.uk",
-    "huffpost.com",  # Huffington Post
-    "vox.com",
-    "slate.com",
-    "buzzfeednews.com",
-    "axios.com",
-    "thehill.com",
-    "scmp.com",  # South China Morning Post
-    "japantimes.co.jp",
-    "hindustantimes.com",
-    "indiatoday.in",
-    "timesofindia.indiatimes.com",
-    "straitstimes.com",
-    "smh.com.au",  # Sydney Morning Herald
-    "theage.com.au",
-    "globalnews.ca",
-    "cbc.ca",  # Canadian Broadcasting Corporation
-    "bitcointalk.org",
-    "cnbcnews.us",
-    "truthsocial.com"
+SOCIALS_ALLOWED_NEWS_DOMAINS = {
+    "bbc.com", "cnn.com", "reuters.com", "apnews.com", "nytimes.com",
+    "washingtonpost.com", "theguardian.com", "bloomberg.com", "forbes.com",
+    "wsj.com", "ft.com", "npr.org", "cnbc.com", "abcnews.go.com",
+    "nbcnews.com", "cbsnews.com", "latimes.com", "usatoday.com",
+    "politico.com", "aljazeera.com", "theatlantic.com", "newsweek.com",
+    "time.com", "economist.com", "sky.com", "independent.co.uk",
+    "telegraph.co.uk", "dailymail.co.uk", "mirror.co.uk", "huffpost.com",
+    "vox.com", "slate.com", "buzzfeednews.com", "axios.com", "thehill.com",
+    "scmp.com", "japantimes.co.jp", "hindustantimes.com", "indiatoday.in",
+    "timesofindia.indiatimes.com", "straitstimes.com", "smh.com.au",
+    "theage.com.au", "globalnews.ca", "cbc.ca", "bitcointalk.org",
+    "cnbcnews.us", "truthsocial.com"
 }
+
+# Penalties (Higher = Worse)
+SOCIALS_PENALTY_NO_WEBSITE = 40
+SOCIALS_PENALTY_INVALID_WEBSITE_TYPE = 35
+SOCIALS_PENALTY_WEBSITE_VERIFY_SKIPPED = 35
+SOCIALS_PENALTY_WEBSITE_INVALID_URL = 35
+SOCIALS_PENALTY_WEBSITE_TIMEOUT = 35
+SOCIALS_PENALTY_WEBSITE_HTTP_ERROR = 35
+SOCIALS_PENALTY_WEBSITE_OTHER_ERROR = 35
+SOCIALS_PENALTY_NO_HTTPS = 10
+SOCIALS_PENALTY_WEBSITE_NO_MENTION = 15
+SOCIALS_PENALTY_COMMON_PLATFORM_WEBSITE = 20
+SOCIALS_PENALTY_NO_TELEGRAM = 20
+SOCIALS_PENALTY_INVALID_TELEGRAM_TYPE = 20
+SOCIALS_PENALTY_INVALID_TELEGRAM_URL = 10
+SOCIALS_PENALTY_NO_TWITTER = 30
+SOCIALS_PENALTY_INVALID_TWITTER_TYPE = 20
+SOCIALS_PENALTY_INVALID_TWITTER_URL = 20
+SOCIALS_PENALTY_DUPLICATE_LINKS = 15
+
+# Bonuses (Negative = Better)
+SOCIALS_BONUS_DOMAIN_MATCH = -10
+# SOCIALS_BONUS_NEWS_GOV_WEBSITE = 0 # No penalty/bonus currently applied for news/gov sites
+
+# Default Scores
+SOCIALS_SCORE_FAILED_METADATA = 90 # Score assigned if metadata fetch fails

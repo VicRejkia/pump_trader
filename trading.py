@@ -273,7 +273,7 @@ class TradingManager:
                             sell_reason = "First TP"
                             sell_partial = True
                             # Sell configured percentage of the *initial* amount
-                            sell_percentage = self.config['FIRST_TAKE_PROFIT_SELL_PERCENT'] / 100.0
+                            sell_percentage = self.config['INITIAL_TAKE_PROFIT_PERCENT'] / 100.0
                             logger.info(f"🎯 First TP hit for {mint} (ID: {pos_id}) at price {current_price:.9f} (Threshold: {initial_tp_price:.9f}). Selling {sell_percentage*100}%.")
 
                         # 4. Trailing Stop Loss (Only active *after* First TP is hit)

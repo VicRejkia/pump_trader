@@ -274,6 +274,7 @@ class DatabaseClient:
                     'trades',             # No explicit FK, but related to tokens
                     'migrations',         # Standalone or related? Assuming standalone for drop order
                     'tokens',             # Drop after dependents
+                    'portfolio',          # Assuming this is a standalone table
                     'rugcheck_backup',
                     'trades_backup',
                     'migrations_backup',

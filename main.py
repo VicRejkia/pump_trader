@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import signal
 import traceback
+import inspect
 import config # Import the config module
 # Removed load_config import
 from database import DatabaseClient
@@ -99,30 +100,30 @@ class TradingBot:
 
         # Create configuration dictionary from config module attributes
         try:
-            # Explicitly list required config keys to avoid issues
-            required_keys = [
-                'SOL_TO_BUY',
-                'INITIAL_STOP_LOSS_PERCENT', 'INITIAL_TAKE_PROFIT_PERCENT',
-                'FIRST_SELL_PERCENT', 'TRAILING_STOP_LOSS_PERCENT', 'SECOND_TAKE_PROFIT_PERCENT',
-                'DEFAULT_BUY_FEE', 'DEFAULT_BUY_TIP', 'DEFAULT_SELL_FEE', 'DEFAULT_SELL_TIP',
-                'DEFAULT_VOLUME_THRESHOLD', 'DEFAULT_MARKETCAP_THRESHOLD', 'MIN_VOLATILITY',
-                'DEFAULT_RUGCHECK_SCORE_THRESHOLD', 'DEFAULT_SOCIAL_SCORE_THRESHOLD',
-                'DEFAULT_TIME_INTERVALL'
-                # Note: PROFIT_MARGIN was removed as TP levels are now explicit percentages
-            ]
-            self.config = {key: getattr(config, key) for key in required_keys if hasattr(config, key)}
-            # Verify all required keys were found
-            if len(self.config) != len(required_keys):
-                 missing_keys = [key for key in required_keys if key not in self.config]
-                 logger.error(f"❌ Missing required configuration keys in config.py: {missing_keys}")
-                 return # Cannot proceed without full config
-            logger.info("⚙️ Configuration created successfully from module.")
-        except AttributeError as e:
-             logger.error(f"❌ Failed to create configuration dictionary: Missing attribute in config.py - {e}", exc_info=True)
-             return
+            # Dynamically load all uppercase constants from config.py
+            config_vars = {}
+            for key in dir(config):
+                if key.isupper() and not key.startswith('_'):
+                    value = getattr(config, key)
+                    # Skip modules, classes, and functions
+                    if not inspect.ismodule(value) and not inspect.isclass(value) and not inspect.isfunction(value):
+                        config_vars[key] = value
+
+            # Optional: Validate presence of critical variables (example)
+            critical_vars = ['SOL_TO_BUY', 'WS_HOST']  # Add any critical vars here
+            missing_critical = [var for var in critical_vars if var not in config_vars]
+            if missing_critical:
+                logger.error(f"❌ Missing critical configuration variables: {missing_critical}")
+                return
+
+            self.config = config_vars
+            logger.info("⚙️ Configuration loaded successfully from module.")
+
         except Exception as e:
-            logger.error(f"❌ Failed to create configuration dictionary: {e}", exc_info=True)
-            return # Cannot proceed without config
+            logger.error(f"❌ Failed to load configuration: {e}", exc_info=True)
+            return
+        
+        logger.debug(f"🔧 CONFIG: {self.config}")
 
         await self.db_client.connect()
         await self.state.set_db_client(self.db_client) # Store db_client in GlobalState
@@ -151,7 +152,7 @@ class TradingBot:
         await self.state.set_websocket_handler(self.ws_handler) # Store ws_handler in GlobalState
 
         # Instantiate Processors after dependencies are ready
-        socials_proc = SocialsProcessor(self.state, self.db_client)
+        socials_proc = SocialsProcessor(self.state, self.db_client, self.config) # Pass config
         # Pass socials_proc to Rugcheck constructor (will require updating Rugcheck.__init__)
         rugchecker = Rugcheck(self.state, self.db_client, self.ws_handler, socials_proc)
         self.trading_manager = TradingManager(self.db_client.pool, self.config, self.state) # Instantiate TradingManager
