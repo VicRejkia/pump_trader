@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS portfolio (
     reason TEXT,                      -- Reason for sell ('Stop Loss', 'First TP', 'Second TP', 'Trailing SL', 'Breakeven SL', etc.)
 
     -- Fields primarily relevant for the original 'buy' entry
+    total_investment_sol NUMERIC,     -- Total SOL invested in this position (including fees)
     initial_tokens NUMERIC,           -- Total tokens acquired in the initial buy tx
     remaining_tokens NUMERIC,         -- Tokens currently held from the initial buy tx (updated on sells)
     highest_price NUMERIC NOT NULL DEFAULT 0.0, -- Highest price observed since the buy

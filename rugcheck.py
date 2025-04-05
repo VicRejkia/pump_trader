@@ -183,8 +183,8 @@ class Rugcheck:
                         #      logger.debug(f"Token {mint} previously reached max fetch attempts ({current_attempts}), not adding during refresh.")
 
                     logger.debug(f"🔄 Refreshed RugCheck queue. Added {tokens_added} tokens (current size: {self.queue.qsize()}).")
-                else:
-                    logger.debug("✅ No active tokens found needing RugCheck data during refresh.")
+                #else:
+                    # logger.debug("✅ No active tokens found needing RugCheck data during refresh.")
             return True # Indicate refresh completed
 
         except Exception as e:
@@ -394,7 +394,8 @@ class Rugcheck:
                                 "method": "unsubscribeTokenTrade",
                                 "keys": [mint]
                             })), timeout=5.0)
-                            logger.debug(f"👋 Sent unsubscribe request for high-score token {mint}.")
+                            # logger.debug(f"🌶️ TOO SPICY: Sent unsubscribe request for token {mint}")
+                            logger.debug(f"[bold]:hot_pepper:  Too spicy:[/bold] Sent unsubscribe request for token {mint}")
                             unsubscribed_ws = True
                         except asyncio.TimeoutError:
                             logger.error(f"⏳ Timeout sending unsubscribe for high-score token {mint}.")
@@ -405,7 +406,7 @@ class Rugcheck:
 
                 # 3. Backup and Delete
                 await self.db_client.backup_and_delete_token(mint, datetime.now(timezone.utc))
-                logger.debug(f"🧹 Backed up and deleted high-score token {mint}.")
+                #logger.debug(f"🧹 Backed up and deleted high-score token {mint}.")
 
                 # Even if unsubscribe fails, we consider processing successful as it's deactivated in DB
                 return True # Indicate success (deactivation handled)
@@ -421,7 +422,7 @@ class Rugcheck:
 
             # --- Process Socials AFTER successful RugCheck (if score is OK) ---
             if self.socials_processor:
-                logger.debug(f"Triggering socials processing for {mint} after successful RugCheck.")
+                # logger.debug(f"Triggering socials processing for {mint} after successful RugCheck.")
                 # Run social processing in the background to avoid blocking the rugcheck worker
                 asyncio.create_task(self.socials_processor.process_token(mint))
             else:

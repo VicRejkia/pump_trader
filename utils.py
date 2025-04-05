@@ -63,7 +63,7 @@ async def play_sell_tp_sound_async():
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, play_sell_tp_sound)
 
-def format_buy_order_log(state, mint: str, price_per_token: float, tokens_bought: float, market_cap: float, sol_price: float) -> str:
+def format_buy_order_log(state, mint: str, price_per_token: float, tokens_bought: float, market_cap: float, sol_price: float, total_investment: float) -> str:
     """Formats the log message for a buy order."""
     if sol_price:
         price_usd = price_per_token * sol_price
@@ -74,6 +74,7 @@ def format_buy_order_log(state, mint: str, price_per_token: float, tokens_bought
             f"│ Price: {price_per_token:.8f} SOL (${price_usd:.8f} USD)\n"
             f"│ Market Cap: {market_cap:,.2f} SOL (${market_cap_usd:,.2f} USD)\n"
             f"│ Tokens Bought: {tokens_bought}\n"
+            f"│ Total Investment: {total_investment}\n"
         )
     else:
         return (
@@ -82,7 +83,9 @@ def format_buy_order_log(state, mint: str, price_per_token: float, tokens_bought
             f"│ Price: {price_per_token:.8f} SOL\n"
             f"│ Market Cap: {market_cap:,.2f} SOL\n"
             f"│ Tokens Bought: {tokens_bought}\n"
+            f"│ Total Investment: {total_investment}\n"
         )
+    
 
 def format_sell_order_log(mint: str, token_name: str, market_cap_sol: float, profit: float, reason: str, sol_price: float | None) -> str:
     """Formats the log message for a sell order."""

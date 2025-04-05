@@ -78,7 +78,7 @@ class TradingBot:
         logger.info("⏹ Shutdown initiated. Cleaning up resources...")
         try:
             await asyncio.wait_for(self.ws_handler.shutdown(), timeout=60)
-            logger.info("🛑 WebSocket shutdown complete.")
+            logger.info(":stop_sign: WebSocket shutdown complete.")
         except Exception as e:
             logger.error(f"WebSocket shutdown error: {e}", exc_info=True)
         
@@ -93,7 +93,7 @@ class TradingBot:
         for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
-        logger.info("🛑 Shutdown complete.")
+        logger.info(":stop_sign: Shutdown complete.")
 
     async def main(self):
         """Main execution loop of the bot."""
@@ -119,7 +119,7 @@ class TradingBot:
                 return
 
             self.config = config_vars
-            logger.info("⚙️ Configuration loaded successfully from module.")
+            logger.info(":gear: Configuration loaded successfully from module.")
 
         except Exception as e:
             logger.error(f"❌ Failed to load configuration: {e}", exc_info=True)
