@@ -269,7 +269,7 @@ class SocialsProcessor:
                     or parsed_domain.endswith('.gov')
                 )
                 if is_allowed_news_gov:
-                    # total_penalty += self.bonus_news_gov_website # Apply bonus/penalty if configured
+                    total_penalty += self.bonus_news_gov_website # Apply bonus/penalty if configured
                     logger.debug(f"Social Score Info: Website URL domain '{parsed_domain}' is an allowed news/gov domain.")
                 # else: # Optional: Log if domain is NOT allowed news/gov
                 #    logger.debug(f"Social Score Info: Website URL domain '{parsed_domain}' is not in allowed news/gov list.")

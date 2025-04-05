@@ -7,55 +7,53 @@ from datetime import timedelta
 """ Configuration constants and settings for the trading bot. """
 # PumpPortal
 WS_HOST: str = "wss://pumpportal.fun/api/data"
-MAX_SUBSCRIPTION_BATCH: int = 100  # For batch unsubscription
+MAX_SUBSCRIPTION_BATCH: int = 100           # For batch unsubscription
 
 # Trading configuration
-SOL_TO_BUY = 0.1                 # Amount of SOL to spend on each buy
-INITIAL_SOL_BALANCE = 2.0        # Starting SOL balance for PnL tracking
+SOL_TO_BUY = 0.1                            # Amount of SOL to spend on each buy
+INITIAL_SOL_BALANCE = 2.0                   # Starting SOL balance for PnL tracking
 
 # --- New Multi-Stage Sell Logic Configuration ---
-INITIAL_STOP_LOSS_PERCENT = 50.0   # Initial SL as % below buy price (e.g., 25.0 for -25%)
-INITIAL_TAKE_PROFIT_PERCENT = 50.0 # First TP as % above buy price (e.g., 50.0 for +50%)
-FIRST_SELL_PERCENT = 50.0          # % of *initial* tokens to sell at First TP (e.g., 50.0 for 50%)
-TRAILING_STOP_LOSS_PERCENT = 50.0  # Trailing SL % drop from highest price *after* First TP (e.g., 15.0 for -15%)
-SECOND_TAKE_PROFIT_PERCENT = 200.0 # Second TP as % above buy price (e.g., 200.0 for +200%)
+INITIAL_STOP_LOSS_PERCENT = 50.0            # Initial SL as % below buy price (e.g., 25.0 for -25%)
+INITIAL_TAKE_PROFIT_PERCENT = 50.0          # First TP as % above buy price (e.g., 50.0 for +50%)
+FIRST_SELL_PERCENT = 50.0                   # % of *initial* tokens to sell at First TP (e.g., 50.0 for 50%)
+TRAILING_STOP_LOSS_PERCENT = 50.0           # Trailing SL % drop from highest price *after* First TP (e.g., 15.0 for -15%)
+SECOND_TAKE_PROFIT_PERCENT = 200.0          # Second TP as % above buy price (e.g., 200.0 for +200%)
 
 # --- Fees and Tips ---
-DEFAULT_BUY_FEE = 0.001        # Fee for buying in SOL
-DEFAULT_BUY_TIP = 0.001        # Tip for buying in SOL
-DEFAULT_SELL_FEE = 0.001       # Fee for selling in SOL
-DEFAULT_SELL_TIP = 0.001       # Tip for selling in SOL
+DEFAULT_BUY_FEE = 0.001                     # Fee for buying in SOL
+DEFAULT_BUY_TIP = 0.001                     # Tip for buying in SOL
+DEFAULT_SELL_FEE = 0.001                    # Fee for selling in SOL
+DEFAULT_SELL_TIP = 0.001                    # Tip for selling in SOL
 
 
 # Trading thresholds
-DEFAULT_RUGCHECK_SCORE_THRESHOLD = 600
-DEFAULT_SOCIAL_SCORE_THRESHOLD = 50
-DEFAULT_VOLUME_THRESHOLD = 10000
-DEFAULT_MARKETCAP_THRESHOLD = 10000
-MIN_VOLATILITY = 0.05       # Minimum volatility threshold in %
-DEFAULT_TIME_INTERVALL = 10 # Time interval for checking volatility, volume and marketcap in minutes
-MAX_DRAWDOWN_SOL = 10          # Maximum allowed 24h loss in SOL
-DRAWDOWN_CHECK_INTERVAL = 3600  # Drawdown check interval (seconds)
-
-# Database settings (Credentials moved to .env)
+DEFAULT_RUGCHECK_SCORE_THRESHOLD = 600      # No trading if Rugcheck score is above this threshold
+DEFAULT_SOCIAL_SCORE_THRESHOLD = 50         # No trading if Social score is above this threshold
+DEFAULT_VOLUME_THRESHOLD = 10000            # Minimum volume threshold in USD
+DEFAULT_MARKETCAP_THRESHOLD = 10000         # Minimum market cap threshold in USD
+MIN_VOLATILITY = 0.05                       # Minimum volatility threshold in %
+DEFAULT_TIME_INTERVALL = 10                 # Time interval for checking volatility, volume and marketcap in XX minutes
+MAX_DRAWDOWN_SOL = 10                       # Maximum allowed 24h loss in SOL (not integrated)
+DRAWDOWN_CHECK_INTERVAL = 3600              # Drawdown check interval (seconds) (not integrated)
 
 # UNSUBSCRIBING CONDITIONS
 INACTIVITY_PERIOD = timedelta(minutes=5)
-MIN_MARKET_CAP = 4000          # Minimum market cap (in USD)
+MIN_MARKET_CAP = 4000                       # Minimum market cap (in USD)
 
 # Subscription tracking
-ACTIVE_SUBSCRIPTIONS = set()
-NEW_TOKEN_SUBSCRIPTION = False
+ACTIVE_SUBSCRIPTIONS = set()                # leave it alone
+NEW_TOKEN_SUBSCRIPTION = False              # leave it alone
 
 # Token and API configurations
-TOTAL_SUPPLY = 1000000000   # Assumed total supply if not provided
+TOTAL_SUPPLY = 1000000000                   # Assumed total supply if not provided
 PUMPPORTAL_WS = "wss://pumpportal.fun/api/data"
 
 RUGCHECK_AUTH_API = "https://api.rugcheck.xyz/auth/login/solana"
 RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens"
-RUGCHECK_RATE_LIMIT = 10       # 10 requests per minute
-RUGCHECK_INTERVAL = 60         # 60 seconds interval for RugCheck checks
-RUGCHECK_SCORE_THRESHOLD = 1000 # Score above which a token is considered high risk and deactivated
+RUGCHECK_RATE_LIMIT = 10                    # 10 requests per minute
+RUGCHECK_INTERVAL = 60                      # 60 seconds interval for RugCheck checks
+RUGCHECK_SCORE_THRESHOLD = 1000             # Score above which a token is considered high risk and deactivated
 
 # SOL price configuration
 SOL_PRICE_API_URL = "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd"
@@ -97,19 +95,19 @@ SOCIALS_PENALTY_WEBSITE_TIMEOUT = 35
 SOCIALS_PENALTY_WEBSITE_HTTP_ERROR = 35
 SOCIALS_PENALTY_WEBSITE_OTHER_ERROR = 35
 SOCIALS_PENALTY_NO_HTTPS = 10
-SOCIALS_PENALTY_WEBSITE_NO_MENTION = 15
-SOCIALS_PENALTY_COMMON_PLATFORM_WEBSITE = 20
-SOCIALS_PENALTY_NO_TELEGRAM = 20
-SOCIALS_PENALTY_INVALID_TELEGRAM_TYPE = 20
-SOCIALS_PENALTY_INVALID_TELEGRAM_URL = 10
+SOCIALS_PENALTY_WEBSITE_NO_MENTION = 15         # No mention of token name or symbol in website
+SOCIALS_PENALTY_COMMON_PLATFORM_WEBSITE = 30    # Common platforms like Youtube, TikTok, etc.
+SOCIALS_PENALTY_NO_TELEGRAM = 30
+SOCIALS_PENALTY_INVALID_TELEGRAM_TYPE = 25
+SOCIALS_PENALTY_INVALID_TELEGRAM_URL = 25
 SOCIALS_PENALTY_NO_TWITTER = 30
-SOCIALS_PENALTY_INVALID_TWITTER_TYPE = 20
-SOCIALS_PENALTY_INVALID_TWITTER_URL = 20
-SOCIALS_PENALTY_DUPLICATE_LINKS = 15
+SOCIALS_PENALTY_INVALID_TWITTER_TYPE = 25
+SOCIALS_PENALTY_INVALID_TWITTER_URL = 25
+SOCIALS_PENALTY_DUPLICATE_LINKS = 15            # Duplicate links in metadata
 
 # Bonuses (Negative = Better)
 SOCIALS_BONUS_DOMAIN_MATCH = -10
-# SOCIALS_BONUS_NEWS_GOV_WEBSITE = 0 # No penalty/bonus currently applied for news/gov sites
+SOCIALS_BONUS_NEWS_GOV_WEBSITE = 0              # No penalty/bonus currently applied for news/gov sites
 
 # Default Scores
 SOCIALS_SCORE_FAILED_METADATA = 90 # Score assigned if metadata fetch fails

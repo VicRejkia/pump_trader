@@ -415,7 +415,7 @@ class TradingManager:
             # Sell record has 0 remaining/initial/sl/highest
             # Fetch token name for logging
             token_name_row = await conn.fetchrow("SELECT name FROM tokens WHERE mint = $1", mint)
-            token_name = token_name_row['tokenmeta_name'] if token_name_row else None
+            token_name = token_name_row['name'] if token_name_row else None
 
             # Get SOL price for logging
             sol_price = await self.state.get_sol_price()
