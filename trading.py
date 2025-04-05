@@ -13,7 +13,7 @@ from logger import logger
 from state import GlobalState # Import GlobalState to update balance
 from utils import (
     play_buy_opportunity_sound, play_sell_sl_sound_async, play_sell_tp_sound_async,
-    format_buy_order_log # calculate_market_cap might not be needed if done in SQL/price fetch
+    format_buy_order_log, format_sell_order_log # Import the new sell log formatter
 )
 # Removed unused imports like np, json, get_db, calculate_market_cap (if not used)
 # Config dictionary is passed in __init__
@@ -413,11 +413,27 @@ class TradingManager:
             ''', mint, current_price, market_cap_sol, net_sol_received, tokens_to_sell,
                sell_fee, sell_tip, profit, reason, datetime.now(timezone.utc))
             # Sell record has 0 remaining/initial/sl/highest
+            # Fetch token name for logging
+            token_name_row = await conn.fetchrow("SELECT tokenMeta_name FROM tokens WHERE mint = $1", mint)
+            token_name = token_name_row['tokenmeta_name'] if token_name_row else None
 
-            logger.info(f"✅ Sold {tokens_to_sell:.6f} tokens of {mint} (ID: {position_id_to_update}) for {profit:.6f} SOL profit ({reason}). New status: {new_status}")
+            # Get SOL price for logging
+            sol_price = await self.state.get_sol_price()
+
+            # Use the new formatted log message
+            logger.info(format_sell_order_log(
+                mint=mint,
+                token_name=token_name,
+                market_cap_sol=market_cap_sol,
+                profit=profit,
+                reason=reason,
+                sol_price=sol_price
+            ))
+            # Removed old log message here
 
             # Update global SOL balance using the instance passed to the manager
             await self.state.update_sol_balance(net_sol_received) # Add received SOL
+
             # Play sounds (consider moving sound logic outside transaction if it causes delays/failures)
             # Use run_in_executor or similar if sounds block async loop
             if reason == "Stop Loss":

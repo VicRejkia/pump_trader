@@ -84,6 +84,33 @@ def format_buy_order_log(state, mint: str, price_per_token: float, tokens_bought
             f"│ Tokens Bought: {tokens_bought}\n"
         )
 
+def format_sell_order_log(mint: str, token_name: str, market_cap_sol: float, profit: float, reason: str, sol_price: float | None) -> str:
+    """Formats the log message for a sell order."""
+    profit_sign = "📈" if profit >= 0 else "📉"
+    profit_text = f"{profit:+.6f} SOL" # Always show sign
+
+    if sol_price and sol_price > 0:
+        market_cap_usd = market_cap_sol * sol_price
+        profit_usd = profit * sol_price
+        profit_text += f" (${profit_usd:+.2f} USD)" # Add USD profit
+        market_cap_text = f"{market_cap_sol:,.2f} SOL (${market_cap_usd:,.2f} USD)"
+    else:
+        # Handle case where SOL price might not be available
+        market_cap_text = f"{market_cap_sol:,.2f} SOL (USD price unavailable)"
+        profit_text += " (USD profit unavailable)"
+
+
+    # Use token_name if available, otherwise just mint
+    display_name = f"{token_name} ({mint})" if token_name else mint
+
+    return (
+        f"*** {profit_sign} SELL Order ({reason}) {profit_sign} ***\n"
+        f"│ Token: {display_name}\n"
+        f"│ Market Cap: {market_cap_text}\n"
+        f"│ Profit: {profit_text}\n"
+    )
+    
+
 def calculate_social_score(social_data: dict, token_name: str, token_symbol: str) -> int:
     """Computes a social risk score based on provided social data."""
     total_penalty = 0
