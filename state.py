@@ -5,6 +5,7 @@ Manages mutable global state such as SOL price, shutdown flag, active subscripti
 import asyncio
 from asyncio import Queue
 from collections import deque
+import config # Import config to access INITIAL_SOL_BALANCE
 from logger import logger
 
 class GlobalState:
@@ -26,6 +27,9 @@ class GlobalState:
 
         # API rate limiting
         self.request_timestamps = deque(maxlen=10)  # API request tracker
+
+        # PnL Tracking
+        self.current_sol_balance = float(config.INITIAL_SOL_BALANCE) # Initialize from config
 
         # Queues
         self.rugcheck_queue = asyncio.PriorityQueue()  # RugCheck processing queue
@@ -109,3 +113,15 @@ class GlobalState:
 
     def get_db_write_lock(self):
         return self.db_write_lock
+
+    ## 🚀 PnL Tracking
+    async def get_current_sol_balance(self) -> float:
+        """Get the current tracked SOL balance."""
+        async with self.lock:
+            return self.current_sol_balance
+
+    async def update_sol_balance(self, change: float):
+        """Update the SOL balance by adding the change (can be negative)."""
+        async with self.lock:
+            self.current_sol_balance += change
+            logger.info(f"💰 Updated SOL Balance: {self.current_sol_balance:.6f} SOL (Change: {change:+.6f} SOL)")

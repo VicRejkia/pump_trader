@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 # Removed incorrect load_config import. Config is passed during initialization.
 #rom database import get_total_supply # Keep if needed outside manager, otherwise remove
 from logger import logger
+from state import GlobalState # Import GlobalState to update balance
 from utils import (
     play_buy_opportunity_sound, play_sell_sl_sound_async, play_sell_tp_sound_async,
     format_buy_order_log # calculate_market_cap might not be needed if done in SQL/price fetch
@@ -377,11 +378,11 @@ class TradingManager:
 
             # Calculate financials
             gross_sol_received = tokens_to_sell * current_price
-            # Pro-rate sell fees based on the fraction of the *initial* buy being sold now
-            # Convert config Decimals to float for calculation with float token amounts
-            sell_fee_share = float(self.config['DEFAULT_SELL_FEE']) * (tokens_to_sell / initial_tokens)
-            sell_tip_share = float(self.config['DEFAULT_SELL_TIP']) * (tokens_to_sell / initial_tokens)
-            net_sol_received = gross_sol_received - sell_fee_share - sell_tip_share
+            # Use the full configured sell fee and tip for every sell transaction
+            # Convert config Decimals to float if they aren't already
+            sell_fee = float(self.config['DEFAULT_SELL_FEE'])
+            sell_tip = float(self.config['DEFAULT_SELL_TIP'])
+            net_sol_received = gross_sol_received - sell_fee - sell_tip
 
             # Calculate cost basis for the sold portion
             # Pro-rate original buy fees/tips based on the fraction of the *initial* buy being sold now
@@ -410,11 +411,13 @@ class TradingManager:
                  remaining_tokens, status, reason, timestamp, initial_tokens, stop_loss_price, highest_price)
                 VALUES ($1, 'sell', $2, $3, $4, $5, $6, $7, $8, 0, 'closed', $9, $10, 0, 0, 0)
             ''', mint, current_price, market_cap_sol, net_sol_received, tokens_to_sell,
-               sell_fee_share, sell_tip_share, profit, reason, datetime.now(timezone.utc))
+               sell_fee, sell_tip, profit, reason, datetime.now(timezone.utc))
             # Sell record has 0 remaining/initial/sl/highest
 
             logger.info(f"✅ Sold {tokens_to_sell:.6f} tokens of {mint} (ID: {position_id_to_update}) for {profit:.6f} SOL profit ({reason}). New status: {new_status}")
 
+            # Update global SOL balance using the instance passed to the manager
+            await self.state.update_sol_balance(net_sol_received) # Add received SOL
             # Play sounds (consider moving sound logic outside transaction if it causes delays/failures)
             # Use run_in_executor or similar if sounds block async loop
             if reason == "Stop Loss":
@@ -483,6 +486,10 @@ class TradingManager:
                     # For simulation, we assume insert worked if no exception
                     sol_price = await self.state.get_sol_price()
                     logger.info(format_buy_order_log(self.state, mint=mint, price_per_token=current_price, tokens_bought=tokens_bought, market_cap=market_cap_sol, sol_price=sol_price))
+
+                    # Update global SOL balance using the instance passed to the manager
+                    await self.state.update_sol_balance(-sol_to_spend) # Subtract spent SOL (includes base + fee + tip)
+
                     asyncio.create_task(play_buy_opportunity_sound()) # Run sound concurrently
 
                 except Exception as e:

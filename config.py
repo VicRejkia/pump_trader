@@ -11,6 +11,7 @@ MAX_SUBSCRIPTION_BATCH: int = 100  # For batch unsubscription
 
 # Trading configuration
 SOL_TO_BUY = 0.1                 # Amount of SOL to spend on each buy
+INITIAL_SOL_BALANCE = 2.0        # Starting SOL balance for PnL tracking
 
 # --- New Multi-Stage Sell Logic Configuration ---
 INITIAL_STOP_LOSS_PERCENT = 50.0   # Initial SL as % below buy price (e.g., 25.0 for -25%)

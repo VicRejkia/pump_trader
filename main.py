@@ -47,6 +47,7 @@ class TradingBot:
                     rug_queue_size = self.state.get_rugcheck_queue().qsize()
                     tokens_subscribed = list(await self.state.get_token_subscriptions())
                     task_status = [f"{task.get_name()}: {'done' if task.done() else 'running'}\n" for task in self.tasks]
+                    sol_amount = await self.state.get_current_sol_balance()
                     #logger.debug(f"📟 Task Monitor: Queue size: {rug_queue_size}, Tasks: {', '.join(task_status)}")
 
                     logger.debug(
@@ -54,6 +55,7 @@ class TradingBot:
                         f"┌────────────────────────────────────\n"
                         f"│📟 Task Monitor 📟\n"
                         f"│────────────────────────────────────\n"
+                        f"│ Actual SOL amount: {sol_amount:.6f}\n"
                         f"│ Subscribed tokens: {len(tokens_subscribed)}\n"
                         f"│ RugCheck Queue size: {rug_queue_size}\n"
                         f"│ Active tasks: {len([t for t in self.tasks if not t.done()])}/{len(self.tasks)}\n"
