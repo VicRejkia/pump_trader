@@ -1,0 +1,11 @@
+asyncio
+json
+base58
+decimal
+asyncpg
+httpx
+aiolimiter
+python-dotenv
+rich
+beautifulsoup4
+pydantic
