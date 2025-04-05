@@ -1,96 +1,173 @@
-# Pump Trader - Solana Meme Coin Trading Bot
-
-## LICENSE  
-
-<<<<<<< HEAD
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/VicRejkia/pump_trader/blob/main/LICENSE)
-
-=======
->>>>>>> 149d44a71051e58cc9b8b25f57d4f65433174650
-
-
-   Copyright 2025 - Vic Rejkia
-
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
+# 🚀 Pump Trader - Solana Meme Coin Trading Bot 💸🐸
 
 ---
 
+## 🏷️ Badges
 
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/VicRejkia/pump_trader/blob/main/LICENSE)
+![Python Version](https://img.shields.io/badge/python-3.8%2B-blue)
+![Build Status](https://img.shields.io/badge/build-passing-brightgreen)
+![Made with ❤️](https://img.shields.io/badge/made%20with-%F0%9F%92%96-red)
+![Contributions Welcome](https://img.shields.io/badge/contributions-welcome-ff69b4)
+[![Demo](https://img.shields.io/badge/demo-👀-yellow)](#demo)
 
-Pump Trader is an advanced, asynchronous Python trading bot designed to monitor market trends, evaluate token risk using external APIs, and execute buy/sell decisions based on sophisticated multi-stage trading logic. The project features real-time WebSocket data ingestion, PostgreSQL database integration, robust logging, and advanced risk assessment using third-party services like RugCheck and social media analysis.
+---
 
-## Table of Contents
+## 🧭 Table of Contents
 
-- [Overview](#overview)
-- [Features](#features)
-- [Architecture](#architecture)
-- [Installation](#installation)
-- [Configuration](#configuration)
-- [Usage](#usage)
-- [Development and Contributing](#development-and-contributing)
-- [Testing](#testing)
-- [License](#license)
-- [Acknowledgments](#acknowledgments)
+- [🎞️ Demo](#️demo)
+- [💭 Why This Bot Exists](#-why-this-bot-exists)
+- [🏁 Getting Started (for the impatient)](#-getting-started-for-the-impatient)
+- [🌍 Overview](#-overview)
+- [⚙️ Features](#️features)
+- [🏗️ Architecture](#️architecture)
+- [🔧 Installation](#-installation)
+- [⚙️ Configuration](#️configuration)
+- [🚀 Usage](#-usage)
+- [🛠️ Development and Contributing](#️development-and-contributing)
+- [🧪 Testing](#-testing)
+- [📜 License](#-license)
+- [🙌 Acknowledgments](#-acknowledgments)
 
-## Overview
+---
+
+## 🎞️ Demo
+
+> *“Show, don’t tell” — your lead dev, probably.*
+
+Here’s Pump Trader doing its thing — scraping WebSockets, ducking rugs, and making trades like a caffeinated Wall Street intern:
+
+![Pump Trader Demo - Dark Mode](https://github.com/yourusername/pump-trader/blob/main/assets/demo_dark.gif)
+
+> ⚠️ Replace this URL with your actual dark-mode GIF (e.g., `/assets/demo_dark.gif`). Transparent background = extra points.
+
+---
+
+## 💭 Why This Bot Exists
+
+Because you're tired of:
+
+- Buying into meme coins right before the rug yank
+- Getting financial advice from people named "Elon420Xx"
+- Spending 6 hours on Telegram wondering if that chart is bullish or just a sad camel
+
+**Pump Trader** was built to automate the pain away:
+- Detect risks early 🔍
+- Read social hype like a hypebeast 🤖
+- Trade with logic (not vibes) 📈
+
+It won’t make you a millionaire overnight, but hey — at least it won’t shill $RUGZ.
+
+---
+
+## 🏁 Getting Started (for the impatient)
+
+1. **Clone the repo** like it’s a new L1 airdrop:
+
+    ```bash
+    git clone https://github.com/VicRejkia/pump_trader.git
+    cd pump_trader
+    ```
+
+2. **Create your virtual environment** (yes, really — do it):
+
+    ```bash
+    python -m venv venv
+    source venv/bin/activate  # On Windows: venv\Scripts\activate
+    ```
+
+3. **Install all dependencies**:
+
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+4. **Set up your environment config**:
+
+    We’ve included a sample config called `.env_sample`. Just rename it:
+
+    ```bash
+    mv .env_sample .env
+    ```
+
+    The file includes everything you need:
+
+    ```ini
+    DB_USER=your_db_username
+    DB_PASSWORD=your_db_password
+    DB_HOST=localhost
+    DB_DATABASE=your_database
+
+    SOLANA_PRIVATE_KEY=your_solana_private_key
+    ```
+
+5. **Tweak your settings** in `config.py`:
+    - Trade amounts
+    - Risk thresholds
+    - Logging verbosity
+    - Meme tolerance level (okay, not that yet)
+
+6. **Run the bot** (optional flag: `--backup` or `--cleanup`):
+
+    ```bash
+    python main.py
+    ```
+
+7. Sit back, sip some coffee, and *hope it doesn’t FOMO into $DOGEWIFHAT2*.
+
+---
+
+## 🌍 Overview
 
 Pump Trader is built to:
-- **Continuously Monitor Market Data:** Connects to a real-time WebSocket API for trading data.
-- **Evaluate Token Risk:** Integrates with the RugCheck API to fetch risk scores and automatically deactivates tokens that exceed a defined risk threshold.
-- **Execute Multi-Stage Trading Strategies:** Uses a configurable multi-stage buy and sell logic with stop-loss, take-profit, and trailing stop parameters.
-- **Analyze Social Media Signals:** Processes social data from various sources to adjust risk scoring and trading decisions.
 
-## Features
+- 🔌 **Continuously Monitor Market Data** via real-time WebSockets.
+- 🚨 **Evaluate Token Risk** with RugCheck. If it's sketchy, it's nuked.
+- 🐦 **Analyze Social Signals** — because sometimes memes really do matter.
+- 🧠 **Trade Intelligently** using configurable multi-stage logic.
 
-- **Asynchronous Processing:** Leverages Python’s `asyncio` for non-blocking operations and high performance.
-- **Database Integration:** Uses PostgreSQL (with asyncpg) to store tokens, trades, migrations, and risk evaluation data.
-- **Robust Logging:** Implements detailed logging (with rotating log files) using the Python `logging` module and `rich` for enhanced console output.
-- **Configurable Parameters:** All trading parameters, API endpoints, and risk thresholds are defined in a centralized configuration module.
-- **Modular Design:** Key components (e.g., database operations, WebSocket handling, trade management, RugCheck integration, social media processing) are separated into independent modules.
-- **Graceful Shutdown:** Supports signal handling to safely terminate and clean up running tasks and connections.
-- **Backup & Cleanup Options:** Provides command-line flags to backup the database or cleanup existing data before starting the bot.
+---
 
-## Architecture
+## ⚙️ Features
 
-The project is organized into several core modules:
+- ⚡ **Full Async Stack**: High-performance and low-latency because speed ≠ rekt.
+- 🛢️ **PostgreSQL Integration** with asyncpg (aka your trading brain).
+- 📜 **Detailed Logging** with `rich` so you can actually debug your bad ideas.
+- 🧰 **Centralized Configs** via `config.py`.
+- 🧩 **Modular Structure**: Tinker, swap, or throw out entire parts.
+- 🧼 **Graceful Shutdown**: No dirty exits. No DB corruption.
+- 💾 **Backup & Cleanup Options**: Optional CLI flags for pre-run rituals.
 
-- **Configuration (`config.py`):** Stores all constant settings including API endpoints, trading thresholds, fees, and other parameters.
-- **Database (`database.py`):** Manages PostgreSQL connections and CRUD operations, including token backups and migrations.
-- **Logging (`logger.py`):** Sets up file and console logging with customizable levels and log rotation.
-- **Main Bot (`main.py`):** Bootstraps the application, handles signal registration, and coordinates background tasks (e.g., trading checks, price updates, WebSocket connection).
-- **Trading Manager:** Implements the buy/sell strategy logic with multi-stage trading checks.
-- **Risk Assessment (`rugcheck.py`):** Integrates with the RugCheck API for fetching and processing token risk data.
-- **Socials Processor (`socials_processor.py`):** Processes and scores social media links and metadata to refine token risk evaluation.
+---
 
-This modular structure ensures maintainability and scalability, allowing new features or risk factors to be integrated seamlessly.
+## 🏗️ Architecture
 
-## Installation
+Here's a quick peek behind the curtains:
 
-### Prerequisites
+- 🧾 **`config.py`**: Master config file — you’ll be in here a lot.
+- 🐍 **`main.py` TradingBot**: The heart of the beast.
+- 🗃️ **`database.py` DatabaseClient**: Handles DB connections, migrations, and backups.
+- 🧠 **`trading.py` Trading Manager**: Implements buy/sell logic with multi-stage checks.
+- 🧪 **`rugcheck.py` Rugcheck**: Calls RugCheck API, evaluates token sketchiness.
+- 📡 **`socials_processor.py` SocialsProcessor**: Scores social metadata and link quality.
 
-- Python 3.8 or higher
-- PostgreSQL database instance
-- Required system libraries for building Python packages (e.g., for asyncpg and httpx)
+---
 
-### Dependencies
+## 🔧 Installation
 
-Install the required packages via pip:
+### 🧰 Prerequisites
+
+- Python 3.11+ (don’t test fate with older versions)
+- PostgreSQL instance (or Docker container)
+- Basic build tools for packages like `httpx`, `asyncpg`, etc.
+
+### 📦 Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-A sample `requirements.txt` might include:
+Sample `requirements.txt` includes:
 - `asyncpg`
 - `httpx`
 - `aiolimiter`
@@ -98,110 +175,106 @@ A sample `requirements.txt` might include:
 - `rich`
 - `beautifulsoup4`
 
-### Clone the Repository
+---
 
-Clone the project repository from GitHub:
+## ⚙️ Configuration
 
-```bash
-git clone https://github.com/yourusername/pump-trader.git
-cd pump-trader
-```
+### 🌱 Environment Variables
 
-## Configuration
-
-### Environment Variables
-
-Create a `.env` file in the project root with the following variables (adjust the values as needed):
+These go in your freshly renamed `.env` file:
 
 ```ini
-# Database configuration
 DB_USER=your_db_username
 DB_PASSWORD=your_db_password
 DB_HOST=your_db_host
 DB_DATABASE=your_database
-
-# Solana wallet configuration for RugCheck authentication
 SOLANA_PRIVATE_KEY=your_solana_private_key
-
-# Additional configuration can be defined here if needed
 ```
 
-### Application Settings
+### 🧙 Application Settings
 
-The `config.py` file contains important parameters, such as:
-- Trading amounts and thresholds (e.g., `SOL_TO_BUY`, `INITIAL_SOL_BALANCE`)
-- API endpoints (e.g., WebSocket URL, RugCheck API URLs)
-- Risk and social scoring thresholds
-- Logging settings
+Inside `config.py`, you’ll find:
+- Trade thresholds
+- RugCheck API endpoints
+- Logging levels
+- Meme resistance dial (okay still not real but someday...)
 
-Review and modify `config.py` to fine-tune your trading strategy and risk evaluation parameters.
+---
 
-## Usage
+## 🚀 Usage
 
-### Running the Bot
-
-To start the trading bot, simply run:
+To summon the trading beast:
 
 ```bash
 python main.py
 ```
 
-You can also use command-line arguments:
-- `--cleanup` : Drop application tables before startup.
-- `--backup` : Backup database tables before startup.
+### Optional Flags
 
-For example:
+- `--backup` : Make a DB backup before starting
+- `--cleanup` : Drop all app tables (because YOLO?)
 
-```bash
-python main.py --backup
-```
+---
 
-### Graceful Shutdown
+## 🛠️ Development and Contributing
 
-The bot listens for `SIGINT` (Ctrl+C) or `SIGTERM` signals and will gracefully shut down, ensuring that all tasks are cancelled and resources are released properly.
+### 🧼 Code Style
 
-## Development and Contributing
+- PEP8, please 🙏
+- Use docstrings — future-you will thank you
+- Log meaningfully. Not just “something happened”.
 
-### Code Style
-
-- Follow PEP 8 style guidelines.
-- Write comprehensive docstrings for modules and functions.
-- Ensure logging statements provide sufficient context for debugging.
-
-### Setting Up a Development Environment
-
-It is recommended to create a virtual environment:
+### 🔁 Local Setup
 
 ```bash
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Contributing Guidelines
+### 👾 Contributing
 
-1. Fork the repository.
-2. Create a new branch for your feature or bug fix.
-3. Write tests for new functionality.
-4. Submit a pull request with a clear description of your changes.
+1. Fork it
+2. Branch it
+3. Test it
+4. PR it
+5. Profit
 
-## Testing
+---
 
-To run tests (if available), you might use:
+## 🧪 Testing
+
+If you’ve added tests (legend):
 
 ```bash
 pytest
 ```
 
-Ensure that you have set up a testing database if your tests require database interaction.
-
-## License
-
-This project is licensed under the [MIT License](LICENSE). See the LICENSE file for more details.
-
-## Acknowledgments
-
-- Special thanks to the contributors of open-source libraries such as `asyncpg`, `httpx`, and `rich`.
-- Inspired by innovative trading strategies and risk assessment methods.
+Need a test DB? Spin one up. Do not test on production unless you're into chaos speedruns.
 
 ---
+
+## 📜 License
+
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/VicRejkia/pump_trader/blob/main/LICENSE)
+
+This project is licensed under the **Apache License 2.0**. You can basically do whatever you want, except sue us if your bot buys $RUG2.0 at the top. You can read the legal stuff here:
+
+```
+http://www.apache.org/licenses/LICENSE-2.0
+```
+
+TL;DR:
+> No warranty. No guarantees. No crying in crypto.
+
+---
+
+## 🙌 Acknowledgments
+
+- Built on the backs of open-source legends: `asyncpg`, `httpx`, `rich`, and friends.
+- Inspired by countless Telegram scams, rugged devs, and the eternal hope of making it.
+- Dedicated to the ones who bought the top so others may live.
+
+---
+
+*Trade responsibly. Or just embrace the chaos.* 🤖💰
