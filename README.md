@@ -2,7 +2,7 @@
 
 ## LICENSE  
 
-[![GitHub](https://img.shields.io/github/license/vicrejkia/pump_trader)](https://github.com/vicrejkia/pump_trader/blob/main/LICENSE)
+[![GitHub](https://img.shields.io/github/license/vicrejkia/pump_trader)](https://github.com/vicrejkia/pump_trader/LICENSE)
 
 
    Copyright 2025 - Vic Rejkia
