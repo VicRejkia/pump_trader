@@ -1,6 +1,9 @@
 # Pump Trader - Solana Meme Coin Trading Bot
 
-[![GitHub](https://img.shields.io/github/license/vicrejkia/pump_trader)](LICENSE)
+## LICENSE  
+
+[![GitHub](https://img.shields.io/github/license/vicrejkia/pump_trader)](https://github.com/vicrejkia/pump_trader/blob/main/LICENSE)
+
 
    Copyright 2025 - Vic Rejkia
 
