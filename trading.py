@@ -175,7 +175,7 @@ class TradingManager:
                 try:
                     # Fetch active buy positions with new TP/SL fields
                     positions = await conn.fetch('''
-                        SELECT id, mint, price AS buy_price, initial_tokens, remaining_tokens,
+                        SELECT id, mint, price AS buy_price, initial_tokens, remaining_tokens, total_investment_sol,
                                stop_loss_price, highest_price, initial_tp_price, second_tp_price, first_tp_hit
                         FROM portfolio
                         WHERE status = 'active' AND tx_type = 'buy' -- Only check original buy entries
@@ -212,10 +212,11 @@ class TradingManager:
                         buy_price = float(position['buy_price'])
                         initial_tokens = float(position['initial_tokens'])
                         remaining_tokens = float(position['remaining_tokens'])
+                        # total_investment_sol = float(position['total_investment_sol']) # Fetched in execute_sell if needed
                         active_stop_loss_price = float(position['stop_loss_price']) # The currently active SL
                         highest_price = float(position['highest_price'])
-                        initial_tp_price = float(position['initial_tp_price'])
-                        second_tp_price = float(position['second_tp_price'])
+                        initial_tp_price = float(position['initial_tp_price']) # Calculated TP1 price
+                        second_tp_price = float(position['second_tp_price']) # Calculated TP2 price
                         first_tp_hit = position['first_tp_hit'] # Boolean
 
                         if initial_tokens <= 0: # Should not happen for a buy entry, but safety check
@@ -274,7 +275,7 @@ class TradingManager:
                             sell_reason = "First TP"
                             sell_partial = True
                             # Sell configured percentage of the *initial* amount
-                            sell_percentage = self.config['INITIAL_TAKE_PROFIT_PERCENT'] / 100.0
+                            sell_percentage = self.config['FIRST_SELL_PERCENT'] / 100.0 # Use FIRST_SELL_PERCENT
                             logger.info(f"🎯 First TP hit for {mint} (ID: {pos_id}) at price {current_price:.9f} (Threshold: {initial_tp_price:.9f}). Selling {sell_percentage*100}%.")
 
                         # 4. Trailing Stop Loss (Only active *after* First TP is hit)
@@ -340,9 +341,9 @@ class TradingManager:
         Returns the calculated profit (can be negative) or None if sell failed or was skipped.
         """
         try:
-            # Fetch the specific active buy entry to update
+            # Fetch the specific active buy entry to update, including total investment
             buy_entry = await conn.fetchrow('''
-                SELECT price AS buy_price, initial_tokens, remaining_tokens, fee AS buy_fee, tip AS buy_tip
+                SELECT price AS buy_price, initial_tokens, remaining_tokens, total_investment_sol, fee AS buy_fee, tip AS buy_tip
                 FROM portfolio
                 WHERE id = $1 AND status = 'active' AND tx_type = 'buy'
             ''', position_id_to_update)
@@ -354,8 +355,9 @@ class TradingManager:
             buy_price = float(buy_entry['buy_price'])
             initial_tokens = float(buy_entry['initial_tokens'])
             remaining_tokens = float(buy_entry['remaining_tokens'])
-            buy_fee = float(buy_entry['buy_fee']) # Original buy fee for this position
-            buy_tip = float(buy_entry['buy_tip']) # Original buy tip for this position
+            # buy_fee = float(buy_entry['buy_fee']) # Original buy fee - not needed for new cost basis calc
+            # buy_tip = float(buy_entry['buy_tip']) # Original buy tip - not needed for new cost basis calc
+            total_investment_sol = float(buy_entry['total_investment_sol']) # Total SOL spent on the initial buy
 
             if remaining_tokens <= 0 or initial_tokens <=0: # Safety check
                 logger.warning(f"⚠ Invalid token amounts for position ID {position_id_to_update} ({mint}). Remaining: {remaining_tokens}, Initial: {initial_tokens}")
@@ -384,12 +386,12 @@ class TradingManager:
             sell_tip = float(self.config['DEFAULT_SELL_TIP'])
             net_sol_received = gross_sol_received - sell_fee - sell_tip
 
-            # Calculate cost basis for the sold portion
-            # Pro-rate original buy fees/tips based on the fraction of the *initial* buy being sold now
-            # buy_fee and buy_tip are already floats from the DB fetch
-            buy_fee_share = buy_fee * (tokens_to_sell / initial_tokens)
-            buy_tip_share = buy_tip * (tokens_to_sell / initial_tokens)
-            cost_basis = (buy_price * tokens_to_sell) + buy_fee_share + buy_tip_share
+            # Calculate cost basis for the sold portion based on the total initial investment
+            # Pro-rate the total initial investment based on the fraction of *initial* tokens being sold now
+            if initial_tokens <= 0: # Avoid division by zero
+                 logger.error(f"Cannot calculate cost basis for {mint} (ID: {position_id_to_update}) due to zero initial tokens.")
+                 return None # Or handle error appropriately
+            cost_basis = total_investment_sol * (tokens_to_sell / initial_tokens)
 
             profit = net_sol_received - cost_basis
 
@@ -407,12 +409,11 @@ class TradingManager:
             # Insert sell transaction record into portfolio
             await conn.execute('''
                 INSERT INTO portfolio
-                (mint, tx_type, price, market_cap, sol_amount, tokens, fee, tip, profit,
+                (mint, tx_type, price, market_cap, sol_amount, tokens, fee, tip, profit, total_investment_sol,
                  remaining_tokens, status, reason, timestamp, initial_tokens, stop_loss_price, highest_price)
-                VALUES ($1, 'sell', $2, $3, $4, $5, $6, $7, $8, 0, 'closed', $9, $10, 0, 0, 0)
+                VALUES ($1, 'sell', $2, $3, $4, $5, $6, $7, $8, 0, 0, 'closed', $9, $10, 0, 0, 0) -- Sell record has 0 total_investment/remaining/initial/sl/highest
             ''', mint, current_price, market_cap_sol, net_sol_received, tokens_to_sell,
                sell_fee, sell_tip, profit, reason, datetime.now(timezone.utc))
-            # Sell record has 0 remaining/initial/sl/highest
             # Fetch token name for logging
             token_name_row = await conn.fetchrow("SELECT name FROM tokens WHERE mint = $1", mint)
             token_name = token_name_row['name'] if token_name_row else None
@@ -468,43 +469,73 @@ class TradingManager:
                         logger.warning(f"⚠ Attempted to buy {mint}, but it's already active in portfolio. Skipping.")
                         return
 
-                    sol_to_spend = self.config['SOL_TO_BUY']
+                    sol_base_amount = self.config['SOL_TO_BUY'] # Base amount intended for token purchase
                     buy_fee = self.config['DEFAULT_BUY_FEE']
                     buy_tip = self.config['DEFAULT_BUY_TIP']
-                    sol_for_tokens = sol_to_spend - buy_fee - buy_tip
+                    total_sol_investment = sol_base_amount + buy_fee + buy_tip # Total SOL deducted from balance
+                    sol_for_tokens = sol_base_amount # Use the base amount to calculate tokens bought
 
-                    if sol_for_tokens <= 0:
-                        logger.error(f"❌ Not enough SOL ({sol_to_spend}) to buy tokens for {mint} after fees/tip ({buy_fee + buy_tip}).")
+                    if sol_for_tokens <= 0: # Check if the base amount is valid
+                        logger.error(f"❌ Configured SOL_TO_BUY ({sol_base_amount}) is zero or negative for {mint}.")
+                        return
+                    # Check if balance is sufficient for the total investment
+                    current_balance = await self.state.get_current_sol_balance() # Assuming this method exists
+                    if current_balance < total_sol_investment:
+                        logger.warning(f"💰 Insufficient balance ({current_balance:.4f} SOL) to execute buy for {mint} requiring {total_sol_investment:.4f} SOL.")
                         return
 
                     tokens_bought = sol_for_tokens / current_price
-                    # Calculate initial SL and TP levels based on config percentages
+                    # Calculate initial SL based on config percentage
                     initial_stop_loss_price = current_price * (1 - self.config['INITIAL_STOP_LOSS_PERCENT'] / 100.0)
-                    initial_tp_price = current_price * (1 + self.config['INITIAL_TAKE_PROFIT_PERCENT'] / 100.0)
+
+                    # --- Calculate First TP Price based on covering costs and margin ---
+                    sell_fee_tp1 = self.config['DEFAULT_SELL_FEE']
+                    sell_tip_tp1 = self.config['DEFAULT_SELL_TIP']
+                    target_sol_return_tp1 = total_sol_investment + sell_fee_tp1 + sell_tip_tp1 # Cover investment + sell costs
+                    target_sol_return_tp1 *= (1 + self.config['FIRST_SELL_PROFIT_MARGIN'] / 100.0) # Add profit margin
+
+                    tokens_to_sell_tp1 = tokens_bought * (self.config['FIRST_SELL_PERCENT'] / 100.0)
+
+                    if tokens_to_sell_tp1 <= 1e-9: # Avoid division by zero if selling 0% or tokens_bought is near zero
+                         logger.error(f"❌ Cannot calculate TP1 price for {mint}: Tokens to sell at TP1 is negligible ({tokens_to_sell_tp1:.12f}). Check FIRST_SELL_PERCENT config.")
+                         # Handle this case: maybe set TP1 very high, or skip buy? For now, skip.
+                         return
+
+                    initial_tp_price = target_sol_return_tp1 / tokens_to_sell_tp1
+                    # --- Calculate Second TP Price ---
                     second_tp_price = current_price * (1 + self.config['SECOND_TAKE_PROFIT_PERCENT'] / 100.0)
 
                     # Assumes 'initial_tokens', 'initial_tp_price', 'second_tp_price', 'first_tp_hit' columns exist
                     await conn.execute("""
                         INSERT INTO portfolio
-                            (mint, tx_type, price, market_cap, sol_amount, tokens,
+                            (mint, tx_type, price, market_cap, sol_amount, total_investment_sol, tokens,
                              fee, tip, remaining_tokens, stop_loss_price, highest_price,
                              initial_tp_price, second_tp_price, first_tp_hit,
                              status, timestamp, initial_tokens)
-                        VALUES ($1, 'buy', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, FALSE, 'active', $13, $14)
+                        VALUES ($1, 'buy', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, FALSE, 'active', $14, $15)
                         -- The check before this insert prevents duplicate active buys.
-                    """, mint, current_price, market_cap_sol, sol_to_spend,
-                       tokens_bought, buy_fee, buy_tip, tokens_bought, # remaining_tokens = initial_tokens initially
+                    """, mint, current_price, market_cap_sol, sol_base_amount, total_sol_investment, tokens_bought,
+                       buy_fee, buy_tip, tokens_bought, # remaining_tokens = initial_tokens initially
                        initial_stop_loss_price, current_price, # highest_price = current_price initially
                        initial_tp_price, second_tp_price,
                        datetime.now(timezone.utc), tokens_bought) # Store initial_tokens
 
                     # Log only if insert happened (check affected rows?) - fetchval might be better
                     # For simulation, we assume insert worked if no exception
-                    sol_price = await self.state.get_sol_price()
-                    logger.info(format_buy_order_log(self.state, mint=mint, price_per_token=current_price, tokens_bought=tokens_bought, market_cap=market_cap_sol, sol_price=sol_price))
+                    sol_price = await self.state.get_sol_price() # Fetch SOL price for logging
+                    # Update log format if needed to show total_sol_investment
+                    logger.info(format_buy_order_log(
+                        self.state,
+                        mint=mint,
+                        price_per_token=current_price,
+                        tokens_bought=tokens_bought,
+                        market_cap=market_cap_sol,
+                        sol_price=sol_price,
+                        total_investment=total_sol_investment # Pass total investment to log formatter if it accepts it
+                    ))
 
                     # Update global SOL balance using the instance passed to the manager
-                    await self.state.update_sol_balance(-sol_to_spend) # Subtract spent SOL (includes base + fee + tip)
+                    await self.state.update_sol_balance(-total_sol_investment) # Subtract TOTAL investment
 
                     asyncio.create_task(play_buy_opportunity_sound()) # Run sound concurrently
 

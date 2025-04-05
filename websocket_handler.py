@@ -71,6 +71,7 @@ class WebSocketHandler:
                 await self.connect()  # Reconnect WebSocket
 
                 await self.resume_subscriptions()  # One-time call on connect
+                logger.debug("Resubscribed to token trade events after reconnection")
 
                 # Restart tasks after successful reconnection
                 self.tasks = [
@@ -102,7 +103,7 @@ class WebSocketHandler:
                     # Handle new token events
                     if data.get('txType') == "create": # Use .get() for safety
                         mint = data.get('mint', 'N/A') # Get mint for logging
-                        logger.debug(f"➕ Received 'create' event for token: {mint}") # Log reception immediately
+                        logger.debug(f"➕ Received 'new token': {mint}") # Log reception immediately
                         try:
                             token_stored = await self.db_client.insert_token(data)
                             if not token_stored:

@@ -118,6 +118,7 @@ class GlobalState:
     async def get_current_sol_balance(self) -> float:
         """Get the current tracked SOL balance."""
         async with self.lock:
+            #logger.info(f"💰 Current SOL Balance: {self.current_sol_balance:.6f} SOL")
             return self.current_sol_balance
 
     async def update_sol_balance(self, change: float):
