@@ -8,9 +8,10 @@ import glob
 from datetime import datetime, timezone
 import asyncio
 import asyncpg
+import aiofiles # <-- Add this import
 from dotenv import load_dotenv
 from logger import logger
-from config import TOTAL_SUPPLY # Removed DB_URL import
+from config import TOTAL_SUPPLY
 
 # Load environment variables from .env file
 load_dotenv()
@@ -262,6 +263,58 @@ class DatabaseClient:
             logger.error(f"🚨 backup_and_delete_token: {e}", exc_info=True)
             await asyncio.sleep(5)
 
+    async def backup_creator_wallets(self):
+        """Dumps the creator_wallets table to an SQL file."""
+        backup_file_path = os.path.join(os.path.dirname(__file__), "data", "creator_wallets_backup.sql")
+        os.makedirs(os.path.dirname(backup_file_path), exist_ok=True) # Ensure data directory exists
+
+        logger.info("Backing up creator_wallets table...")
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch("SELECT wallet_address, token_count, last_token_time FROM creator_wallets")
+                async with aiofiles.open(backup_file_path, "w") as f:
+                    for row in rows:
+                        wallet_address = row['wallet_address']
+                        token_count = row['token_count']
+                        # Format timestamp correctly for SQL, handle None
+                        last_token_time_str = f"'{row['last_token_time'].isoformat()}'" if row['last_token_time'] else "NULL"
+
+                        # Use INSERT OR IGNORE equivalent for PostgreSQL: ON CONFLICT DO NOTHING
+                        sql_line = (
+                            f"INSERT INTO creator_wallets (wallet_address, token_count, last_token_time) "
+                            f"VALUES ('{wallet_address}', {token_count}, {last_token_time_str}) "
+                            f"ON CONFLICT (wallet_address) DO NOTHING;\n"
+                        )
+                        await f.write(sql_line)
+            logger.info(f"✅ Successfully backed up {len(rows)} creator wallets to {backup_file_path}")
+        except Exception as e:
+            logger.exception(f"Error backing up creator_wallets table: {e}")
+            # Decide if we should raise or just log
+
+    async def restore_creator_wallets(self):
+        """Restores creator_wallets from the SQL backup file if it exists."""
+        backup_file_path = os.path.join(os.path.dirname(__file__), "data", "creator_wallets_backup.sql")
+        if not os.path.exists(backup_file_path):
+            logger.info("No creator_wallets backup file found. Skipping restore.")
+            return
+
+        logger.info(f"Restoring creator_wallets table from {backup_file_path}...")
+        try:
+            async with aiofiles.open(backup_file_path, "r") as f:
+                sql_script = await f.read()
+
+            if not sql_script.strip():
+                logger.info("Creator wallets backup file is empty. Skipping restore.")
+                return
+
+            async with self.pool.acquire() as conn:
+                # Execute the entire script. The ON CONFLICT clause handles duplicates.
+                await conn.execute(sql_script)
+            logger.info("✅ Successfully restored creator wallets.")
+        except Exception as e:
+            logger.exception(f"Error restoring creator_wallets table: {e}")
+            # Decide if we should raise or just log
+
     async def cleanup_db(self, cleanup_flag: bool):
         """Drop all application tables if cleanup_flag is True."""
         if cleanup_flag:
@@ -330,3 +383,10 @@ class DatabaseClient:
                 except Exception as e:
                     logger.exception("Error during database backup: %s", e)
                     raise
+
+    async def close(self):
+        """Close the database connection pool."""
+        if self.pool:
+            logger.info("Closing database connection pool...")
+            await self.pool.close()
+            logger.info("Database connection pool closed.")

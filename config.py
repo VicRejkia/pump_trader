@@ -19,7 +19,7 @@ INITIAL_STOP_LOSS_PERCENT = 50.0            # Initial SL as % below buy price (e
 FIRST_SELL_PERCENT = 50.0                   # % of *initial* tokens to sell at First TP (e.g., 50.0 for 50%)
 TRAILING_STOP_LOSS_PERCENT = 50.0           # Trailing SL % drop from highest price *after* First TP (e.g., 15.0 for -15%)
 SECOND_TAKE_PROFIT_PERCENT = 200.0          # Second TP as % above buy price (e.g., 200.0 for +200%)
-FIRST_SELL_PROFIT_MARGIN = 2.0             # Desired profit margin % on the *total initial investment* for the first TP sell
+FIRST_SELL_PROFIT_MARGIN = 10.0             # Desired profit margin % on the *total initial investment* for the first TP sell
 
 # --- Fees and Tips ---
 DEFAULT_BUY_FEE = 0.001                     # Fee for buying in SOL
@@ -98,13 +98,14 @@ SOCIALS_PENALTY_WEBSITE_OTHER_ERROR = 35
 SOCIALS_PENALTY_NO_HTTPS = 10
 SOCIALS_PENALTY_WEBSITE_NO_MENTION = 10         # No mention of token name or symbol in website
 SOCIALS_PENALTY_COMMON_PLATFORM_WEBSITE = 25    # Common platforms like Youtube, TikTok, etc.
-SOCIALS_PENALTY_NO_TELEGRAM = 20
-SOCIALS_PENALTY_INVALID_TELEGRAM_TYPE = 20
-SOCIALS_PENALTY_INVALID_TELEGRAM_URL = 20
+SOCIALS_PENALTY_NO_TELEGRAM = 25
+SOCIALS_PENALTY_INVALID_TELEGRAM_TYPE = 25
+SOCIALS_PENALTY_INVALID_TELEGRAM_URL = 25
 SOCIALS_PENALTY_NO_TWITTER = 25
 SOCIALS_PENALTY_INVALID_TWITTER_TYPE = 25
 SOCIALS_PENALTY_INVALID_TWITTER_URL = 25
 SOCIALS_PENALTY_DUPLICATE_LINKS = 15            # Duplicate links in metadata
+SOCIALS_PENALTY_ACTION_TRIGGER_URL = 15         # Action trigger URL in metadata
 
 # Bonuses (Negative = Better)
 SOCIALS_BONUS_DOMAIN_MATCH = -10
