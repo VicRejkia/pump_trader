@@ -102,7 +102,7 @@ class DatabaseClient:
                         )
 
                     if token_count > 2:
-                            logger.warning(f"🤬 Suspicious creator {creator} for token {data['mint']} with {token_count} tokens in 7 days")
+                            logger.debug(f"🤬 [bold red]Suspicious creator[/bold red] %s for token %s with %s tokens in 7 days", creator, data['mint'], token_count)
                             return False
 
                     # 3. Insert/update token

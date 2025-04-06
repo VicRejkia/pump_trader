@@ -13,7 +13,7 @@ import base58
 from dotenv import load_dotenv
 from aiolimiter import AsyncLimiter
 from decimal import Decimal
-from solders.keypair import Keypair
+from solders.keypair import Keypair # type: ignore
 
 from config import (
     RUGCHECK_AUTH_API, RUGCHECK_RATE_LIMIT, RUGCHECK_API, RUGCHECK_INTERVAL,
