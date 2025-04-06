@@ -19,9 +19,9 @@ from config import (
     RUGCHECK_AUTH_API, RUGCHECK_RATE_LIMIT, RUGCHECK_API, RUGCHECK_INTERVAL,
     RUGCHECK_SCORE_THRESHOLD # Import the threshold
 )
-from database import DatabaseClient
+from database_handler import DatabaseClient
 from logger import logger
-from state import GlobalState
+from state_manager import GlobalState
 from websocket_handler import WebSocketHandler
 from socials_processor import SocialsProcessor # Import the SocialsProcessor
 

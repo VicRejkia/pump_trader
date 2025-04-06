@@ -4,14 +4,14 @@ import signal
 import traceback
 import inspect
 import config
-from database import DatabaseClient
-from trading import TradingManager
+from database_handler import DatabaseClient
+from trading_logic import TradingManager
 from websocket_handler import WebSocketHandler
 from logger import setup_logging, log_info, log_debug, log_error, rotate_log_file
-from state import GlobalState
+from state_manager import GlobalState
 from trade_processor import trade_worker
 from sol_price_api import update_sol_price
-from rugcheck import Rugcheck
+from rugcheck_handler import Rugcheck
 from socials_processor import SocialsProcessor
 
 
@@ -103,8 +103,8 @@ class TradingBot:
 
     async def main(self):
         """Main entry point for setting up and starting the bot."""
-        setup_logging()
         rotate_log_file()
+        setup_logging()
         self.register_signal_handlers()
 
         try:

@@ -7,7 +7,7 @@ from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 
 from logger import logger
-from state import GlobalState
+from state_manager import GlobalState
 from utils import calculate_market_cap 
 from config import TOTAL_SUPPLY # Import TOTAL_SUPPLY from config
 

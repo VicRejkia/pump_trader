@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 # Removed incorrect load_config import. Config is passed during initialization.
 #rom database import get_total_supply # Keep if needed outside manager, otherwise remove
 from logger import logger
-from state import GlobalState # Import GlobalState to update balance
+from state_manager import GlobalState # Import GlobalState to update balance
 from utils import (
     play_buy_opportunity_sound, play_sell_sl_sound_async, play_sell_tp_sound_async,
     format_buy_order_log, format_sell_order_log # Import the new sell log formatter
