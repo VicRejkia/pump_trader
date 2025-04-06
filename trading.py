@@ -23,6 +23,7 @@ class TradingManager:
         self.db = db_pool # Expecting an asyncpg Pool
         self.config = config
         self.state = state # Set state during initialization
+        
     async def check_trading_opportunities(self):
         """Check for new trading opportunities based on configured criteria."""
         if self.state.shutdown_event.is_set():
@@ -284,6 +285,13 @@ class TradingManager:
                             sell_all = True
                             sell_percentage = 1.0 # Sell all remaining
                             logger.info(f"📉 Trailing SL hit for {mint} (ID: {pos_id}) at price {current_price:.9f} (Trailing SL: {trailing_sl_price:.9f}, Highest: {highest_price:.9f})")
+
+                        # 5. Emergency Stop Loss (if applicable)
+                        elif (current_market_cap*sol_price) < self.config['MIN_MARKET_CAP']:
+                            sell_reason = "Emergency SL"
+                            sell_all = True
+                            sell_percentage = 1.0
+                            logger.info(f"⚠ Emergency SL triggered for {mint} (ID: {pos_id}) at price {current_price:.9f} (Market Cap: {current_market_cap:.9f})")
 
 
                         # --- Execute Sell ---
