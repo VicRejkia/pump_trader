@@ -10,9 +10,9 @@ from urllib.parse import urlparse, urlsplit
 import httpx
 from bs4 import BeautifulSoup # Added for HTML parsing
 
-from database import DatabaseClient
+from database_handler import DatabaseClient
 from logger import logger
-from state import GlobalState
+from state_manager import GlobalState
 # Assuming these validation functions exist in utils.py
 from utils import is_valid_website, is_valid_telegram, is_valid_twitter
 

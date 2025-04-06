@@ -11,10 +11,10 @@ import asyncpg
 import websockets
 
 from config import PUMPPORTAL_WS, INACTIVITY_PERIOD, MIN_MARKET_CAP
-from database import DatabaseClient
+from database_handler import DatabaseClient
 from logger import logger
 # from trading import has_active_position
-from state import GlobalState
+from state_manager import GlobalState
 
 class WebSocketHandler:
     def __init__(self, db_client: DatabaseClient):
