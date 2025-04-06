@@ -63,7 +63,7 @@ SOL_PRICE_API_URL = "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs
 LOGGER_NAME = "TradingBot"
 LOG_LEVEL_CONSOLE: str = "DEBUG"
 LOG_LEVEL_FILE: str = "DEBUG"
-LOG_STORAGE_PATH = "data"
+LOG_STORAGE_PATH = "log"
 
 # --- Socials Processor Configuration ---
 SOCIALS_DISALLOWED_WEBSITE_DOMAINS = {
