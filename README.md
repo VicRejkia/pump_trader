@@ -147,10 +147,11 @@ Here's a quick peek behind the curtains:
 
 - 🧾 **`config.py`**: Master config file — you’ll be in here a lot.
 - 🐍 **`main.py` TradingBot**: The heart of the beast.
+- 📡 **`websocket_handler.py` WebSocketHandler**: Talks to the PumpPortal API.
 - 🗃️ **`database.py` DatabaseClient**: Handles DB connections, migrations, and backups.
 - 🧠 **`trading.py` Trading Manager**: Implements buy/sell logic with multi-stage checks.
 - 🧪 **`rugcheck.py` Rugcheck**: Calls RugCheck API, evaluates token sketchiness.
-- 📡 **`socials_processor.py` SocialsProcessor**: Scores social metadata and link quality.
+- 🫵 **`socials_processor.py` SocialsProcessor**: Scores social metadata and link quality.
 
 ---
 
