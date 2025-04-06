@@ -50,7 +50,7 @@ class TradingBot:
                 try:
                     rug_queue_size = self.state.get_rugcheck_queue().qsize()
                     tokens_subscribed = list(await self.state.get_token_subscriptions())
-                    task_status = [f"{task.get_name()}: {'done' if task.done() else 'running'}\n" for task in self.tasks]
+                    task_status = [f"{task.get_name()}: {'[bold yellow]done[/bold yellow]' if task.done() else '[bold green]running[/bold green]'}\n" for task in self.tasks]
                     sol_amount = await self.state.get_current_sol_balance()
 
                     log_debug(
@@ -192,13 +192,13 @@ class TradingBot:
         while not self.state.shutdown_event.is_set():
             try:
                 await self.trading_manager.check_sell_opportunities()
-                await asyncio.sleep(5)
+                await asyncio.sleep(3)
             except asyncio.CancelledError:
                 log_info(":no_entry_sign: Sell checker task cancelled.")
                 break
             except Exception as e:
                 log_error(f":x: Error in sell checker loop: {e}", exc_info=True)
-                await asyncio.sleep(30)
+                await asyncio.sleep(12)
 
 
 if __name__ == "__main__":

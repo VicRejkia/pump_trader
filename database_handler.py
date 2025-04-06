@@ -215,6 +215,40 @@ class DatabaseClient:
         async with self.pool.acquire() as conn:
             return await conn.fetch(query, limit)
         
+    async def is_suspicious_creator(self, creator: str):
+        """Check if a creator is suspicious based on the number of tokens created."""
+        query = """
+            SELECT token_count FROM creator_wallets WHERE wallet_address = $1
+        """
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, creator)
+            if row and row['token_count'] > 2:
+                return True
+            return False
+
+    async def fetch_tokens_by_creator(self, creator: str, respect_portfolio: bool = False):
+        if respect_portfolio:
+            query = """
+                SELECT mint FROM tokens 
+                WHERE traderpublickey = $1
+                    AND mint NOT IN (SELECT mint FROM portfolio)
+            """
+        else:
+            query = """
+                SELECT mint FROM tokens 
+                WHERE traderpublickey = $1
+            """
+        async with self.pool.acquire() as conn:
+            return await conn.fetch(query, creator)
+        
+    async def has_active_buy_order(self, mint: str):
+        query = """
+            SELECT 1 FROM portfolio WHERE mint = $1 AND tx_type = 'buy' AND status = 'active'
+        """
+        async with self.pool.acquire() as conn:
+            result = await conn.fetchval(query, mint)
+            return result is not None
+        
     async def get_total_supply(self, mint: str):
         """Fetch the total supply of a token."""
         query = """

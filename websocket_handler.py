@@ -108,6 +108,10 @@ class WebSocketHandler:
                             token_stored = await self.db_client.insert_token(data)
                             if not token_stored:
                                 #logger.warning(f"⚠️ Token {mint} not stored (business rule violation in insert_token). Skipping subscription.")
+                                creator = data.get('traderPublicKey')
+                                if await self.db_client.is_suspicious_creator(creator):
+                                    await self.unsubscribe_tokens_from_creator(creator)
+                                    # logger.info(f"Unsubscribed from all tokens from suspicious creator {creator}.")
                                 continue # Skip if DB insert logic rejects it
                         except Exception as e:
                             logger.error(f"❌ DB Error storing new token {mint}: {e}", exc_info=True)
@@ -224,22 +228,33 @@ class WebSocketHandler:
 
     async def unsubscribe_tokens_from_creator(self, creator: str):
         """Unsubscribes and removes tokens from a suspicious creator."""
-        async with (await get_db()).acquire() as conn:
-            try:
-                rows = await conn.fetch("SELECT mint FROM tokens WHERE traderPublicKey = $1", creator)
-                for row in rows:
-                    mint = row['mint']
-                    if not await has_active_position(mint):
-                        if mint in await self.state.get_token_subscriptions():
-                            await self.websocket.send(json.dumps({
-                                "method": "unsubscribeTokenTrade",
-                                "keys": [mint]
-                            }))
-                            await self.state.remove_token_subscriptions(mint)
-                        await backup_and_delete_token(mint, datetime.now(timezone.utc))
-            except Exception as e:
-                logger.error(f"unsubscribe_tokens_from_creator error: {e}", exc_info=True)
-                await self.state.wait_or_interrupt(timeout=5)
+        try:
+            tokens_to_unsubscribe = []
+            all_tokens_by_creator = await self.db_client.fetch_tokens_by_creator(creator)
+            for token_data in all_tokens_by_creator:
+                mint = token_data['mint']
+                # Check if there are active buy orders for this mint in portfolio table
+                active_buy_order = await self.db_client.has_active_buy_order(mint)
+                if not active_buy_order:
+                    tokens_to_unsubscribe.append(mint)
+
+            if tokens_to_unsubscribe:
+                logger.info(f"Found {len(tokens_to_unsubscribe)} tokens from suspicious creator '{creator}' to unsubscribe and backup.")
+                # Unsubscribe from token trades
+                if self.websocket and self.websocket.open:
+                    await self.websocket.send(json.dumps({
+                        "method": "unsubscribeTokenTrade",
+                        "keys": tokens_to_unsubscribe
+                    }))
+                    for mint in tokens_to_unsubscribe:
+                        await self.state.remove_token_subscription(mint)
+
+                # Backup and delete tokens
+                for mint in tokens_to_unsubscribe:
+                    await self.db_client.backup_and_delete_token(mint, datetime.now(timezone.utc))
+        except Exception as e:
+            logger.error(f"unsubscribe_tokens_from_creator error: {e}", exc_info=True)
+            await self.state.wait_or_interrupt(timeout=5)
 
     async def check_inactive_tokens(self):
         while not self.state.shutdown_event.is_set():  # Assuming state has a shutdown flag
