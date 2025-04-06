@@ -152,7 +152,6 @@ class TradingBot:
 
         await self.ws_handler.connect()
         await self.state.set_websocket_handler(self.ws_handler)
-
         socials_proc = SocialsProcessor(self.state, self.db_client, self.config)
         rugchecker = Rugcheck(self.state, self.db_client, self.ws_handler, socials_proc)
         self.trading_manager = TradingManager(self.db_client.pool, self.config, self.state)
