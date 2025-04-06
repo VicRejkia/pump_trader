@@ -41,6 +41,7 @@ class SocialsProcessor:
         self.penalty_no_twitter = config.get('SOCIALS_PENALTY_NO_TWITTER', 30)
         self.penalty_invalid_twitter_type = config.get('SOCIALS_PENALTY_INVALID_TWITTER_TYPE', 20)
         self.penalty_invalid_twitter_url = config.get('SOCIALS_PENALTY_INVALID_TWITTER_URL', 20)
+        self.penalty_action_trigger_url = config.get('SOCIALS_PENALTY_ACTION_TRIGGER_URL', 25) # New penalty
         self.penalty_duplicate_links = config.get('SOCIALS_PENALTY_DUPLICATE_LINKS', 15)
 
         self.bonus_domain_match = config.get('SOCIALS_BONUS_DOMAIN_MATCH', -10)
@@ -173,7 +174,8 @@ class SocialsProcessor:
         token_name = (token_name or "").lower()
         token_symbol = (token_symbol or "").lower()
 
-        logger.debug(f"Social Links: {social_data}")
+        log_str = "Social Score Calculation: \n"
+        log_str += f" Website: {social_data.get('website')}\n Telegram: {social_data.get('telegram')}\n Twitter: {social_data.get('twitter')}\n"
 
         # --- Website Check ---
         website = social_data.get("website") or social_data.get("homepage") or social_data.get("url") or social_data.get("external_url") # Consolidate check
@@ -182,10 +184,12 @@ class SocialsProcessor:
 
         if not website:
             total_penalty += self.penalty_no_website
-            logger.debug(f"Social Score Penalty: +{self.penalty_no_website} (No Website URL provided)")
+            # logger.debug(f"Social Score Penalty: +{self.penalty_no_website} (No Website URL provided)")
+            log_str += f"\tPenalty: +{self.penalty_no_website} (No Website URL provided)\n"
         elif not isinstance(website, str):
             total_penalty += self.penalty_invalid_website_type
-            logger.debug(f"Social Score Penalty: +{self.penalty_invalid_website_type} (Invalid Website type: {type(website)})")
+            # logger.debug(f"Social Score Penalty: +{self.penalty_invalid_website_type} (Invalid Website type: {type(website)})")
+            log_str += f"\tPenalty: +{self.penalty_invalid_website_type} (Invalid Website type: {type(website)})\n"
         else:
             # 1. Parse domain and check if disallowed FIRST
             try:
@@ -194,7 +198,8 @@ class SocialsProcessor:
                     is_disallowed_website = any(parsed_domain == disallowed or parsed_domain.endswith('.' + disallowed) for disallowed in self.disallowed_domains)
                     if is_disallowed_website:
                         total_penalty += self.penalty_common_platform_website
-                        logger.debug(f"Social Score Penalty: +{self.penalty_common_platform_website} (Website URL domain '{parsed_domain}' is disallowed, skipping further checks)")
+                        # logger.debug(f"Social Score Penalty: +{self.penalty_common_platform_website} (Website URL domain '{parsed_domain}' is disallowed, skipping further checks)")
+                        log_str += f"\tPenalty: +{self.penalty_common_platform_website} (Website URL domain '{parsed_domain}' is disallowed)\n"
                 else:
                     logger.warning(f"Could not parse domain from website URL: {website}")
                     # Treat as invalid URL? Apply penalty? For now, just log.
@@ -210,7 +215,8 @@ class SocialsProcessor:
                 if verification_results is None:
                     # Should not happen if website URL exists and isn't disallowed, but handle defensively
                     total_penalty += self.penalty_website_verify_skipped
-                    logger.warning(f"Social Score Penalty: +{self.penalty_website_verify_skipped} (Website verification skipped for {website})")
+                    # logger.warning(f"Social Score Penalty: +{self.penalty_website_verify_skipped} (Website verification skipped for {website})")
+                    log_str += f"\tPenalty: +{self.penalty_website_verify_skipped} (Website verification skipped)\n"
                 elif verification_results['error']:
                     # Add penalty based on error type
                     if "Invalid URL" in verification_results['error']:
@@ -221,15 +227,18 @@ class SocialsProcessor:
                         total_penalty += self.penalty_website_http_error
                     else: # Other request errors, unexpected errors
                         total_penalty += self.penalty_website_other_error
-                    logger.debug(f"Social Score Penalty: +{total_penalty} (Website verification failed: {verification_results['error']})")
+                    # logger.debug(f"Social Score Penalty: +{total_penalty} (Website verification failed: {verification_results['error']})")
+                    log_str += f"\tPenalty: +{total_penalty} (Website verification failed: {verification_results['error']})\n"
                 else:
                     # Website is reachable, apply finer penalties/bonuses
                     if not verification_results['uses_https']:
                         total_penalty += self.penalty_no_https
-                        logger.debug(f"Social Score Penalty: +{self.penalty_no_https} (Website does not use HTTPS)")
+                        # logger.debug(f"Social Score Penalty: +{self.penalty_no_https} (Website does not use HTTPS)")
+                        log_str += f"\tPenalty: +{self.penalty_no_https} (Website does not use HTTPS)\n"
                     if not verification_results['mentions_token']:
                         total_penalty += self.penalty_website_no_mention
-                        logger.debug(f"Social Score Penalty: +{self.penalty_website_no_mention} (Website does not mention token name/symbol)")
+                        #logger.debug(f"Social Score Penalty: +{self.penalty_website_no_mention} (Website does not mention token name/symbol)")
+                        log_str += f"\tPenalty: +{self.penalty_website_no_mention} (Website does not mention token name/symbol)\n"
 
                     # Bonus for domain matching (only if not disallowed)
                     try:
@@ -237,27 +246,30 @@ class SocialsProcessor:
                         if parsed_domain:
                             if token_name and (parsed_domain.startswith(token_name) or token_name in parsed_domain):
                                 total_penalty += self.bonus_domain_match
-                                logger.debug(f"Social Score Bonus: {self.bonus_domain_match} (Website domain '{parsed_domain}' matches name '{token_name}')")
+                                # logger.debug(f"Social Score Bonus: {self.bonus_domain_match} (Website domain '{parsed_domain}' matches name '{token_name}')")
+                                log_str += f"\tBonus: +{self.bonus_domain_match} (Website domain '{parsed_domain}' matches name '{token_name}')\n"
                             elif token_symbol and (parsed_domain.startswith(token_symbol) or token_symbol in parsed_domain):
                                 total_penalty += self.bonus_domain_match
-                                logger.debug(f"Social Score Bonus: {self.bonus_domain_match} (Website domain '{parsed_domain}' matches symbol '{token_symbol}')")
+                                # logger.debug(f"Social Score Bonus: {self.bonus_domain_match} (Website domain '{parsed_domain}' matches symbol '{token_symbol}')")
+                                log_str += f"\tBonus: +{self.bonus_domain_match} (Website domain '{parsed_domain}' matches symbol '{token_symbol}')\n"
                     except Exception:
                         pass # Ignore errors during bonus check
 
             # 3. Check for allowed news/gov domains (runs regardless of disallowed status)
-            if parsed_domain: # Only check if domain was successfully parsed
-                try:
-                    is_allowed_news_gov = (
-                        any(parsed_domain == allowed or parsed_domain.endswith('.' + allowed) for allowed in self.allowed_news_domains)
-                        or parsed_domain.endswith('.gov')
-                    )
-                    if is_allowed_news_gov:
-                        # total_penalty += self.bonus_news_gov_website # Apply bonus/penalty if configured
-                        logger.debug(f"Social Score Info: Website URL domain '{parsed_domain}' is an allowed news/gov domain.")
-                    # else: # Optional: Log if domain is NOT allowed news/gov
-                    #    logger.debug(f"Social Score Info: Website URL domain '{parsed_domain}' is not in allowed news/gov list.")
-                except Exception:
-                    pass # Ignore parsing errors for this check too
+            # if parsed_domain: # Only check if domain was successfully parsed
+            #     try:
+            #         is_allowed_news_gov = (
+            #             any(parsed_domain == allowed or parsed_domain.endswith('.' + allowed) for allowed in self.allowed_news_domains)
+            #             or parsed_domain.endswith('.gov')
+            #         )
+            #         if is_allowed_news_gov:
+            #             # total_penalty += self.bonus_news_gov_website # Apply bonus/penalty if configured
+            #             # logger.debug(f"Social Score Info: Website URL domain '{parsed_domain}' is an allowed news/gov domain.")
+            #             log_str += f"\tInfo: Website URL domain '{parsed_domain}' is an allowed news/gov domain.\n"
+            #         # else: # Optional: Log if domain is NOT allowed news/gov
+            #         #    logger.debug(f"Social Score Info: Website URL domain '{parsed_domain}' is not in allowed news/gov list.")
+            #     except Exception:
+            #         pass # Ignore parsing errors for this check too
 
             # Bonus if website is from major news outlet
             try:
@@ -270,7 +282,8 @@ class SocialsProcessor:
                 )
                 if is_allowed_news_gov:
                     total_penalty += self.bonus_news_gov_website # Apply bonus/penalty if configured
-                    logger.debug(f"Social Score Info: Website URL domain '{parsed_domain}' is an allowed news/gov domain.")
+                    # logger.debug(f"Social Score Info: Website URL domain '{parsed_domain}' is an allowed news/gov domain.")
+                    log_str += f"\tBonus: +{self.bonus_news_gov_website} (Website URL domain '{parsed_domain}' is an allowed news/gov domain)\n"
                 # else: # Optional: Log if domain is NOT allowed news/gov
                 #    logger.debug(f"Social Score Info: Website URL domain '{parsed_domain}' is not in allowed news/gov list.")
             except Exception:
@@ -280,35 +293,85 @@ class SocialsProcessor:
         telegram = social_data.get("telegram") or social_data.get("tg") # Common keys
         if not telegram:
             total_penalty += self.penalty_no_telegram
-            logger.debug(f"Social Score Penalty: +{self.penalty_no_telegram} (No Telegram)")
+            # logger.debug(f"Social Score Penalty: +{self.penalty_no_telegram} (No Telegram)")
+            log_str += f"\tPenalty: +{self.penalty_no_telegram} (No Telegram)\n"
         elif not isinstance(telegram, str):
-             total_penalty += self.penalty_invalid_telegram_type
-             logger.debug(f"Social Score Penalty: +{self.penalty_invalid_telegram_type} (Invalid Telegram type: {type(telegram)})")
+            total_penalty += self.penalty_invalid_telegram_type
+            # logger.debug(f"Social Score Penalty: +{self.penalty_invalid_telegram_type} (Invalid Telegram type: {type(telegram)})")
+            log_str += f"\tPenalty: +{self.penalty_invalid_telegram_type} (Invalid Telegram type: {type(telegram)})\n"
         elif not is_valid_telegram(telegram):
             total_penalty += self.penalty_invalid_telegram_url
-            logger.debug(f"Social Score Penalty: +{self.penalty_invalid_telegram_url} (Invalid Telegram URL: {telegram})")
+            # logger.debug(f"Social Score Penalty: +{self.penalty_invalid_telegram_url} (Invalid Telegram URL: {telegram})")
+            log_str += f"\tPenalty: +{self.penalty_invalid_telegram_url} (Invalid Telegram URL: {telegram})\n"
 
         # --- Twitter Check ---
         twitter = social_data.get("twitter") or social_data.get("x") # Common keys
         if not twitter:
             total_penalty += self.penalty_no_twitter
-            logger.debug(f"Social Score Penalty: +{self.penalty_no_twitter} (No Twitter/X)")
+            #logger.debug(f"Social Score Penalty: +{self.penalty_no_twitter} (No Twitter/X)")
+            log_str += f"\tPenalty: +{self.penalty_no_twitter} (No Twitter/X)\n"
         elif not isinstance(twitter, str):
-             total_penalty += self.penalty_invalid_twitter_type
-             logger.debug(f"Social Score Penalty: +{self.penalty_invalid_twitter_type} (Invalid Twitter type: {type(twitter)})")
+            total_penalty += self.penalty_invalid_twitter_type
+            # logger.debug(f"Social Score Penalty: +{self.penalty_invalid_twitter_type} (Invalid Twitter type: {type(twitter)})")
+            log_str += f"\tPenalty: +{self.penalty_invalid_twitter_type} (Invalid Twitter type: {type(twitter)})\n"
         elif not is_valid_twitter(twitter):
             total_penalty += self.penalty_invalid_twitter_url
-            logger.debug(f"Social Score Penalty: +{self.penalty_invalid_twitter_url} (Invalid Twitter URL: {twitter})")
+            # logger.debug(f"Social Score Penalty: +{self.penalty_invalid_twitter_url} (Invalid Twitter URL: {twitter})")
+            log_str += f"\tPenalty: +{self.penalty_invalid_twitter_url} (Invalid Twitter URL: {twitter})\n"
+
+        # --- Action Trigger URL Check ---
+        action_trigger_penalty_applied = False # Flag to apply penalty only once even if multiple links trigger it
+        for link_type, link_url in [("Website", website), ("Telegram", telegram), ("Twitter", twitter)]:
+            if link_url and isinstance(link_url, str):
+                try:
+                    parsed = urlparse(link_url)
+                    # Check for mailto links
+                    if parsed.scheme == 'mailto':
+                        if not action_trigger_penalty_applied:
+                            total_penalty += self.penalty_action_trigger_url
+                            log_str += f"\tPenalty: +{self.penalty_action_trigger_url} ({link_type} URL is a mailto link: {link_url})\n"
+                            action_trigger_penalty_applied = True
+                        continue # No need for further checks on this link
+
+                    # Check for tel: links
+                    if parsed.scheme == 'tel':
+                        if not action_trigger_penalty_applied:
+                            total_penalty += self.penalty_action_trigger_url
+                            log_str += f"\tPenalty: +{self.penalty_action_trigger_url} ({link_type} URL is a tel link: {link_url})\n"
+                            action_trigger_penalty_applied = True
+                        continue
+
+                    # Check for sms: links
+                    if parsed.scheme == 'sms':
+                        if not action_trigger_penalty_applied:
+                            total_penalty += self.penalty_action_trigger_url
+                            log_str += f"\tPenalty: +{self.penalty_action_trigger_url} ({link_type} URL is an sms link: {link_url})\n"
+                            action_trigger_penalty_applied = True
+                        continue
+
+                    # Check for Twitter/X intent links
+                    if parsed.netloc in ('twitter.com', 'x.com') and parsed.path.startswith('/intent/'):
+                         if not action_trigger_penalty_applied:
+                            total_penalty += self.penalty_action_trigger_url
+                            log_str += f"\tPenalty: +{self.penalty_action_trigger_url} ({link_type} URL is a Twitter/X intent link: {link_url})\n"
+                            action_trigger_penalty_applied = True
+                        # continue # Might add other checks later
+
+                except Exception as e:
+                    logger.warning(f"Could not parse URL for action trigger check ({link_type}: {link_url}): {e}")
 
         # --- Duplicate Link Check ---
         valid_links = [link for link in [website, telegram, twitter] if link] # Get non-null links
         if len(valid_links) > len(set(valid_links)): # Check if number of links > number of unique links
             total_penalty += self.penalty_duplicate_links
-            logger.debug(f"Social Score Penalty: +{self.penalty_duplicate_links} (Duplicate URLs found for different social types)")
+            #logger.debug(f"Social Score Penalty: +{self.penalty_duplicate_links} (Duplicate URLs found for different social types)")
+            log_str += f"\tPenalty: +{self.penalty_duplicate_links} (Duplicate URLs found for different social types)\n"
 
         # Ensure score is within 0-100 range
         final_score = min(max(total_penalty, 0), 100)
-        logger.debug(f"Calculated Social Score (Penalty): {final_score}")
+        #logger.debug(f"Calculated Social Score (Penalty): {final_score}")
+        log_str += f"\tFinal Score: {final_score}\n"
+        logger.debug(log_str)
         return final_score
 
     async def _update_token_socials(self, mint: str, website: str | None, telegram: str | None, twitter: str | None, score: int):
