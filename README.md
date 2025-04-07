@@ -11,6 +11,7 @@
 ![Contributions Welcome](https://img.shields.io/badge/contributions-welcome-ff69b4)
 [![Demo](https://img.shields.io/badge/demo-👀-yellow)](#demo)
 
+
 ---
 
 ## 🧭 Table of Contents
@@ -126,6 +127,57 @@ Pump Trader is built to:
 - 🚨 **Evaluate Token Risk** with RugCheck. If it's sketchy, it's nuked.
 - 🐦 **Analyze Social Signals** — because sometimes memes really do matter.
 - 🧠 **Trade Intelligently** using configurable multi-stage logic.
+- 📊 **Token Price Analysis**: A web interface to visualize token price history (see below).
+
+---
+
+## 📊 **IN PROGRESS** - Token Analysis Module (Web Interface)
+
+This project includes a simple web application built with Flask to visualize the price history of tokens based on the trade data stored in the database.
+
+### Purpose
+
+- Visualize the price trend of one or more tokens over time.
+- The time axis represents elapsed time (in minutes) since the first recorded trade for each specific token, not real-world time.
+- Helps in analyzing price action relative to the start of trading activity captured by the bot.
+
+### Dependencies
+
+This module requires additional Python packages:
+
+- `Flask`: For the web server.
+- `pandas`: For data manipulation.
+
+Make sure these are included in your `requirements.txt` and installed.
+
+### Setup & Usage
+
+  1. **Install Dependencies**: If you haven't already, install all required packages:  
+
+        ```bash
+        pip install -r requirements.txt
+        ```
+
+  2. **Run the Web App**: Navigate to the project's root directory in your terminal and run   the Flask app:
+
+        ```bash
+        python web_app/app.py
+        ```
+
+        *(Note: For production, consider using a proper ASGI/WSGI server like Gunicorn or Uvicorn).*
+
+  3. **Access in Browser**: Open your web browser and go to:
+
+        ```bash
+        http://127.0.0.1:5000/
+        ```
+
+        (Or the address/port shown in your terminal if different).
+
+  4. **Generate Chart**:
+        - In the text area, paste the mint addresses of the tokens you want to analyze, separated by commas (e.g., `mint1, mint2, mint3`).
+        - Click the "Generate Chart" button.
+        - The chart will display the price history for the requested tokens based on the data in the `trades` and `trades_backup` tables.
 
 ---
 
