@@ -9,3 +9,5 @@ python-dotenv
 rich
 beautifulsoup4
 pydantic
+Flask
+pandas
