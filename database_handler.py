@@ -258,6 +258,67 @@ class DatabaseClient:
             result = await conn.fetchrow(query, mint)
             return result['total_supply'] if result else TOTAL_SUPPLY
 
+    async def get_trade_history(self, mints: list[str]):
+        """Fetches price and timestamp for given mints from trades and trades_backup."""
+        if not mints:
+            return []
+        # Ensure logger is accessible if used within the method, assuming it's defined globally or passed in
+        # from logger import logger # Uncomment if logger is needed and not globally accessible
+        query = """
+            SELECT mint, price, timestamp
+            FROM (
+                SELECT mint, price, timestamp FROM trades WHERE mint = ANY($1::text[])
+                UNION ALL
+                SELECT mint, price, timestamp FROM trades_backup WHERE mint = ANY($1::text[])
+            ) AS combined_trades
+            ORDER BY mint, timestamp;
+        """
+        async with self.pool.acquire() as conn:
+            try:
+                results = await conn.fetch(query, mints)
+                # Convert asyncpg Record objects to dictionaries for easier handling
+                return [dict(row) for row in results]
+            except Exception as e:
+                # Log the error using the logger instance
+                logger.error(f"Error fetching trade history for mints {mints}: {e}", exc_info=True)
+                return [] # Return empty list on error
+
+    async def get_all_unique_mints_with_names(self):
+        """Fetches all unique mint addresses and their names from relevant tables."""
+        # This query prioritizes names from the 'tokens' table, falling back to 'tokens_backup'.
+        # It assumes mints exist in trades/trades_backup might also exist in tokens/tokens_backup.
+        query = """
+            WITH UniqueMints AS (
+                SELECT DISTINCT mint
+                FROM (
+                    SELECT mint FROM trades
+                    UNION
+                    SELECT mint FROM trades_backup
+                ) AS traded_mints
+                WHERE mint IS NOT NULL
+            )
+            SELECT
+                um.mint,
+                COALESCE(t.name, tb.name, um.mint) AS name, -- Fallback to mint if name not found
+                COALESCE(t.symbol, tb.symbol, um.mint) AS symbol
+                COALESCE(t.socials_score, tb.socials_score, um.mint) AS socials_score
+                COALESCE(r.score, rb.score, um.mint) AS rugcheck_score
+            FROM UniqueMints um
+            LEFT JOIN tokens t ON um.mint = t.mint
+            LEFT JOIN tokens_backup tb ON um.mint = tb.mint AND t.mint IS NULL -- Only join backup if not in tokens
+            LEFT JOIN rugcheck r ON um.mint = r.mint
+            LEFT JOIN rugcheck_backup rb ON um.mint = rb.mint AND r.mint IS NULL -- Only join backup if not in tokens
+            ORDER BY rugcheck_score, score, name, um.mint;
+        """
+        async with self.pool.acquire() as conn:
+            try:
+                results = await conn.fetch(query)
+                # Return list of dictionaries
+                return [{'mint': row['mint'], 'name': row['name'], 'symbol': row['symbol'], 'socials_score': row['socials_score'], 'rugcheck_score': row['rugcheck_score']} for row in results]
+            except Exception as e:
+                logger.error(f"Error fetching unique mints with names: {e}", exc_info=True)
+                return []
+
     async def backup_and_delete_token(self, mint: str, archived_at: datetime):
         """Backup core table data to a corresponding backup table."""
         try:
@@ -265,27 +326,26 @@ class DatabaseClient:
                 async with conn.transaction():
                     try:
                         await conn.execute('''
-                            INSERT INTO tokens_backup SELECT *, $1 FROM tokens WHERE mint = $2
-                        ''', archived_at, mint)
+                            INSERT INTO tokens_backup SELECT *, NOW() FROM tokens WHERE mint = $1
+                        ''', mint)
                         
                         await conn.execute('''
-                            INSERT INTO trades_backup SELECT *, $1 FROM trades WHERE mint = $2
-                        ''', archived_at, mint)
+                            INSERT INTO trades_backup SELECT *, NOW() FROM trades WHERE mint = $1
+                        ''', mint)
 
                         await conn.execute('''
-                            INSERT INTO rugcheck_backup SELECT *, $1 FROM rugcheck WHERE mint = $2
-                        ''', archived_at, mint)
+                            INSERT INTO rugcheck_backup SELECT *, NOW() FROM rugcheck WHERE mint = $1
+                        ''', mint)
 
                         # Backup migrations, ignoring conflicts on the primary key
                         await conn.execute('''
-                            INSERT INTO migrations_backup SELECT *, $1 FROM migrations WHERE mint = $2
+                            INSERT INTO migrations_backup SELECT *, NOW() FROM migrations WHERE mint = $1
                             ON CONFLICT (signature) DO NOTHING -- Conflict check on signature
-                        ''', archived_at, mint)
+                        ''', mint)
 
                         await conn.execute("DELETE FROM tokens WHERE mint = $1", mint)
                         await conn.execute("DELETE FROM trades WHERE mint = $1", mint)
                         await conn.execute("DELETE FROM rugcheck WHERE mint = $1", mint)
-                        # Delete original migrations entry
                         await conn.execute("DELETE FROM migrations WHERE mint = $1", mint)
 
                         logger.debug(f"🧹 Backup & deletion completed for {mint}")
