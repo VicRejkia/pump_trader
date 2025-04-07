@@ -38,7 +38,7 @@ class Rugcheck:
         self.websocket_handler = websocket_handler
         self.limiter = AsyncLimiter(max_rate=RUGCHECK_RATE_LIMIT, time_period=RUGCHECK_INTERVAL)
         self.queue = self.state.get_rugcheck_queue()
-        self.socials_processor = socials_processor
+        #self.socials_processor = socials_processor
         self.fetch_attempts = {}
         self.jwt_token: str | None = None
         self.wallet: Keypair | None = None
@@ -421,13 +421,13 @@ class Rugcheck:
             logger.debug(f"✅ RugCheck score OK for {mint} (Score: {score})")
 
             # --- Process Socials AFTER successful RugCheck (if score is OK) ---
-            if self.socials_processor:
-                # logger.debug(f"Triggering socials processing for {mint} after successful RugCheck.")
-                # Run social processing in the background to avoid blocking the rugcheck worker
-                asyncio.create_task(self.socials_processor.process_token(mint))
-            else:
-                # This case should ideally not happen if initialized correctly in main.py
-                logger.warning("Socials processor not available in Rugcheck class.")
+            # if self.socials_processor:
+            #     # logger.debug(f"Triggering socials processing for {mint} after successful RugCheck.")
+            #     # Run social processing in the background to avoid blocking the rugcheck worker
+            #     asyncio.create_task(self.socials_processor.process_token(mint))
+            # else:
+            #     # This case should ideally not happen if initialized correctly in main.py
+            #     logger.warning("Socials processor not available in Rugcheck class.")
 
             return True # Indicate success
 

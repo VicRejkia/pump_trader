@@ -161,6 +161,7 @@ class TradingBot:
             asyncio.create_task(update_sol_price(self.state), name="sol_price_updater"),
             asyncio.create_task(trade_worker(), name="trade_worker"),
             rugchecker.start(),
+            socials_proc.start(),
             asyncio.create_task(self.run_buy_checks(), name="buy_opportunity_checker"),
             asyncio.create_task(self.run_sell_checks(), name="sell_opportunity_checker")
         ]

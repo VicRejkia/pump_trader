@@ -15,10 +15,10 @@ CREATE TABLE IF NOT EXISTS tokens_backup (
     telegram TEXT,
     twitter TEXT,
     socials_score INTEGER,
-    socials_last_checked TIMESTAMP,
+    socials_last_checked TIMESTAMP WITH TIME ZONE,
     is_active BOOLEAN,
-    last_trade TIMESTAMP,
-    timestamp TIMESTAMP,
+    last_trade TIMESTAMP WITH TIME ZONE,
+    timestamp TIMESTAMP WITH TIME ZONE,
     backup_timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 

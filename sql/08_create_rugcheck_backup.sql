@@ -1,6 +1,6 @@
 -- Create the rugcheck_backup table with an extra column for the backup timestamp
 CREATE TABLE IF NOT EXISTS rugcheck_backup (
-    mint TEXT PRIMARY KEY REFERENCES tokens(mint) ON DELETE CASCADE,
+    mint TEXT PRIMARY KEY REFERENCES tokens_backup(mint) ON DELETE CASCADE,
     tokenProgram TEXT,
     creator TEXT,
     token_mintAuthority TEXT,
@@ -34,3 +34,6 @@ CREATE TABLE IF NOT EXISTS rugcheck_backup (
     last_checked TIMESTAMP WITH TIME ZONE,
     backup_timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Optional index on backup_timestamp
+CREATE INDEX IF NOT EXISTS idx_rugcheck_backup_timestamp ON rugcheck_backup (backup_timestamp);

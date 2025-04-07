@@ -9,6 +9,7 @@ import traceback
 from urllib.parse import urlparse, urlsplit
 import httpx
 from bs4 import BeautifulSoup # Added for HTML parsing
+from decimal import Decimal
 
 from database_handler import DatabaseClient
 from logger import logger
@@ -16,13 +17,17 @@ from state_manager import GlobalState
 # Assuming these validation functions exist in utils.py
 from utils import is_valid_website, is_valid_telegram, is_valid_twitter
 
-# Domain lists and scoring values are now loaded from config in __init__
+# --- Configuration for Retries ---
+MAX_FETCH_ATTEMPTS = 2 # Allow 2 attempts (initial + 1 retry)
+DEPRIORITIZED_PRIORITY = float('inf') # Very low priority for requeueing after max attempts
 
 class SocialsProcessor:
     def __init__(self, state: GlobalState, db_client: DatabaseClient, config: dict):
         self.state = state
         self.db_client = db_client
         self.config = config # Store config
+        self.queue = self.state.get_socialscheck_queue()
+        self.fetch_attempts = {}
 
         # Load scoring values from config
         self.penalty_no_website = config.get('SOCIALS_PENALTY_NO_WEBSITE', 40)
@@ -410,12 +415,13 @@ class SocialsProcessor:
 
             if not token_info:
                 logger.warning(f"Token {mint} not found in DB for social processing.")
-                return
+                return "NOT_FOUND"
+            
             if not token_info['uri']:
                 logger.debug(f"Token {mint} has no metadata URI. Skipping social processing.")
                 # Optionally update DB to mark as checked with no URI?
                 # await self._update_token_socials(mint, None, None, None, 100) # Max penalty if no URI? Or specific score?
-                return
+                return "NO_URI"
 
             # 2. Fetch metadata from URI
             metadata = await self._fetch_metadata(token_info['uri'])
@@ -423,7 +429,7 @@ class SocialsProcessor:
                 logger.warning(f"Could not fetch or parse metadata for {mint} from {token_info['uri']}. Cannot process socials.")
                  # Update DB to mark as checked but failed? Score as high penalty?
                 await self._update_token_socials(mint, None, None, None, self.score_failed_metadata)
-                return
+                return "FAILED_METADATA"
 
             # 3. Extract social links (handle different possible keys)
             website_url = metadata.get("website") or metadata.get("homepage") or metadata.get("url") or metadata.get("external_url")
@@ -493,7 +499,202 @@ class SocialsProcessor:
                 twitter_url,
                 social_score
             )
+
+            return True # Indicate success
         # Correctly aligned with the main `try:` at line 338
         except Exception as e:
             # Correctly indented under the `except:`
             logger.error(f"💥 Unexpected error processing socials for {mint}: {e}", exc_info=True)
+
+    async def _refresh_queue(self):
+        """Refreshes the Socials Check priority queue based on token volume."""
+        try:
+            sol_price = await self.state.get_sol_price()
+            if sol_price is None:
+                logger.warning("⚠ SOL_PRICE not updated yet; skipping RSocials check queue refresh.")
+                return False # Indicate refresh skipped
+
+            # Clear the current queue before repopulating
+            while not self.queue.empty():
+                try:
+                    self.queue.get_nowait()
+                    self.queue.task_done()
+                except asyncio.QueueEmpty:
+                    break
+                except Exception as e:
+                    logger.error(f"Error clearing socials heck queue item: {e}")
+
+
+            async with self.db_client.pool.acquire() as conn:
+                # Fetch tokens that are active but don't have Socials Check data yet, ordered by volume
+                # Note: Volatility isn't directly calculated here, using volume as proxy per original code.
+                rows = await conn.fetch("""
+                    SELECT t.mint, COALESCE(SUM(tr.sol_amount), 0) AS volume
+                    FROM tokens t
+                    LEFT JOIN trades tr ON t.mint = tr.mint AND tr.timestamp >= NOW() - INTERVAL '1 hour' -- Consider recent volume
+                    WHERE t.is_active = TRUE AND (t.socials_score IS NULL OR t.socials_last_checked < NOW() - (10 || ' minutes')::interval) -- Select tokens not checked recently
+                    GROUP BY t.mint
+                    ORDER BY volume DESC
+                """)
+
+                logger.debug(f"🔍 Found {len(rows)} active tokens missing Socials Check data for refresh.")
+
+                if rows:
+                    tokens_added = 0 # Initialize counter
+                    for row in rows:
+                        mint = row["mint"]
+                        volume = row["volume"] or Decimal(0)
+                        priority = -float(volume)
+                        current_attempts = self.fetch_attempts.get(mint, 0)
+
+                        # Only add if not already deprioritized (reached max attempts)
+                        if current_attempts < MAX_FETCH_ATTEMPTS:
+                             await self.queue.put((priority, mint))
+                             tokens_added += 1
+                        # else:
+                        #      logger.debug(f"Token {mint} previously reached max fetch attempts ({current_attempts}), not adding during refresh.")
+
+                    logger.debug(f"🔄 Refreshed Socials Check queue. Added {tokens_added} tokens (current size: {self.queue.qsize()}).")
+                #else:
+                    # logger.debug("✅ No active tokens found needing Socials Check data during refresh.")
+            return True # Indicate refresh completed
+
+        except Exception as e:
+            logger.error(f"❌ Critical error in _refresh_queue: {e}", exc_info=True)
+            return False # Indicate refresh failed
+        
+    async def _worker(self):
+        """Worker task that processes tokens from the Socials Check queue with rate limiting."""
+        logger.info("🚀 Socials worker started.")
+        last_refresh_time = 0
+        refresh_interval = 30 # Refresh queue every 30 seconds
+
+        while not self.state.shutdown_event.is_set():
+            try:
+                # --- Refresh Queue Periodically ---
+                current_time = asyncio.get_event_loop().time()
+                if self.queue.empty() or (current_time - last_refresh_time > refresh_interval):
+                    logger.debug("🔄 Triggering Socials Check queue refresh...")
+                    refreshed = await self._refresh_queue()
+                    if refreshed:
+                        last_refresh_time = current_time
+                    else:
+                        # Avoid busy-looping if refresh fails repeatedly
+                        await self.state.wait_or_interrupt(timeout=5)
+                        continue # Skip to next iteration if refresh failed
+
+                # --- Get Token from Queue ---
+                if self.queue.empty():
+                    # logger.debug("Socials Check queue is empty, waiting...")
+                    await self.state.wait_or_interrupt(timeout=5) # Wait if queue is empty
+                    continue
+
+                try:
+                    # Get highest priority item (lowest negative volume)
+                    priority, mint = await asyncio.wait_for(self.queue.get(), timeout=1.0)
+                    # logger.debug(f"Processing {mint} from Socials Check queue (Priority: {priority})")
+                except asyncio.TimeoutError:
+                    # logger.debug("Socials Check queue.get() timed out, queue might be empty or contested.")
+                    continue # Try again next loop
+                except Exception as q_err:
+                     logger.error(f"Error getting item from socials check queue: {q_err}")
+                     continue
+                
+                # --- Process Token ---
+                task_completed = False # Flag to ensure task_done is called correctly
+                try:
+                    # Check if token still exists and is active before fetching
+                    async with self.db_client.pool.acquire() as conn:
+                        is_active = await conn.fetchval("SELECT is_active FROM tokens WHERE mint = $1", mint)
+
+                    if is_active is None:
+                        logger.debug(f"Token {mint} no longer exists. Skipping Socials Check.")
+                        self.queue.task_done()
+                        task_completed = True
+                        self.fetch_attempts.pop(mint, None) # Clear attempts
+                        continue
+                    if not is_active:
+                            logger.debug(f"Token {mint} is no longer active. Skipping Socials Check.")
+                            self.queue.task_done()
+                            task_completed = True
+                            self.fetch_attempts.pop(mint, None) # Clear attempts
+                            continue
+
+                    # Fetch, store, check score, etc.
+                    process_status = await self.process_token(mint)
+
+                    # --- Handle Retry/Deprioritize Logic ---  NO_URI FAILED_METADATA NOT_FOUND
+                    if process_status in ['NO_URI', 'FAILED_METADATA', 'NOT_FOUND']:
+                        status_reason = "No valid token uri"
+                        current_attempts = self.fetch_attempts.get(mint, 0) + 1
+                        self.fetch_attempts[mint] = current_attempts
+                        logger.warning(f"🔄 Socials API failed for {mint} ({status_reason}). Attempt {current_attempts}/{MAX_FETCH_ATTEMPTS}.")
+
+                        if current_attempts < MAX_FETCH_ATTEMPTS:
+                            # Requeue with original priority for retry
+                            await self.queue.put((priority, mint))
+                            logger.info(f"Retrying Socials Check for {mint} later (attempt {current_attempts}).")
+                        else:
+                            # Max attempts reached, requeue with very low priority
+                            await self.queue.put((DEPRIORITIZED_PRIORITY, mint))
+                            logger.warning(f"Max socials check fetch attempts ({MAX_FETCH_ATTEMPTS}) reached for {mint} due to {status_reason}. Deprioritizing.")
+                            # Keep attempt count high so refresh doesn't re-add with high priority
+
+                    elif process_status is False:
+                        # General processing error (not 404 or timeout)
+                        logger.warning(f"📉 Socials Check processing failed for {mint} (not 404/timeout). Requeuing with original priority.")
+                        await self.queue.put((priority, mint)) # Requeue
+                        self.fetch_attempts.pop(mint, None) # Clear attempts counter
+
+                    else: # process_status is True (Success)
+                        logger.debug(f"✅ Successfully processed Socials Check for {mint}.")
+                        async with self.db_client.pool.acquire() as conn:
+                            try:
+                                await conn.execute('''
+                                    UPDATE tokens SET socials_last_checked = NOW() WHERE mint = $1
+                                ''', mint)
+                                logger.debug(f"Updated socials_last_checked for {mint} to NOW()")
+                            except Exception as e:
+                                logger.error(f"Error updating socials_last_checked for {mint}: {e}", exc_info=True)
+
+                        self.fetch_attempts.pop(mint, None)
+                    
+
+                    # Mark task as done regardless of outcome (requeueing handles retries)
+                    self.queue.task_done()
+                    task_completed = True
+
+
+                except Exception as proc_err:
+                    logger.error(f"❌ Unexpected error processing socials check for token {mint}: {proc_err}", exc_info=True)
+                    # Requeue on unexpected errors during processing block
+                    await self.queue.put((priority, mint))
+                    # Clear fetch attempts counter as it was an unexpected error
+                    self.fetch_attempts.pop(mint, None)
+
+                finally:
+                    # Ensure task_done is called even if processing fails, unless already called
+                    if not task_completed:
+                        try:
+                            self.queue.task_done()
+                        except ValueError:
+                            logger.warning(f"Task_done already called for {mint} in finally block?")
+                        except Exception as td_err:
+                            logger.error(f"Error calling task_done for {mint} in finally block: {td_err}")
+
+
+            except asyncio.CancelledError:
+                logger.info("⏹ Socials Check worker task cancelled.")
+                break # Exit loop cleanly on cancellation
+            except Exception as e:
+                logger.error(f"💥 Unexpected error in Socials Check worker main loop: {e}", exc_info=True)
+                # Avoid busy-looping on persistent errors
+                await self.state.wait_or_interrupt(timeout=10)
+
+        logger.info("🛑 Socials heck worker shutting down.")
+
+    def start(self) -> asyncio.Task:
+        """Creates and returns the asyncio task for the Socials Check worker."""
+        logger.info("Creating Socials Check background task...")
+        # Ensure worker starts after initial setup (like wallet loading) is done
+        return asyncio.create_task(self._worker(), name="socialscheck_worker")
