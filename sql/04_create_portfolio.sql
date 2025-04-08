@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS portfolio (
     id SERIAL PRIMARY KEY,
-    mint TEXT REFERENCES tokens(mint) ON DELETE CASCADE,
+    mint TEXT,
     tx_type TEXT,                     -- 'buy' or 'sell'
     price NUMERIC,                    -- Price per token at the time of tx
     market_cap NUMERIC,               -- Market cap at the time of tx

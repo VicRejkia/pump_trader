@@ -5,7 +5,7 @@ Handles PostgreSQL connections and CRUD operations.
 
 import os
 import glob
-from datetime import datetime, timezone
+from datetime import datetime, timezone,timedelta
 import asyncio
 import asyncpg
 import aiofiles # <-- Add this import
@@ -264,13 +264,11 @@ class DatabaseClient:
             return []
         # Ensure logger is accessible if used within the method, assuming it's defined globally or passed in
         # from logger import logger # Uncomment if logger is needed and not globally accessible
+        # Use the v_trades view which combines trades and trades_backup
         query = """
             SELECT mint, price, timestamp
-            FROM (
-                SELECT mint, price, timestamp FROM trades WHERE mint = ANY($1::text[])
-                UNION ALL
-                SELECT mint, price, timestamp FROM trades_backup WHERE mint = ANY($1::text[])
-            ) AS combined_trades
+            FROM v_trades -- Use the view
+            WHERE mint = ANY($1::text[])
             ORDER BY mint, timestamp;
         """
         async with self.pool.acquire() as conn:
@@ -287,37 +285,172 @@ class DatabaseClient:
         """Fetches all unique mint addresses and their names from relevant tables."""
         # This query prioritizes names from the 'tokens' table, falling back to 'tokens_backup'.
         # It assumes mints exist in trades/trades_backup might also exist in tokens/tokens_backup.
+        # Use the v_tokens and v_rugcheck views
+        # Fetch symbol, socials_score, and latest rugcheck score for display
         query = """
-            WITH UniqueMints AS (
-                SELECT DISTINCT mint
-                FROM (
-                    SELECT mint FROM trades
-                    UNION
-                    SELECT mint FROM trades_backup
-                ) AS traded_mints
-                WHERE mint IS NOT NULL
+            WITH LatestRugcheck AS (
+                SELECT
+                    mint,
+                    score,
+                    ROW_NUMBER() OVER(PARTITION BY mint ORDER BY timestamp DESC) as rn
+                FROM v_rugcheck -- Use the rugcheck view
             )
             SELECT
-                um.mint,
-                COALESCE(t.name, tb.name, um.mint) AS name, -- Fallback to mint if name not found
-                COALESCE(t.symbol, tb.symbol, um.mint) AS symbol
-                COALESCE(t.socials_score, tb.socials_score, um.mint) AS socials_score
-                COALESCE(r.score, rb.score, um.mint) AS rugcheck_score
-            FROM UniqueMints um
-            LEFT JOIN tokens t ON um.mint = t.mint
-            LEFT JOIN tokens_backup tb ON um.mint = tb.mint AND t.mint IS NULL -- Only join backup if not in tokens
-            LEFT JOIN rugcheck r ON um.mint = r.mint
-            LEFT JOIN rugcheck_backup rb ON um.mint = rb.mint AND r.mint IS NULL -- Only join backup if not in tokens
-            ORDER BY rugcheck_score, score, name, um.mint;
+                vt.mint,
+                COALESCE(vt.name, vt.mint) AS name, -- Fallback to mint if name is null
+                vt.symbol,
+                vt.socials_score,
+                lr.score AS rugcheck_score
+            FROM v_tokens vt -- Use the tokens view
+            LEFT JOIN LatestRugcheck lr ON vt.mint = lr.mint AND lr.rn = 1
+            WHERE vt.mint IS NOT NULL -- Ensure mint is not null from the view
+            ORDER BY name, vt.mint; -- Order by name from the view
         """
         async with self.pool.acquire() as conn:
             try:
-                results = await conn.fetch(query)
+                results = await conn.fetch(query) # No parameters needed for this version using views
                 # Return list of dictionaries
-                return [{'mint': row['mint'], 'name': row['name'], 'symbol': row['symbol'], 'socials_score': row['socials_score'], 'rugcheck_score': row['rugcheck_score']} for row in results]
+                # Return richer dictionary including scores
+                return [
+                    {
+                        'mint': row['mint'],
+                        'name': row['name'],
+                        'symbol': row['symbol'],
+                        'socials_score': row['socials_score'],
+                        'rugcheck_score': row['rugcheck_score'] # Might be None
+                    } for row in results
+                ]
             except Exception as e:
                 logger.error(f"Error fetching unique mints with names: {e}", exc_info=True)
                 return []
+
+    async def get_filtered_tokens(self, max_socials=100, max_rugcheck=10000, min_volume_sol=0, time_window_minutes=60, portfolio_only=False): # Added portfolio_only
+        """
+        Fetches tokens filtered by socials score, latest rugcheck score, recent trade volume,
+        and optionally only tokens currently in the active portfolio.
+        """
+        # Ensure numeric types for parameters
+        try:
+            max_socials = int(max_socials)
+            max_rugcheck = int(max_rugcheck)
+            min_volume_sol = float(min_volume_sol)
+            time_window_minutes = int(time_window_minutes)
+            # portfolio_only is already boolean from Flask request parsing or default
+        except (ValueError, TypeError):
+            logger.error("Invalid filter parameter types received.")
+            return [] # Return empty on invalid input types
+
+        # Construct the interval string safely
+        interval_str = timedelta(minutes=time_window_minutes)
+
+        # Base query parts
+        select_clause = """
+            SELECT DISTINCT -- Use DISTINCT to avoid duplicates if a token has multiple active portfolio entries (shouldn't happen with good logic)
+                vt.mint,
+                COALESCE(vt.name, vt.mint) AS name,
+                vt.socials_score,
+                lr.score AS rugcheck_score,
+                COALESCE(rv.volume_sol, 0) as recent_volume_sol
+        """
+        from_clause = """
+            FROM v_tokens vt
+            LEFT JOIN LatestRugcheck lr ON vt.mint = lr.mint AND lr.rn = 1
+            LEFT JOIN RecentVolume rv ON vt.mint = rv.mint
+        """
+        where_clause = """
+            WHERE
+                vt.socials_score IS NOT NULL AND vt.socials_score <= $1
+                AND (lr.score IS NULL OR lr.score <= $2)
+                AND COALESCE(rv.volume_sol, 0) >= $3
+        """
+        order_by_clause = "ORDER BY name, vt.mint;"
+        params = [max_socials, max_rugcheck, min_volume_sol, interval_str]
+
+        # Add portfolio filter if requested
+        if portfolio_only:
+            # Join with portfolio table to filter for active positions
+            from_clause += """
+            INNER JOIN portfolio p ON vt.mint = p.mint
+            """
+            # where_clause += """
+            # AND p.status = 'active' AND p.tx_type = 'buy' -- Ensure we link based on the active buy record
+            # """
+            logger.info("Filtering tokens to include only those in the active portfolio.")
+
+
+        # Combine query parts
+        query = f"""
+            WITH LatestRugcheck AS (
+                SELECT
+                    mint,
+                    score,
+                    ROW_NUMBER() OVER(PARTITION BY mint ORDER BY last_checked DESC) as rn
+                FROM v_rugcheck
+            ), RecentVolume AS (
+                SELECT
+                    mint,
+                    COALESCE(SUM(sol_amount), 0) as volume_sol
+                FROM v_trades
+                WHERE timestamp >= (NOW() - $4::INTERVAL)
+                GROUP BY mint
+            )
+            {select_clause}
+            {from_clause}
+            {where_clause}
+            {order_by_clause}
+        """
+
+        async with self.pool.acquire() as conn:
+            try:
+                logger.debug(f"Fetching filtered tokens with params: max_socials={max_socials}, max_rugcheck={max_rugcheck}, min_volume_sol={min_volume_sol}, interval_str={interval_str}, portfolio_only={portfolio_only}")
+                results = await conn.fetch(query, *params) # Use *params to unpack
+                # Return list of dictionaries including the scores and volume
+                return [
+                    {
+                        'mint': row['mint'],
+                        'name': row['name'],
+                        'socials': row['socials_score'],
+                        'rugcheck': row['rugcheck_score'], # Might be None
+                        'volume': round(row['recent_volume_sol'], 4) # Format volume
+                    } for row in results
+                ]
+            except Exception as e:
+                logger.error(f"Error fetching filtered tokens: {e}", exc_info=True)
+                return []
+
+    async def get_portfolio_transactions(self, mints: list[str]):
+        """Fetches buy/sell transaction timestamps and prices for given mints from the portfolio."""
+        if not mints:
+            return {} # Return empty dict if no mints provided
+
+        query = """
+            SELECT mint, tx_type, timestamp, price
+            FROM portfolio
+            WHERE mint = ANY($1::text[])
+            ORDER BY mint, timestamp;
+        """
+        async with self.pool.acquire() as conn:
+            try:
+                results = await conn.fetch(query, mints)
+                portfolio_data = {}
+                for row in results:
+                    mint = row['mint']
+                    if mint not in portfolio_data:
+                        portfolio_data[mint] = {'buys': [], 'sells': []}
+
+                    # Keep the original timestamp object and ensure price is float
+                    tx_info = {'timestamp': row['timestamp'], 'price': float(row['price'])}
+
+                    if row['tx_type'] == 'buy':
+                        portfolio_data[mint]['buys'].append(tx_info)
+                    elif row['tx_type'] == 'sell':
+                        portfolio_data[mint]['sells'].append(tx_info)
+
+                logger.debug(f"Fetched portfolio transactions for mints: {mints}")
+                return portfolio_data
+            except Exception as e:
+                logger.error(f"Error fetching portfolio transactions for mints {mints}: {e}", exc_info=True)
+                return {} # Return empty dict on error
 
     async def backup_and_delete_token(self, mint: str, archived_at: datetime):
         """Backup core table data to a corresponding backup table."""

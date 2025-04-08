@@ -6,7 +6,11 @@ import asyncio
 from asyncio import Queue
 from collections import deque
 import config # Import config to access INITIAL_SOL_BALANCE
+import json # Added for file writing
 from logger import logger
+
+# Define the path for the shared SOL price file
+SOL_PRICE_FILE = 'data/sol_price.json'
 
 class GlobalState:
     """Thread-safe Singleton class to store global state variables."""
@@ -61,8 +65,23 @@ class GlobalState:
 
     ## 🚀 SOL Price Management
     async def set_sol_price(self, price: float):
+        """Sets the in-memory SOL price and writes it to a shared file."""
+        if price is None:
+            logger.warning("Attempted to set SOL price to None. Skipping file write.")
+            return
+            
         async with self.lock:
             self.sol_price = price
+            # Also write to the shared file for the web app process
+            try:
+                # Use 'w' to overwrite the file completely each time
+                with open(SOL_PRICE_FILE, 'w') as f:
+                    json.dump({"price": price}, f)
+                # logger.debug(f"Wrote SOL price {price} to {SOL_PRICE_FILE}") # Optional: debug log
+            except IOError as e:
+                logger.error(f"Failed to write SOL price to {SOL_PRICE_FILE}: {e}")
+            except Exception as e: # Catch potential JSON errors too
+                logger.error(f"Unexpected error writing SOL price to {SOL_PRICE_FILE}: {e}")
 
     async def get_sol_price(self) -> float:
         async with self.lock:
