@@ -5,21 +5,18 @@ Configuration constants and settings for the trading bot.
 from datetime import timedelta
 
 """ Configuration constants and settings for the trading bot. """
-# PumpPortal
-WS_HOST: str = "wss://pumpportal.fun/api/data"
-MAX_SUBSCRIPTION_BATCH: int = 100           # For batch unsubscription
 
 # Trading configuration
 SOL_TO_BUY = 0.1                            # Amount of SOL to spend on each buy
-INITIAL_SOL_BALANCE = 2.0                   # Starting SOL balance for PnL tracking
+INITIAL_SOL_BALANCE = 10.0                  # Starting SOL balance for PnL tracking
 
 # --- New Multi-Stage Sell Logic Configuration ---
 INITIAL_STOP_LOSS_PERCENT = 50.0            # Initial SL as % below buy price (e.g., 25.0 for -25%)
 # INITIAL_TAKE_PROFIT_PERCENT is removed as TP1 price is now calculated based on investment, costs, and margin.
-FIRST_SELL_PERCENT = 50.0                   # % of *initial* tokens to sell at First TP (e.g., 50.0 for 50%)
+FIRST_SELL_PERCENT = 75.0                   # % of *initial* tokens to sell at First TP (e.g., 50.0 for 50%)
 TRAILING_STOP_LOSS_PERCENT = 50.0           # Trailing SL % drop from highest price *after* First TP (e.g., 15.0 for -15%)
-SECOND_TAKE_PROFIT_PERCENT = 200.0          # Second TP as % above buy price (e.g., 200.0 for +200%)
-FIRST_SELL_PROFIT_MARGIN = 10.0             # Desired profit margin % on the *total initial investment* for the first TP sell
+SECOND_TAKE_PROFIT_PERCENT = 300.0          # Second TP as % above buy price (e.g., 200.0 for +200%)
+FIRST_SELL_PROFIT_MARGIN = 20.0             # Desired profit margin % on the *total initial investment* for the first TP sell
 
 # --- Fees and Tips ---
 DEFAULT_BUY_FEE = 0.001                     # Fee for buying in SOL
@@ -27,25 +24,28 @@ DEFAULT_BUY_TIP = 0.001                     # Tip for buying in SOL
 DEFAULT_SELL_FEE = 0.001                    # Fee for selling in SOL
 DEFAULT_SELL_TIP = 0.001                    # Tip for selling in SOL
 
-
 # Trading thresholds
 DEFAULT_RUGCHECK_SCORE_THRESHOLD = 600      # No trading if Rugcheck score is above this threshold
-DEFAULT_SOCIAL_SCORE_THRESHOLD = 50         # No trading if Social score is above this threshold
+DEFAULT_SOCIAL_SCORE_THRESHOLD = 70         # No trading if Social score is above this threshold
 DEFAULT_VOLUME_THRESHOLD = 5000             # Minimum volume threshold in USD
 MIN_MARKETCAP_THRESHOLD = 4000              # Minimum market cap threshold in USD to sell
 DEFAULT_MARKETCAP_THRESHOLD = 10000         # Minimum market cap threshold in USD to search for buy opportunities
-MIN_VOLATILITY = 0.05                       # Minimum volatility threshold in %
+MIN_VOLATILITY = 0.1                        # Minimum volatility threshold in %
 DEFAULT_TIME_INTERVALL = 10                 # Time interval for checking volatility, volume and marketcap in XX minutes
 MAX_DRAWDOWN_SOL = 10                       # Maximum allowed 24h loss in SOL (not integrated)
 DRAWDOWN_CHECK_INTERVAL = 3600              # Drawdown check interval (seconds) (not integrated)
 
 # UNSUBSCRIBING CONDITIONS
 INACTIVITY_PERIOD = timedelta(minutes=5)
-MIN_MARKET_CAP = 4000                       # Minimum market cap (in USD)
+MIN_MARKET_CAP = 3600                       # Minimum market cap (in USD)
 
 # Subscription tracking
 ACTIVE_SUBSCRIPTIONS = set()                # leave it alone
 NEW_TOKEN_SUBSCRIPTION = False              # leave it alone
+
+# PumpPortal
+WS_HOST: str = "wss://pumpportal.fun/api/data"
+MAX_SUBSCRIPTION_BATCH: int = 100           # For batch unsubscription
 
 # Token and API configurations
 TOTAL_SUPPLY = 1000000000                   # Assumed total supply if not provided
@@ -55,7 +55,7 @@ RUGCHECK_AUTH_API = "https://api.rugcheck.xyz/auth/login/solana"
 RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens"
 RUGCHECK_RATE_LIMIT = 10                    # 10 requests per minute
 RUGCHECK_INTERVAL = 60                      # 60 seconds interval for RugCheck checks
-RUGCHECK_SCORE_THRESHOLD = 1000             # Score above which a token is considered high risk and deactivated
+RUGCHECK_SCORE_THRESHOLD = 1002             # Score above which a token is considered high risk and deactivated
 
 # SOL price configuration
 SOL_PRICE_API_URL = "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd"

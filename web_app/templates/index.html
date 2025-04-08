@@ -49,19 +49,45 @@
 <body>
     <h1>Token Price Analysis</h1>
 
+    <div id="filters" style="margin-bottom: 15px; padding: 10px; border: 1px solid #eee; border-radius: 5px; width: 90%;">
+        <h3>Filters</h3>
+        <div style="display: flex; flex-wrap: wrap; gap: 15px;">
+            <div>
+                <label for="filter-max-socials">Max Socials Score (0-100):</label><br>
+                <input type="number" id="filter-max-socials" value="100" min="0" max="100" style="width: 80px;">
+            </div>
+            <div>
+                <label for="filter-max-rugcheck">Max Rugcheck Score (0-10000):</label><br>
+                <input type="number" id="filter-max-rugcheck" value="10000" min="0" max="10000" style="width: 100px;">
+            </div>
+            <div>
+                <label for="filter-min-volume">Min Volume (SOL):</label><br>
+                <input type="number" id="filter-min-volume" value="0" min="0" step="0.01" style="width: 80px;">
+            </div>
+            <div>
+                <label for="filter-time-window">Volume Time Window:</label><br>
+                <select id="filter-time-window" style="padding: 2px;">
+                    <option value="60" selected>Last 1 Hour</option>
+                    <option value="360">Last 6 Hours</option>
+                    <option value="1440">Last 24 Hours</option>
+                    <option value="10080">Last 7 Days</option>
+                </select>
+            </div>
+            <div style="align-self: center;"> <!-- Align checkbox vertically -->
+                <input type="checkbox" id="filter-portfolio-only" style="margin-right: 5px;">
+                <label for="filter-portfolio-only" style="display: inline;">Portfolio Only</label>
+            </div>
+        </div>
+        <button id="apply-filters-btn" style="margin-top: 10px; padding: 5px 10px;">Apply Filters</button>
+    </div>
+
     <label for="mints-select">Select Tokens (Ctrl/Cmd + Click for multiple):</label>
     <select id="mints-select" multiple size="10" style="width: 90%; margin-bottom: 10px; padding: 8px; border: 1px solid #ccc; border-radius: 4px;">
-        {% if tokens_list %}
-            {% for token in tokens_list %}
-                {# Display name and mint address. Use mint as value. #}
-                <option value="{{ token.mint }}">{{ token.name }} - {{ token.symbol }} - {{ token.socials_score }}/{{ token.rugcheck_score }} - ({{ token.mint }})</option>
-            {% endfor %}
-        {% else %}
-            <option value="" disabled>Could not load tokens from database.</option>
-        {% endif %}
+        <!-- Options will be populated by JavaScript -->
+        <option value="" disabled>Apply filters to load tokens...</option>
     </select>
 
-    <button id="generate-chart-btn">Generate Chart</button>
+    <button id="generate-chart-btn" style="margin-top: 5px;">Generate Chart</button>
 
     <div id="status-message"></div>
     <div id="chart-div"></div>

@@ -496,20 +496,31 @@ class TradingManager:
                     # Calculate initial SL based on config percentage
                     initial_stop_loss_price = current_price * (1 - self.config['INITIAL_STOP_LOSS_PERCENT'] / 100.0)
 
-                    # --- Calculate First TP Price based on covering costs and margin ---
-                    sell_fee_tp1 = self.config['DEFAULT_SELL_FEE']
-                    sell_tip_tp1 = self.config['DEFAULT_SELL_TIP']
-                    target_sol_return_tp1 = total_sol_investment + sell_fee_tp1 + sell_tip_tp1 # Cover investment + sell costs
-                    target_sol_return_tp1 *= (1 + self.config['FIRST_SELL_PROFIT_MARGIN'] / 100.0) # Add profit margin
+                    # --- Calculate First TP Price based on covering costs and margin (Net Income approach) ---
+                    # Ensure config values are floats for calculation
+                    sell_fee_tp1 = float(self.config['DEFAULT_SELL_FEE'])
+                    sell_tip_tp1 = float(self.config['DEFAULT_SELL_TIP'])
+                    profit_margin_tp1 = float(self.config['FIRST_SELL_PROFIT_MARGIN']) / 100.0
+                    sell_percent_tp1 = float(self.config['FIRST_SELL_PERCENT']) / 100.0
 
-                    tokens_to_sell_tp1 = tokens_bought * (self.config['FIRST_SELL_PERCENT'] / 100.0)
+                    # Calculate the total cost base including initial investment and the TP1 sell costs
+                    total_cost_base_tp1 = total_sol_investment + sell_fee_tp1 + sell_tip_tp1
 
-                    if tokens_to_sell_tp1 <= 1e-9: # Avoid division by zero if selling 0% or tokens_bought is near zero
+                    # Calculate the target NET SOL return (cost base + profit margin on cost base)
+                    target_net_sol_return_tp1 = total_cost_base_tp1 * (1 + profit_margin_tp1)
+
+                    # Calculate the target GROSS SOL needed from the sale to achieve the target NET return
+                    # Gross = Net + Fees + Tip for *this* specific TP1 sale
+                    target_gross_sol_return_tp1 = target_net_sol_return_tp1 + sell_fee_tp1 + sell_tip_tp1
+
+                    tokens_to_sell_tp1 = tokens_bought * sell_percent_tp1
+
+                    if tokens_to_sell_tp1 <= 1e-9: # Avoid division by zero
                          logger.error(f"❌ Cannot calculate TP1 price for {mint}: Tokens to sell at TP1 is negligible ({tokens_to_sell_tp1:.12f}). Check FIRST_SELL_PERCENT config.")
-                         # Handle this case: maybe set TP1 very high, or skip buy? For now, skip.
-                         return
+                         return # Skip buy
 
-                    initial_tp_price = target_sol_return_tp1 / tokens_to_sell_tp1
+                    # Calculate the required price per token to achieve the target GROSS return by selling the specified percentage of tokens
+                    initial_tp_price = target_gross_sol_return_tp1 / tokens_to_sell_tp1
                     # --- Calculate Second TP Price ---
                     second_tp_price = current_price * (1 + self.config['SECOND_TAKE_PROFIT_PERCENT'] / 100.0)
 
