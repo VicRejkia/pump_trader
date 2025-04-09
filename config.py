@@ -9,6 +9,8 @@ from datetime import timedelta
 # Trading configuration
 SOL_TO_BUY = 0.1                            # Amount of SOL to spend on each buy
 INITIAL_SOL_BALANCE = 10.0                  # Starting SOL balance for PnL tracking
+PLAY_BUY_SOUNDS = True                      # Play the buy sound when a buy is made
+PLAY_SELL_SOUNDS = True                     # Play the sell sound when a sell is made
 
 # --- New Multi-Stage Sell Logic Configuration ---
 INITIAL_STOP_LOSS_PERCENT = 50.0            # Initial SL as % below buy price (e.g., 25.0 for -25%)
