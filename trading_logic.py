@@ -374,10 +374,10 @@ class TradingManager:
 
             # Play sounds (consider moving sound logic outside transaction if it causes delays/failures)
             # Use run_in_executor or similar if sounds block async loop
-            if reason == "Stop Loss":
+            if reason == "Stop Loss" and self.config['PLAY_SELL_SOUNDS']:
                 asyncio.create_task(play_sell_sl_sound_async())
             # Updated sound logic for new reasons
-            elif reason in ["First TP", "Second TP", "Trailing SL"]: # Play TP sound for all profit-taking/trailing scenarios
+            elif reason in ["First TP", "Second TP", "Trailing SL"] and self.config['PLAY_SELL_SOUNDS']: # Play TP sound for all profit-taking/trailing scenarios
                 asyncio.create_task(play_sell_tp_sound_async())
             # Note: "Breakeven SL" will play the SL sound as it's a stop-loss trigger.
 
@@ -506,7 +506,8 @@ class TradingManager:
                     # Update global SOL balance using the instance passed to the manager
                     await self.state.update_sol_balance(-total_sol_investment) # Subtract TOTAL investment
 
-                    asyncio.create_task(play_buy_opportunity_sound()) # Run sound concurrently
+                    if self.config['PLAY_BUY_SOUND']:
+                        asyncio.create_task(play_buy_opportunity_sound()) # Run sound concurrently
 
                 except Exception as e:
                     logger.error(f"❌ Buy execution failed for {mint}: {e}", exc_info=True)
