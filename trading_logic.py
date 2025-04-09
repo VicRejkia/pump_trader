@@ -90,7 +90,8 @@ class TradingManager:
             logger.warning(f"⚠ Invalid SOL_PRICE ({sol_price}); skipping sell check.")
             return
 
-        async with self.db.acquire() as conn:
+        # Acquire connection from the pool within the DatabaseClient instance
+        async with self.db.pool.acquire() as conn:
             # Use a single transaction for checking and potentially selling multiple positions
             async with conn.transaction():
                 try:
@@ -374,10 +375,10 @@ class TradingManager:
 
             # Play sounds (consider moving sound logic outside transaction if it causes delays/failures)
             # Use run_in_executor or similar if sounds block async loop
-            if reason == "Stop Loss" and self.config['PLAY_SELL_SOUNDS']:
+            if reason == "Stop Loss" and self.config['PLAY_SELL_SOUND']:
                 asyncio.create_task(play_sell_sl_sound_async())
             # Updated sound logic for new reasons
-            elif reason in ["First TP", "Second TP", "Trailing SL"] and self.config['PLAY_SELL_SOUNDS']: # Play TP sound for all profit-taking/trailing scenarios
+            elif reason in ["First TP", "Second TP", "Trailing SL"] and self.config['PLAY_SELL_SOUND']: # Play TP sound for all profit-taking/trailing scenarios
                 asyncio.create_task(play_sell_tp_sound_async())
             # Note: "Breakeven SL" will play the SL sound as it's a stop-loss trigger.
 
@@ -396,7 +397,7 @@ class TradingManager:
             return
 
         # Use a dedicated connection and transaction for each buy simulation
-        async with self.db.acquire() as conn:
+        async with self.db.pool.acquire() as conn:
             async with conn.transaction():
                 try:
                     # Ensure we don't buy if already active

@@ -392,7 +392,7 @@ class SocialsProcessor:
                         socials_last_checked = NOW()
                     WHERE mint = $1
                 """, mint, website, telegram, twitter, score)
-            logger.info(f"💾 Updated socials for {mint}. Score: {score} (Website: {'Y' if website else 'N'}, TG: {'Y' if telegram else 'N'}, TW: {'Y' if twitter else 'N'})")
+            logger.debug(f"💾 Updated socials for {mint}. Score: {score} (Website: {'Y' if website else 'N'}, TG: {'Y' if telegram else 'N'}, TW: {'Y' if twitter else 'N'})")
             return True
         except Exception as e:
             logger.error(f"❌ Failed to update socials in DB for {mint}: {e}", exc_info=True)

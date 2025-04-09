@@ -24,7 +24,7 @@ except ImportError as e:
 
 # Define the path for the shared SOL price file (must match state_manager.py)
 SOL_PRICE_FILE = 'data/sol_price.json'
-MAX_FILE_AGE_SECONDS = 300 # 5 minutes - how old the file can be before we call the API
+MAX_FILE_AGE_SECONDS = 3600 # 5 minutes - how old the file can be before we call the API
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -107,12 +107,28 @@ async def fetch_trade_history_query(db_client, mints):
 # Wrapper for portfolio transactions query
 async def fetch_portfolio_transactions_query(db_client, mints):
     return await db_client.get_portfolio_transactions(mints)
-# Route for the main page
+# Routes for the dashboard pages
 @app.route('/')
+@app.route('/charts')
 async def index():
-    """Renders the main HTML page. Token list is loaded dynamically via JS."""
+    """Renders the main charts page. Token list is loaded dynamically via JS."""
     # No initial token fetching here anymore
     return render_template('index.html') # Pass no token list initially
+
+@app.route('/config')
+async def configuration():
+    """Renders the configuration page."""
+    return render_template('configuration.html')
+
+@app.route('/portfolio')
+async def portfolio():
+    """Renders the portfolio page."""
+    return render_template('portfolio.html')
+
+@app.route('/analytics')
+async def analytics():
+    """Renders the analytics page."""
+    return render_template('analytics.html')
 
 # API endpoint to get filtered tokens for the dropdown
 @app.route('/api/filtered_tokens', methods=['GET'])
