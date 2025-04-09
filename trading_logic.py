@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 
 # Removed incorrect load_config import. Config is passed during initialization.
 #rom database import get_total_supply # Keep if needed outside manager, otherwise remove
+# Import DatabaseClient type hint
+from database_handler import DatabaseClient
 from logger import logger
 from state_manager import GlobalState # Import GlobalState to update balance
 from utils import (
@@ -19,8 +21,8 @@ from utils import (
 # Config dictionary is passed in __init__
 
 class TradingManager:
-    def __init__(self, db_pool, config, state):
-        self.db = db_pool # Expecting an asyncpg Pool
+    def __init__(self, db_client: DatabaseClient, config, state):
+        self.db = db_client # Expecting a DatabaseClient instance
         self.config = config
         self.state = state # Set state during initialization
         
@@ -35,104 +37,22 @@ class TradingManager:
                 logger.warning(f"⚠ Invalid SOL_PRICE ({sol_price}); skipping buy check.")
                 return # Cannot proceed without valid SOL price
 
-            async with self.db.acquire() as conn:
-                # Transaction might not be needed for read-heavy check, but keep for consistency
-                async with conn.transaction():
-                    try:
-                        time_interval_minutes = self.config['DEFAULT_TIME_INTERVALL']
-                        # Fetch potential trading opportunities with refined query
-                        rows = await conn.fetch("""
-                            WITH LatestTradeData AS (
-                                SELECT
-                                    mint,
-                                    price,
-                                    marketCapSol,
-                                    vTokensInBondingCurve,
-                                    vSolInBondingCurve,
-                                    timestamp,
-                                    ROW_NUMBER() OVER (PARTITION BY mint ORDER BY timestamp DESC) AS rn
-                                FROM trades
-                                WHERE timestamp >= NOW() - ($6 || ' minutes')::interval -- Use interval from config
-                            ),
-                            RecentTrades AS (
-                                SELECT
-                                    mint,
-                                    SUM(CASE WHEN tx_type = 'buy' THEN sol_amount ELSE 0 END) AS total_buys_recent,
-                                    SUM(CASE WHEN tx_type = 'sell' THEN sol_amount ELSE 0 END) AS total_sells_recent,
-                                    SUM(sol_amount) AS volume_recent,
-                                    COUNT(*) as trade_count
-                                FROM trades
-                                WHERE timestamp >= NOW() - ($6 || ' minutes')::interval -- Use interval from config
-                                GROUP BY mint
-                            ),
-                            VolatilityData AS (
-                                -- Calculate volatility based on log returns for better stability
-                                SELECT
-                                    mint,
-                                    -- Ensure SQRT argument is non-negative
-                                    STDDEV(log_return) * SQRT(GREATEST(COUNT(*), 1)) AS volatility -- Scaled Volatility approximation
-                                FROM (
-                                    SELECT
-                                        mint,
-                                        price,
-                                        LAG(price) OVER (PARTITION BY mint ORDER BY timestamp) AS prev_price,
-                                        -- Avoid log(0) or log(negative)
-                                        CASE
-                                            WHEN price > 0 AND LAG(price) OVER (PARTITION BY mint ORDER BY timestamp) > 0
-                                            THEN LN(price / LAG(price) OVER (PARTITION BY mint ORDER BY timestamp))
-                                            ELSE NULL
-                                        END AS log_return
-                                    FROM trades
-                                    WHERE timestamp >= NOW() - ($6 || ' minutes')::interval -- Use interval from config
-                                ) sub
-                                WHERE log_return IS NOT NULL
-                                GROUP BY mint
-                                HAVING COUNT(*) > 5 -- Require minimum data points for volatility calculation
-                            )
-                            SELECT
-                                t.mint,
-                                t.marketCapSol,
-                                t.vTokensInBondingCurve,
-                                t.vSolInBondingCurve,
-                                COALESCE(ltd.marketCapSol, t.marketCapSol) AS latest_market_cap_sol, -- Use latest or initial
-                                COALESCE(ltd.vTokensInBondingCurve, t.vTokensInBondingCurve) AS latest_v_tokens,
-                                COALESCE(ltd.vSolInBondingCurve, t.vSolInBondingCurve) AS latest_v_sol,
-                                COALESCE(ltd.price, 0) AS latest_price, -- Need latest price for buy execution
-                                COALESCE(rt.volume_recent, 0) AS volume_in_interval,
-                                COALESCE(vd.volatility, 0) AS volatility_in_interval,
-                                r.tokenMeta_name AS name,
-                                r.tokenMeta_symbol AS symbol,
-                                r.score AS rugcheck_score,
-                                t.socials_score
-                            FROM tokens AS t
-                            JOIN rugcheck AS r ON t.mint = r.mint
-                            JOIN LatestTradeData AS ltd ON t.mint = ltd.mint AND ltd.rn = 1 -- Get the most recent trade data
-                            LEFT JOIN RecentTrades AS rt ON t.mint = rt.mint
-                            LEFT JOIN VolatilityData AS vd ON t.mint = vd.mint
-                            WHERE
-                                t.is_active = TRUE AND
-                                r.score IS NOT NULL AND
-                                t.socials_score IS NOT NULL AND
-                                -- Filters based on thresholds
-                                r.score < $4 AND                                           -- Rugcheck score BELOW threshold
-                                t.socials_score < $5 AND                                   -- Socials score BELOW threshold
-                                (COALESCE(rt.volume_recent, 0) * $1) >= $2 AND             -- Volume ABOVE threshold (USD)
-                                (COALESCE(ltd.marketCapSol, t.marketCapSol, 0) * $1) >= $3 AND -- Market Cap ABOVE threshold (USD)
-                                COALESCE(vd.volatility, 0) >= $7 AND              -- Volatility ABOVE threshold (Percentage)
-                                -- Ensure token is not already actively held
-                                t.mint NOT IN (SELECT mint FROM portfolio WHERE status = 'active')
-                            ORDER BY rt.volume_recent DESC; -- Order by recent volume or another relevant metric
-                        """, sol_price,                                  # $1
-                            self.config['DEFAULT_VOLUME_THRESHOLD'],     # $2
-                            self.config['DEFAULT_MARKETCAP_THRESHOLD'],  # $3
-                            self.config['DEFAULT_RUGCHECK_SCORE_THRESHOLD'], # $4
-                            self.config['DEFAULT_SOCIAL_SCORE_THRESHOLD'],   # $5
-                            str(time_interval_minutes),                  # $6 (as string for interval)
-                            self.config['MIN_VOLATILITY']                # $7
-                        )
+            # No need for explicit connection management here, handled by DatabaseClient methods
+            try:
+                time_interval_minutes = self.config['DEFAULT_TIME_INTERVALL']
+                # Fetch potential trading opportunities using the new DatabaseClient method
+                rows = await self.db.find_trading_opportunities(
+                    sol_price=sol_price,
+                    volume_threshold=self.config['DEFAULT_VOLUME_THRESHOLD'],
+                    marketcap_threshold=self.config['DEFAULT_MARKETCAP_THRESHOLD'],
+                    rugcheck_threshold=self.config['DEFAULT_RUGCHECK_SCORE_THRESHOLD'],
+                    social_score_threshold=self.config['DEFAULT_SOCIAL_SCORE_THRESHOLD'],
+                    time_interval_minutes=time_interval_minutes,
+                    min_volatility=self.config['MIN_VOLATILITY']
+                )
 
-                        logger.debug(f"Found {len(rows)} potential trading opportunities.")
-                        for row in rows:
+                logger.debug(f"Found {len(rows)} potential trading opportunities.")
+                for row in rows:
                             mint = row['mint']
                             latest_price = float(row['latest_price'])
                             latest_market_cap_sol = float(row['latest_market_cap_sol'])
@@ -151,8 +71,8 @@ class TradingManager:
                             # Add a small delay to avoid overwhelming APIs or DB if many opportunities found
                             await asyncio.sleep(0.1)
 
-                    except Exception as e:
-                        logger.error(f"❌ Error fetching/processing trading opportunities: {e}", exc_info=True)
+            except Exception as e:
+                logger.error(f"❌ Error fetching/processing trading opportunities: {e}", exc_info=True)
                         # Don't re-raise, allow loop to continue
 
         except Exception as e:
@@ -174,13 +94,8 @@ class TradingManager:
             # Use a single transaction for checking and potentially selling multiple positions
             async with conn.transaction():
                 try:
-                    # Fetch active buy positions with new TP/SL fields
-                    positions = await conn.fetch('''
-                        SELECT id, mint, price AS buy_price, initial_tokens, remaining_tokens, total_investment_sol,
-                               stop_loss_price, highest_price, initial_tp_price, second_tp_price, first_tp_hit
-                        FROM portfolio
-                        WHERE status = 'active' AND tx_type = 'buy' -- Only check original buy entries
-                    ''')
+                    # Fetch active buy positions using the new DatabaseClient method
+                    positions = await self.db.get_active_buy_positions(conn)
 
                     if not positions:
                         # logger.debug("No active positions to check for selling.")
@@ -191,21 +106,13 @@ class TradingManager:
                     if not active_mints:
                         return
 
-                    latest_prices_rows = await conn.fetch(f'''
-                        WITH LatestTrades AS (
-                            SELECT
-                                mint,
-                                price,
-                                marketCapSol,
-                                ROW_NUMBER() OVER (PARTITION BY mint ORDER BY timestamp DESC) as rn
-                            FROM trades
-                            WHERE mint = ANY($1::text[])
-                        )
-                        SELECT mint, price, marketCapSol FROM LatestTrades WHERE rn = 1
-                    ''', active_mints)
+                    # Fetch latest prices using the new DatabaseClient method
+                    latest_prices = await self.db.get_latest_prices(active_mints, conn)
+                    # The new method already returns the desired dictionary format
+                    # latest_prices = {row['mint']: {'price': float(row['price']), 'market_cap': float(row['marketcapsol'])}
+                    #                  for row in latest_prices_rows if row['price'] is not None and float(row['price']) > 0}
 
-                    latest_prices = {row['mint']: {'price': float(row['price']), 'market_cap': float(row['marketcapsol'])}
-                                     for row in latest_prices_rows if row['price'] is not None and float(row['price']) > 0}
+                    # This block is removed as the logic is now inside get_latest_prices
 
                     for position in positions:
                         pos_id = position['id']
@@ -233,9 +140,8 @@ class TradingManager:
                         # --- Update highest price ---
                         if current_price > highest_price:
                             highest_price = current_price # Update local var for subsequent checks
-                            await conn.execute('''
-                                UPDATE portfolio SET highest_price = $1 WHERE id = $2
-                            ''', current_price, pos_id)
+                            # Update highest price using the new DatabaseClient method
+                            await self.db.update_portfolio_highest_price(pos_id, current_price, conn)
                             # logger.debug(f"Updated highest price for {mint} to {current_price:.6f}")
 
 
@@ -298,21 +204,23 @@ class TradingManager:
                         # Execute sell within the same transaction
                         if sell_partial:
                             try:
+                                # Pass trigger values specific to First TP
+                                trigger_values = {"initial_tp_price_threshold": initial_tp_price}
                                 profit = await self.execute_sell(
-                                    conn=conn, # Pass connection
+                                    conn=conn,
                                     mint=mint,
                                     current_price=current_price,
                                     market_cap_sol=current_market_cap,
                                     reason=sell_reason,
-                                    sell_percentage=sell_percentage, # Use calculated percentage
-                                    position_id_to_update=pos_id
+                                    sell_percentage=sell_percentage,
+                                    position_id_to_update=pos_id,
+                                    sell_trigger_values=trigger_values
                                 )
                                 if profit is not None: # Check if sell was successful
                                     # --- Post-First TP Actions ---
                                     # Mark first TP as hit and adjust SL to breakeven (buy_price)
-                                    await conn.execute('''
-                                        UPDATE portfolio SET first_tp_hit = TRUE, stop_loss_price = $1 WHERE id = $2
-                                    ''', buy_price, pos_id)
+                                    # Mark first TP hit and adjust SL using the new DatabaseClient method
+                                    await self.db.mark_first_tp_hit_and_adjust_sl(pos_id, buy_price, conn)
                                     logger.info(f"📈 Marked First TP as hit for {mint} (ID: {pos_id}) and adjusted Stop Loss to breakeven ({buy_price:.9f}).")
                             except Exception as e:
                                 logger.error(f"Error executing partial sell for {mint} (ID: {pos_id}): {e}", exc_info=True)
@@ -320,14 +228,26 @@ class TradingManager:
 
                         elif sell_all:
                             try:
+                                # Determine and pass trigger values for full sell scenarios
+                                trigger_values = {}
+                                if sell_reason == "Stop Loss" or sell_reason == "Breakeven SL":
+                                    trigger_values = {"stop_loss_price_threshold": active_stop_loss_price}
+                                elif sell_reason == "Second TP":
+                                    trigger_values = {"second_tp_price_threshold": second_tp_price}
+                                elif sell_reason == "Trailing SL":
+                                    trigger_values = {"trailing_sl_price_threshold": trailing_sl_price, "highest_price_at_trigger": highest_price}
+                                elif sell_reason == "Emergency SL":
+                                     trigger_values = {"current_market_cap_usd": current_market_cap * sol_price} # Pass USD value
+
                                 await self.execute_sell(
-                                    conn=conn, # Pass connection
+                                    conn=conn,
                                     mint=mint,
                                     current_price=current_price,
                                     market_cap_sol=current_market_cap,
                                     reason=sell_reason,
-                                    sell_percentage=sell_percentage, # Should be 1.0 for SL/TP2/Trailing SL
-                                    position_id_to_update=pos_id
+                                    sell_percentage=sell_percentage,
+                                    position_id_to_update=pos_id,
+                                    sell_trigger_values=trigger_values
                                 )
                             except Exception as e:
                                 logger.error(f"Error executing full sell for {mint} (ID: {pos_id}): {e}", exc_info=True)
@@ -343,18 +263,17 @@ class TradingManager:
                     # The transaction will be rolled back automatically due to the exception
                     raise # Re-raise to ensure rollback
 
-    async def execute_sell(self, conn, mint: str, current_price: float, market_cap_sol: float, reason: str, sell_percentage: float, position_id_to_update: int) -> float | None:
+    async def execute_sell(self, conn, mint: str, current_price: float, market_cap_sol: float, reason: str, sell_percentage: float, position_id_to_update: int, sell_trigger_values: dict = None) -> float | None:
         """
         Execute sell simulation for a specific position within an existing transaction.
+        Includes relevant settings in the portfolio record.
         Returns the calculated profit (can be negative) or None if sell failed or was skipped.
         """
+        if sell_trigger_values is None:
+            sell_trigger_values = {} # Initialize if not provided
         try:
-            # Fetch the specific active buy entry to update, including total investment
-            buy_entry = await conn.fetchrow('''
-                SELECT price AS buy_price, initial_tokens, remaining_tokens, total_investment_sol, fee AS buy_fee, tip AS buy_tip
-                FROM portfolio
-                WHERE id = $1 AND status = 'active' AND tx_type = 'buy'
-            ''', position_id_to_update)
+            # Fetch the specific active buy entry using the new DatabaseClient method
+            buy_entry = await self.db.get_portfolio_entry_for_update(position_id_to_update, conn)
 
             if not buy_entry:
                 logger.warning(f"⚠ Could not find active buy entry for ID {position_id_to_update} ({mint}) to sell.")
@@ -408,23 +327,33 @@ class TradingManager:
             # Use a small tolerance for floating point comparisons
             new_status = 'closed' if new_remaining < 1e-9 else 'active'
 
-            await conn.execute('''
-                UPDATE portfolio
-                SET remaining_tokens = $1, status = $2
-                WHERE id = $3
-            ''', new_remaining, new_status, position_id_to_update)
+            # Update portfolio entry using the new DatabaseClient method
+            await self.db.update_portfolio_entry_after_sell(position_id_to_update, new_remaining, new_status, conn)
 
-            # Insert sell transaction record into portfolio
-            await conn.execute('''
-                INSERT INTO portfolio
-                (mint, tx_type, price, market_cap, sol_amount, tokens, fee, tip, profit, total_investment_sol,
-                 remaining_tokens, status, reason, timestamp, initial_tokens, stop_loss_price, highest_price)
-                VALUES ($1, 'sell', $2, $3, $4, $5, $6, $7, $8, 0, 0, 'closed', $9, $10, 0, 0, 0) -- Sell record has 0 total_investment/remaining/initial/sl/highest
-            ''', mint, current_price, market_cap_sol, net_sol_received, tokens_to_sell,
-               sell_fee, sell_tip, profit, reason, datetime.now(timezone.utc))
+            # --- Prepare Settings for Sell Record ---
+            sell_settings = {
+                "reason": reason,
+                "sell_percentage": sell_percentage * 100, # Store as percentage
+                "sell_fee_config": self.config['DEFAULT_SELL_FEE'],
+                "sell_tip_config": self.config['DEFAULT_SELL_TIP'],
+                "trigger_price": current_price, # Price at the time of sell trigger
+                **sell_trigger_values # Add specific trigger values (SL price, TP price, etc.)
+            }
+            if reason == "Emergency SL":
+                 sell_settings["min_market_cap_config_usd"] = self.config['MIN_MARKET_CAP']
+                 # sell_trigger_values should contain 'current_market_cap_usd'
+
+            # Insert sell transaction record using the new DatabaseClient method, including settings
+            await self.db.insert_portfolio_sell_record(
+                mint=mint, current_price=current_price, market_cap_sol=market_cap_sol,
+                net_sol_received=net_sol_received, tokens_sold=tokens_to_sell,
+                sell_fee=sell_fee, sell_tip=sell_tip, profit=profit, reason=reason,
+                timestamp=datetime.now(timezone.utc), settings=sell_settings, conn=conn
+            )
             # Fetch token name for logging
-            token_name_row = await conn.fetchrow("SELECT name FROM tokens WHERE mint = $1", mint)
-            token_name = token_name_row['name'] if token_name_row else None
+            # Fetch token name using the new DatabaseClient method
+            token_name_row = await self.db.get_token_name(mint, conn)
+            token_name = token_name_row['name'] if token_name_row else mint # Fallback to mint if name not found
 
             # Get SOL price for logging
             sol_price = await self.state.get_sol_price()
@@ -471,7 +400,7 @@ class TradingManager:
             async with conn.transaction():
                 try:
                     # Ensure we don't buy if already active
-                    existing = await conn.fetchval("SELECT 1 FROM portfolio WHERE mint = $1 AND status = 'active' AND tx_type = 'buy'", mint)
+                    existing = await self.db.has_active_buy_order(mint, conn)
                     if existing:
                         # This check might be redundant if check_trading_opportunities already filters, but good safety measure
                         logger.warning(f"⚠ Attempted to buy {mint}, but it's already active in portfolio. Skipping.")
@@ -524,20 +453,41 @@ class TradingManager:
                     # --- Calculate Second TP Price ---
                     second_tp_price = current_price * (1 + self.config['SECOND_TAKE_PROFIT_PERCENT'] / 100.0)
 
-                    # Assumes 'initial_tokens', 'initial_tp_price', 'second_tp_price', 'first_tp_hit' columns exist
-                    await conn.execute("""
-                        INSERT INTO portfolio
-                            (mint, tx_type, price, market_cap, sol_amount, total_investment_sol, tokens,
-                             fee, tip, remaining_tokens, stop_loss_price, highest_price,
-                             initial_tp_price, second_tp_price, first_tp_hit,
-                             status, timestamp, initial_tokens)
-                        VALUES ($1, 'buy', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, FALSE, 'active', $14, $15)
-                        -- The check before this insert prevents duplicate active buys.
-                    """, mint, current_price, market_cap_sol, sol_base_amount, total_sol_investment, tokens_bought,
-                       buy_fee, buy_tip, tokens_bought, # remaining_tokens = initial_tokens initially
-                       initial_stop_loss_price, current_price, # highest_price = current_price initially
-                       initial_tp_price, second_tp_price,
-                       datetime.now(timezone.utc), tokens_bought) # Store initial_tokens
+                    # --- Prepare Settings for Buy Record ---
+                    # Gather settings relevant to the buy decision and initial position setup
+                    buy_settings = {
+                        # Buy Trigger Conditions (from check_trading_opportunities)
+                        "volume_threshold_usd_config": self.config['DEFAULT_VOLUME_THRESHOLD'],
+                        "marketcap_threshold_usd_config": self.config['DEFAULT_MARKETCAP_THRESHOLD'],
+                        "rugcheck_score_threshold_config": self.config['DEFAULT_RUGCHECK_SCORE_THRESHOLD'],
+                        "social_score_threshold_config": self.config['DEFAULT_SOCIAL_SCORE_THRESHOLD'],
+                        "time_interval_minutes_config": self.config['DEFAULT_TIME_INTERVALL'],
+                        "min_volatility_percent_config": self.config['MIN_VOLATILITY'],
+                        # Buy Execution Settings
+                        "sol_to_buy_config": self.config['SOL_TO_BUY'],
+                        "buy_fee_config": self.config['DEFAULT_BUY_FEE'],
+                        "buy_tip_config": self.config['DEFAULT_BUY_TIP'],
+                        # Initial Sell Strategy Settings
+                        "initial_stop_loss_percent_config": self.config['INITIAL_STOP_LOSS_PERCENT'],
+                        "first_sell_percent_config": self.config['FIRST_SELL_PERCENT'],
+                        "first_sell_profit_margin_config": self.config['FIRST_SELL_PROFIT_MARGIN'],
+                        "second_take_profit_percent_config": self.config['SECOND_TAKE_PROFIT_PERCENT'],
+                        "trailing_stop_loss_percent_config": self.config['TRAILING_STOP_LOSS_PERCENT'], # Store for reference
+                        # Calculated Values at Buy Time
+                        "calculated_initial_sl_price": initial_stop_loss_price,
+                        "calculated_initial_tp_price": initial_tp_price,
+                        "calculated_second_tp_price": second_tp_price,
+                    }
+
+                    # Insert buy record using the new DatabaseClient method, including settings
+                    await self.db.insert_portfolio_buy_record(
+                        mint=mint, current_price=current_price, market_cap_sol=market_cap_sol,
+                        sol_base_amount=sol_base_amount, total_sol_investment=total_sol_investment,
+                        tokens_bought=tokens_bought, buy_fee=buy_fee, buy_tip=buy_tip,
+                        initial_stop_loss_price=initial_stop_loss_price,
+                        initial_tp_price=initial_tp_price, second_tp_price=second_tp_price,
+                        timestamp=datetime.now(timezone.utc), settings=buy_settings, conn=conn
+                    )
 
                     # Log only if insert happened (check affected rows?) - fetchval might be better
                     # For simulation, we assume insert worked if no exception

@@ -30,5 +30,16 @@ CREATE TABLE IF NOT EXISTS rugcheck (
     graphInsidersDetected INTEGER,
     detectedAt TIMESTAMP WITH TIME ZONE,
     full_data TEXT,
-    last_checked TIMESTAMP WITH TIME ZONE
+    last_checked TIMESTAMP WITH TIME ZONE,
+    timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Backup table creation
+CREATE TABLE IF NOT EXISTS rugcheck_backup (
+    LIKE rugcheck INCLUDING ALL
+);
+
+-- Add the `backed_up` column to the backup table
+ALTER TABLE rugcheck_backup ADD COLUMN backup_timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
+-- Remove the default value for the `timestamp` column in the backup table
+ALTER TABLE rugcheck_backup ALTER COLUMN timestamp DROP DEFAULT;

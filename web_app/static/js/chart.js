@@ -9,7 +9,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Chart elements
     const generateChartBtn = document.getElementById('generate-chart-btn');
-    const mintsSelect = document.getElementById('mints-select');
+    const tokenListContainer = document.getElementById('token-list-container'); // Changed from mints-select
     const chartDiv = document.getElementById('chart-div');
     const statusMessage = document.getElementById('status-message');
 
@@ -32,7 +32,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
 
         statusMessage.textContent = 'Loading tokens based on filters...';
-        mintsSelect.innerHTML = '<option value="" disabled>Loading...</option>'; // Clear and show loading
+        tokenListContainer.innerHTML = '<div class="list-group-item">Loading...</div>'; // Clear and show loading
 
         try {
             const response = await fetch(`/api/filtered_tokens?${queryParams}`);
@@ -41,27 +41,63 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             const tokens = await response.json();
 
-            mintsSelect.innerHTML = ''; // Clear loading/previous options
+            tokenListContainer.innerHTML = ''; // Clear loading/previous options
 
             if (tokens.length === 0) {
-                mintsSelect.innerHTML = '<option value="" disabled>No tokens match the current filters.</option>';
+                tokenListContainer.innerHTML = '<div class="list-group-item">No tokens match the current filters.</div>';
                 statusMessage.textContent = 'No tokens match the current filters.';
             } else {
                 tokens.forEach(token => {
-                    const option = document.createElement('option');
-                    option.value = token.mint;
-                    // Display name, scores, and mint
+                    const listItem = document.createElement('label'); // Use label for better checkbox click handling
+                    listItem.className = 'list-group-item d-flex justify-content-between align-items-center';
+
+                    const checkbox = document.createElement('input');
+                    checkbox.type = 'checkbox';
+                    checkbox.className = 'form-check-input me-2';
+                    checkbox.value = token.mint;
+                    checkbox.setAttribute('data-token-name', token.name); // Store name for chart legend
+
+                    const textContainer = document.createElement('div');
+                    textContainer.style.flexGrow = '1'; // Allow text to take available space
+
+                    const nameSpan = document.createElement('span');
+                    nameSpan.textContent = `${token.name} `;
+                    nameSpan.style.fontWeight = 'bold';
+
+                    const detailsSpan = document.createElement('small');
                     const rugcheckScore = token.rugcheck !== null ? token.rugcheck : 'N/A';
                     const socialsScore = token.socials !== null ? token.socials : 'N/A';
-                    option.textContent = `${token.name} (Socials: ${socialsScore}, Rug: ${rugcheckScore}, Vol: ${token.volume}) - ${token.mint}`;
-                    mintsSelect.appendChild(option);
+                    detailsSpan.textContent = `(Socials: ${socialsScore}, Rug: ${rugcheckScore}, Vol: ${token.volume}) `;
+                    detailsSpan.className = 'text-muted me-2';
+
+                    const mintSpan = document.createElement('span');
+                    mintSpan.textContent = token.mint;
+                    mintSpan.className = 'badge bg-secondary copy-mint'; // Style as badge, add class for copy
+                    mintSpan.style.cursor = 'pointer';
+                    mintSpan.title = 'Click to copy mint address';
+                    mintSpan.setAttribute('data-mint', token.mint); // Store mint in data attribute
+
+                    // Add click listener for copying
+                    mintSpan.addEventListener('click', (e) => {
+                        e.preventDefault(); // Prevent label from toggling checkbox
+                        e.stopPropagation(); // Prevent label from toggling checkbox
+                        copyToClipboard(token.mint, mintSpan);
+                    });
+
+                    textContainer.appendChild(checkbox);
+                    textContainer.appendChild(nameSpan);
+                    textContainer.appendChild(detailsSpan);
+                    textContainer.appendChild(mintSpan);
+
+                    listItem.appendChild(textContainer);
+                    tokenListContainer.appendChild(listItem);
                 });
-                statusMessage.textContent = `Loaded ${tokens.length} tokens. Select tokens and click 'Generate Chart'.`; // Updated status
+                statusMessage.textContent = `Loaded ${tokens.length} tokens. Check tokens and click 'Generate Chart'.`; // Updated status
             }
 
         } catch (error) {
             console.error('Error fetching filtered tokens:', error);
-            mintsSelect.innerHTML = '<option value="" disabled>Error loading tokens.</option>';
+            tokenListContainer.innerHTML = '<div class="list-group-item">Error loading tokens.</div>';
             statusMessage.textContent = `Error loading tokens: ${error.message}`;
         }
     }
@@ -72,15 +108,42 @@ document.addEventListener('DOMContentLoaded', () => {
     // Initial load of tokens when the page loads (using default filter values)
     fetchAndPopulateTokens();
 
+    // --- Clipboard Copy Function ---
+    async function copyToClipboard(text, element) {
+        try {
+            await navigator.clipboard.writeText(text);
+            const originalText = element.textContent;
+            element.textContent = 'Copied!';
+            element.classList.remove('bg-secondary');
+            element.classList.add('bg-success');
+            setTimeout(() => {
+                element.textContent = originalText;
+                element.classList.remove('bg-success');
+                element.classList.add('bg-secondary');
+            }, 1500); // Revert after 1.5 seconds
+        } catch (err) {
+            console.error('Failed to copy: ', err);
+            const originalText = element.textContent;
+            element.textContent = 'Error!';
+             element.classList.remove('bg-secondary');
+            element.classList.add('bg-danger');
+             setTimeout(() => {
+                element.textContent = originalText;
+                element.classList.remove('bg-danger');
+                element.classList.add('bg-secondary');
+            }, 1500);
+        }
+    }
+
     // --- Chart Generation Logic ---
 
     generateChartBtn.addEventListener('click', async () => {
-        // Get selected options from the multi-select dropdown
-        const selectedOptions = Array.from(mintsSelect.selectedOptions);
-        const mintsArray = selectedOptions.map(option => option.value);
+        // Get selected mints from checked checkboxes
+        const selectedCheckboxes = tokenListContainer.querySelectorAll('input[type="checkbox"]:checked');
+        const mintsArray = Array.from(selectedCheckboxes).map(checkbox => checkbox.value);
 
         if (mintsArray.length === 0) {
-            statusMessage.textContent = 'Please select at least one token from the list.';
+            statusMessage.textContent = 'Please check at least one token from the list.';
             Plotly.purge(chartDiv); // Clear previous chart
             return;
         }
@@ -120,15 +183,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     const buys = mintData.buys || [];
                     const sells = mintData.sells || [];
 
-                    // Find the corresponding token name from the select options for the legend
-                    const selectedOption = selectedOptions.find(opt => opt.value === mint);
-                    // Extract name (part before the first parenthesis or the whole string)
+                    // Find the corresponding checkbox to get the token name stored in data attribute
+                    const selectedCheckbox = Array.from(selectedCheckboxes).find(cb => cb.value === mint);
                     let traceName = mint; // Fallback to mint
-                    if (selectedOption) {
-                        const nameMatch = selectedOption.textContent.match(/^([^(]+)/);
-                        if (nameMatch) {
-                            traceName = nameMatch[1].trim();
-                        }
+                    if (selectedCheckbox) {
+                        traceName = selectedCheckbox.getAttribute('data-token-name') || mint;
                     }
 
 

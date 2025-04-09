@@ -9,6 +9,7 @@ from datetime import datetime, timezone,timedelta
 import asyncio
 import asyncpg
 import aiofiles # <-- Add this import
+import json # <-- Add this import
 from dotenv import load_dotenv
 from logger import logger
 from config import TOTAL_SUPPLY
@@ -257,6 +258,240 @@ class DatabaseClient:
         async with self.pool.acquire() as conn:
             result = await conn.fetchrow(query, mint)
             return result['total_supply'] if result else TOTAL_SUPPLY
+
+
+    async def find_trading_opportunities(self, sol_price: float, volume_threshold: float, marketcap_threshold: float, rugcheck_threshold: int, social_score_threshold: int, time_interval_minutes: int, min_volatility: float):
+        """Fetches potential trading opportunities based on multiple criteria."""
+        query = """
+            WITH LatestTradeData AS (
+                SELECT
+                    mint,
+                    price,
+                    marketCapSol,
+                    vTokensInBondingCurve,
+                    vSolInBondingCurve,
+                    timestamp,
+                    ROW_NUMBER() OVER (PARTITION BY mint ORDER BY timestamp DESC) AS rn
+                FROM trades
+                WHERE timestamp >= NOW() - ($6 || ' minutes')::interval
+            ),
+            RecentTrades AS (
+                SELECT
+                    mint,
+                    SUM(CASE WHEN tx_type = 'buy' THEN sol_amount ELSE 0 END) AS total_buys_recent,
+                    SUM(CASE WHEN tx_type = 'sell' THEN sol_amount ELSE 0 END) AS total_sells_recent,
+                    SUM(sol_amount) AS volume_recent,
+                    COUNT(*) as trade_count
+                FROM trades
+                WHERE timestamp >= NOW() - ($6 || ' minutes')::interval
+                GROUP BY mint
+            ),
+            VolatilityData AS (
+                SELECT
+                    mint,
+                    STDDEV(log_return) * SQRT(GREATEST(COUNT(*), 1)) AS volatility
+                FROM (
+                    SELECT
+                        mint,
+                        price,
+                        LAG(price) OVER (PARTITION BY mint ORDER BY timestamp) AS prev_price,
+                        CASE
+                            WHEN price > 0 AND LAG(price) OVER (PARTITION BY mint ORDER BY timestamp) > 0
+                            THEN LN(price / LAG(price) OVER (PARTITION BY mint ORDER BY timestamp))
+                            ELSE NULL
+                        END AS log_return
+                    FROM trades
+                    WHERE timestamp >= NOW() - ($6 || ' minutes')::interval
+                ) sub
+                WHERE log_return IS NOT NULL
+                GROUP BY mint
+                HAVING COUNT(*) > 5
+            )
+            SELECT
+                t.mint,
+                t.marketCapSol,
+                t.vTokensInBondingCurve,
+                t.vSolInBondingCurve,
+                COALESCE(ltd.marketCapSol, t.marketCapSol) AS latest_market_cap_sol,
+                COALESCE(ltd.vTokensInBondingCurve, t.vTokensInBondingCurve) AS latest_v_tokens,
+                COALESCE(ltd.vSolInBondingCurve, t.vSolInBondingCurve) AS latest_v_sol,
+                COALESCE(ltd.price, 0) AS latest_price,
+                COALESCE(rt.volume_recent, 0) AS volume_in_interval,
+                COALESCE(vd.volatility, 0) AS volatility_in_interval,
+                r.tokenMeta_name AS name,
+                r.tokenMeta_symbol AS symbol,
+                r.score AS rugcheck_score,
+                t.socials_score
+            FROM tokens AS t
+            JOIN rugcheck AS r ON t.mint = r.mint
+            JOIN LatestTradeData AS ltd ON t.mint = ltd.mint AND ltd.rn = 1
+            LEFT JOIN RecentTrades AS rt ON t.mint = rt.mint
+            LEFT JOIN VolatilityData AS vd ON t.mint = vd.mint
+            WHERE
+                t.is_active = TRUE AND
+                r.score IS NOT NULL AND
+                t.socials_score IS NOT NULL AND
+                r.score < $4 AND
+                t.socials_score < $5 AND
+                (COALESCE(rt.volume_recent, 0) * $1) >= $2 AND
+                (COALESCE(ltd.marketCapSol, t.marketCapSol, 0) * $1) >= $3 AND
+                COALESCE(vd.volatility, 0) >= $7 AND
+                t.mint NOT IN (SELECT mint FROM portfolio WHERE status = 'active')
+            ORDER BY rt.volume_recent DESC;
+        """
+        async with self.pool.acquire() as conn:
+            try:
+                return await conn.fetch(query, sol_price, volume_threshold, marketcap_threshold, rugcheck_threshold, social_score_threshold, str(time_interval_minutes), min_volatility)
+            except Exception as e:
+                logger.error(f"Error finding trading opportunities: {e}", exc_info=True)
+                return [] # Return empty list on error
+
+    async def get_active_buy_positions(self, conn=None):
+        """Fetches active buy positions from the portfolio."""
+        query = '''
+            SELECT id, mint, price AS buy_price, initial_tokens, remaining_tokens, total_investment_sol,
+                   stop_loss_price, highest_price, initial_tp_price, second_tp_price, first_tp_hit
+            FROM portfolio
+            WHERE status = 'active' AND tx_type = 'buy'
+        '''
+        connection = conn or await self.pool.acquire()
+        try:
+            return await connection.fetch(query)
+        finally:
+            if not conn and connection: # Release connection only if it was acquired here
+                await self.pool.release(connection)
+
+    async def get_latest_prices(self, mints: list[str], conn=None):
+        """Fetches the latest price and market cap for a list of mints."""
+        if not mints:
+            return {}
+        query = f'''
+            WITH LatestTrades AS (
+                SELECT
+                    mint,
+                    price,
+                    marketCapSol,
+                    ROW_NUMBER() OVER (PARTITION BY mint ORDER BY timestamp DESC) as rn
+                FROM trades
+                WHERE mint = ANY($1::text[])
+            )
+            SELECT mint, price, marketCapSol FROM LatestTrades WHERE rn = 1
+        '''
+        connection = conn or await self.pool.acquire()
+        try:
+            rows = await connection.fetch(query, mints)
+            return {row['mint']: {'price': float(row['price']), 'market_cap': float(row['marketcapsol'])}
+                    for row in rows if row['price'] is not None and float(row['price']) > 0}
+        finally:
+            if not conn and connection:
+                await self.pool.release(connection)
+
+    async def update_portfolio_highest_price(self, position_id: int, price: float, conn=None):
+        """Updates the highest price for a given portfolio position."""
+        query = 'UPDATE portfolio SET highest_price = $1 WHERE id = $2'
+        connection = conn or await self.pool.acquire()
+        try:
+            await connection.execute(query, price, position_id)
+        finally:
+            if not conn and connection:
+                await self.pool.release(connection)
+
+    async def mark_first_tp_hit_and_adjust_sl(self, position_id: int, buy_price: float, conn=None):
+        """Marks the first TP as hit and adjusts the stop loss to breakeven."""
+        query = 'UPDATE portfolio SET first_tp_hit = TRUE, stop_loss_price = $1 WHERE id = $2'
+        connection = conn or await self.pool.acquire()
+        try:
+            await connection.execute(query, buy_price, position_id)
+        finally:
+            if not conn and connection:
+                await self.pool.release(connection)
+
+    async def get_portfolio_entry_for_update(self, position_id: int, conn=None):
+        """Fetches a specific portfolio buy entry needed for sell calculations."""
+        query = '''
+            SELECT price AS buy_price, initial_tokens, remaining_tokens, total_investment_sol, fee AS buy_fee, tip AS buy_tip
+            FROM portfolio
+            WHERE id = $1 AND status = 'active' AND tx_type = 'buy'
+        '''
+        connection = conn or await self.pool.acquire()
+        try:
+            return await connection.fetchrow(query, position_id)
+        finally:
+            if not conn and connection:
+                await self.pool.release(connection)
+
+    async def update_portfolio_entry_after_sell(self, position_id: int, new_remaining_tokens: float, new_status: str, conn=None):
+        """Updates remaining tokens and status of a portfolio entry after a sell."""
+        query = 'UPDATE portfolio SET remaining_tokens = $1, status = $2 WHERE id = $3'
+        connection = conn or await self.pool.acquire()
+        try:
+            await connection.execute(query, new_remaining_tokens, new_status, position_id)
+        finally:
+            if not conn and connection:
+                await self.pool.release(connection)
+
+    async def insert_portfolio_sell_record(self, mint: str, current_price: float, market_cap_sol: float, net_sol_received: float, tokens_sold: float, sell_fee: float, sell_tip: float, profit: float, reason: str, timestamp: datetime, settings: dict, conn=None):
+        """Inserts a sell transaction record into the portfolio, including settings."""
+        query = '''
+            INSERT INTO portfolio
+            (mint, tx_type, price, market_cap, sol_amount, tokens, fee, tip, profit, total_investment_sol,
+             remaining_tokens, status, reason, timestamp, initial_tokens, stop_loss_price, highest_price, settings)
+            VALUES ($1, 'sell', $2, $3, $4, $5, $6, $7, $8, 0, 0, 'closed', $9, $10, 0, 0, 0, $11)
+        '''
+        connection = conn or await self.pool.acquire()
+        try:
+            settings_json = json.dumps(settings) # Convert dict to JSON string
+            await connection.execute(query, mint, current_price, market_cap_sol, net_sol_received, tokens_sold,
+                                   sell_fee, sell_tip, profit, reason, timestamp, settings_json)
+        finally:
+            if not conn and connection:
+                await self.pool.release(connection)
+
+    async def get_token_name(self, mint: str, conn=None):
+        """Fetches the name of a token given its mint address."""
+        query = "SELECT name FROM tokens WHERE mint = $1"
+        connection = conn or await self.pool.acquire()
+        try:
+            return await connection.fetchrow(query, mint)
+        finally:
+            if not conn and connection:
+                await self.pool.release(connection)
+
+    async def insert_portfolio_buy_record(self, mint: str, current_price: float, market_cap_sol: float, sol_base_amount: float, total_sol_investment: float, tokens_bought: float, buy_fee: float, buy_tip: float, initial_stop_loss_price: float, initial_tp_price: float, second_tp_price: float, timestamp: datetime, settings: dict, conn=None):
+        """Inserts a buy transaction record into the portfolio, including settings."""
+        query = """
+            INSERT INTO portfolio
+                (mint, tx_type, price, market_cap, sol_amount, total_investment_sol, tokens,
+                 fee, tip, remaining_tokens, stop_loss_price, highest_price,
+                 initial_tp_price, second_tp_price, first_tp_hit,
+                 status, timestamp, initial_tokens, settings)
+            VALUES ($1, 'buy', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, FALSE, 'active', $14, $15, $16)
+        """
+        connection = conn or await self.pool.acquire()
+        try:
+            settings_json = json.dumps(settings) # Convert dict to JSON string
+            await connection.execute(query, mint, current_price, market_cap_sol, sol_base_amount, total_sol_investment, tokens_bought,
+                                   buy_fee, buy_tip, tokens_bought, # remaining_tokens = initial_tokens
+                                   initial_stop_loss_price, current_price, # highest_price = current_price
+                                   initial_tp_price, second_tp_price,
+                                   timestamp, tokens_bought, # initial_tokens
+                                   settings_json) # settings
+        finally:
+            if not conn and connection:
+                await self.pool.release(connection)
+
+    # Modify existing has_active_buy_order to accept optional connection
+    async def has_active_buy_order(self, mint: str, conn=None):
+        query = """
+            SELECT 1 FROM portfolio WHERE mint = $1 AND tx_type = 'buy' AND status = 'active'
+        """
+        connection = conn or await self.pool.acquire()
+        try:
+            result = await connection.fetchval(query, mint)
+            return result is not None
+        finally:
+            if not conn and connection:
+                await self.pool.release(connection)
 
     async def get_trade_history(self, mints: list[str]):
         """Fetches price and timestamp for given mints from trades and trades_backup."""
@@ -555,6 +790,7 @@ class DatabaseClient:
                     'migrations',         # Standalone or related? Assuming standalone for drop order
                     'tokens',             # Drop after dependents
                     'portfolio',          # Assuming this is a standalone table
+                    'portfolio_backup',          # Assuming this is a standalone table
                     'rugcheck_backup',
                     'trades_backup',
                     'migrations_backup',
@@ -579,7 +815,7 @@ class DatabaseClient:
             async with self.pool.acquire() as conn:
                 try:
                     tables_to_backup = [
-                        'tokens', 'trades', 'rugcheck', 'migrations'
+                        'tokens', 'trades', 'rugcheck', 'migrations', 'portfolio'
                     ]
                     for table in tables_to_backup:
                         # Insert into backup table, ignoring rows that already exist based on primary key 'id'
@@ -592,6 +828,20 @@ class DatabaseClient:
                             conflict_key = 'mint'
                         elif table == 'migrations':
                             conflict_key = 'signature'
+                        elif table == 'portfolio':
+                            table_columns = await conn.fetch(f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table}'")
+                            conflict_key = 'id'
+                            columns = ", ".join([col for col in table_columns if col != "id"])
+                            await conn.execute(f"""
+                                INSERT INTO {table}_backup (id, {columns})
+                                SELECT nextval('{table}_backup_id_seq'), {columns}
+                                FROM {table} 
+                                ORDER BY id
+                                ON CONFLICT ({conflict_key}) DO NOTHING;
+                            """)
+                            logger.info("🗄️ Backed up table %s", table)
+                            await conn.execute(f"TRUNCATE TABLE {table} RESTART IDENTITY CASCADE;")
+                            logger.info("🧹 Truncated table %s", table)
                         else:
                             # Should not happen with the current list, but add a warning
                             logger.warning(f"Unexpected table '{table}' in backup_db conflict handling.")
