@@ -40,6 +40,6 @@ CREATE TABLE IF NOT EXISTS rugcheck_backup (
 );
 
 -- Add the `backed_up` column to the backup table
-ALTER TABLE rugcheck_backup ADD COLUMN backup_timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE rugcheck_backup ADD COLUMN IF NOT EXISTS backup_timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
 -- Remove the default value for the `timestamp` column in the backup table
 ALTER TABLE rugcheck_backup ALTER COLUMN timestamp DROP DEFAULT;

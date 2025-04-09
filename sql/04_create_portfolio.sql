@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS portfolio_backup (
 );
 
 -- Add the `backed_up` column to the backup table
-ALTER TABLE portfolio_backup ADD COLUMN backed_up TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE portfolio_backup ADD COLUMN IF NOT EXISTS backed_up TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
 
 -- Remove the default value for the `timestamp` column in the backup table
 ALTER TABLE portfolio_backup ALTER COLUMN timestamp DROP DEFAULT;

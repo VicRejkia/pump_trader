@@ -785,12 +785,12 @@ class DatabaseClient:
                 # List all known application tables (main and backup)
                 # Add any other tables managed by the application if necessary (e.g., creator_wallets)
                 tables_to_drop = [
+                    'portfolio',          
                     'rugcheck',           # Depends on tokens
                     'trades',             # No explicit FK, but related to tokens
                     'migrations',         # Standalone or related? Assuming standalone for drop order
                     'tokens',             # Drop after dependents
-                    'portfolio',          # Assuming this is a standalone table
-                    'portfolio_backup',          # Assuming this is a standalone table
+                    'portfolio_backup',          
                     'rugcheck_backup',
                     'trades_backup',
                     'migrations_backup',

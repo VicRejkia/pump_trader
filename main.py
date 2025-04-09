@@ -154,7 +154,8 @@ class TradingBot:
         await self.state.set_websocket_handler(self.ws_handler)
         socials_proc = SocialsProcessor(self.state, self.db_client, self.config)
         rugchecker = Rugcheck(self.state, self.db_client, self.ws_handler, socials_proc)
-        self.trading_manager = TradingManager(self.db_client.pool, self.config, self.state)
+        # Pass the DatabaseClient instance, not just the pool
+        self.trading_manager = TradingManager(self.db_client, self.config, self.state)
 
         self.tasks = [
             asyncio.create_task(self.monitor_tasks(), name="task_monitor"),
