@@ -21,5 +21,12 @@ CREATE TABLE IF NOT EXISTS tokens (
     timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- Index to improve queries on the last_trade column
-CREATE INDEX IF NOT EXISTS idx_tokens_last_trade ON tokens (last_trade);
+-- Backup table creation
+CREATE TABLE IF NOT EXISTS tokens_backup (
+    LIKE tokens INCLUDING ALL
+);
+
+-- Add the `backed_up` column to the backup table
+ALTER TABLE tokens_backup ADD COLUMN backup_timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
+-- Remove the default value for the `timestamp` column in the backup table
+ALTER TABLE tokens_backup ALTER COLUMN timestamp DROP DEFAULT;

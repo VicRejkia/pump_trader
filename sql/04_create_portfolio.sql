@@ -1,3 +1,4 @@
+-- Original portfolio table creation
 CREATE TABLE IF NOT EXISTS portfolio (
     id SERIAL PRIMARY KEY,
     mint TEXT,
@@ -22,10 +23,18 @@ CREATE TABLE IF NOT EXISTS portfolio (
     second_tp_price NUMERIC,          -- Calculated price for the second take profit
     first_tp_hit BOOLEAN NOT NULL DEFAULT FALSE, -- Flag indicating if the first TP has been triggered
 
+    settings JSONB,                   -- Settings for this position (e.g. stop loss price)
+
     timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- Optional: Add indexes for frequently queried columns
-CREATE INDEX IF NOT EXISTS idx_portfolio_mint_status ON portfolio (mint, status);
-CREATE INDEX IF NOT EXISTS idx_portfolio_status_txtype ON portfolio (status, tx_type);
-CREATE INDEX IF NOT EXISTS idx_portfolio_timestamp ON portfolio (timestamp);
+-- Backup table creation
+CREATE TABLE IF NOT EXISTS portfolio_backup (
+    LIKE portfolio INCLUDING ALL
+);
+
+-- Add the `backed_up` column to the backup table
+ALTER TABLE portfolio_backup ADD COLUMN backed_up TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
+
+-- Remove the default value for the `timestamp` column in the backup table
+ALTER TABLE portfolio_backup ALTER COLUMN timestamp DROP DEFAULT;
