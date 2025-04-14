@@ -1,3 +1,4 @@
+// Removed redundant log fetching logic. It's now handled in base.html
 document.addEventListener('DOMContentLoaded', () => {
     // Get sidebar elements
     const sidebar = document.querySelector('.sidebar');
@@ -56,4 +57,115 @@ document.addEventListener('DOMContentLoaded', () => {
             sidebar.classList.toggle('expanded');
         });
     }
+
+    // --- Bot Control Logic ---
+    const startButton = document.getElementById('start-bot-btn');
+    const stopButton = document.getElementById('stop-bot-btn');
+    let statusCheckInterval; // Variable to hold the interval ID
+
+    // Function to update button visibility based on status
+    function updateButtonStates(status) {
+        console.log("Updating button states based on status:", status);
+        switch (status) {
+            case "RUNNING":
+                startButton.style.display = 'none';
+                stopButton.style.display = 'inline-block';
+                startButton.disabled = true; // Disable start when running
+                stopButton.disabled = false; // Enable stop when running
+                break;
+            case "STARTING":
+                startButton.style.display = 'inline-block'; // Show start but disable
+                stopButton.style.display = 'none';
+                startButton.disabled = true;
+                stopButton.disabled = true; // Disable stop while starting
+                // Optionally update button text: startButton.textContent = 'Starting...';
+                break;
+            case "STOPPING":
+                startButton.style.display = 'none';
+                stopButton.style.display = 'inline-block'; // Show stop but disable
+                startButton.disabled = true; // Disable start while stopping
+                stopButton.disabled = true;
+                // Optionally update button text: stopButton.textContent = 'Stopping...';
+                break;
+            case "STOPPED":
+            case "ERROR": // Treat ERROR as STOPPED for button state
+            default: // Default to stopped state
+                startButton.style.display = 'inline-block';
+                stopButton.style.display = 'none';
+                startButton.disabled = false; // Enable start when stopped
+                stopButton.disabled = true; // Disable stop when stopped
+                // Reset button text if changed: startButton.textContent = 'Start Bot';
+                break;
+        }
+    }
+
+    // Function to fetch bot status
+    async function checkBotStatus() {
+        try {
+            const response = await fetch('/api/bot_status');
+            if (!response.ok) {
+                console.error('Error fetching bot status:', response.statusText);
+                updateButtonStates("ERROR"); // Assume error means stopped for UI
+                return;
+            }
+            const data = await response.json();
+            updateButtonStates(data.status);
+        } catch (error) {
+            console.error('Network error fetching bot status:', error);
+            updateButtonStates("ERROR"); // Assume error means stopped for UI
+        }
+    }
+
+    if (startButton && stopButton) {
+        // Event listener for Start Button
+        startButton.addEventListener('click', async () => {
+            console.log('Start Bot button clicked - sending command');
+            updateButtonStates("STARTING"); // Immediately reflect intent
+
+            try {
+                const response = await fetch('/start_bot', { method: 'POST' });
+                const result = await response.json();
+                console.log('Start Bot command response:', result);
+                // No need to update buttons here, periodic check will handle it
+                if (!response.ok) {
+                    console.error("Start command failed:", result);
+                    checkBotStatus(); // Re-check status immediately on failure
+                }
+            } catch (error) {
+                console.error('Error sending start command:', error);
+                checkBotStatus(); // Re-check status immediately on failure
+            }
+        });
+
+        // Event listener for Stop Button
+        stopButton.addEventListener('click', async () => {
+            console.log('Stop Bot button clicked - sending command');
+            updateButtonStates("STOPPING"); // Immediately reflect intent
+
+            try {
+                const response = await fetch('/stop_bot', { method: 'POST' });
+                const result = await response.json();
+                console.log('Stop Bot command response:', result);
+                // No need to update buttons here, periodic check will handle it
+                 if (!response.ok) {
+                    console.error("Stop command failed:", result);
+                    checkBotStatus(); // Re-check status immediately on failure
+                }
+            } catch (error) {
+                console.error('Error sending stop command:', error);
+                 checkBotStatus(); // Re-check status immediately on failure
+            }
+        });
+
+        // Initial status check on page load
+        checkBotStatus();
+
+        // Periodically check status
+        statusCheckInterval = setInterval(checkBotStatus, 5000); // Check every 5 seconds
+
+    } else {
+        console.warn('Start or Stop button not found in the DOM.');
+    }
+    // --- End Bot Control Logic ---
+
 });
