@@ -1,0 +1,82 @@
+<!-- index.html -->
+{% extends 'base.html' %}
+
+{% block title %}Token Charts - Pump Trader{% endblock %}
+
+{% block content %}
+<h1 class="mb-4">Token Price Analysis</h1>
+
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                Filters
+            </div>
+            <div class="card-body">
+                <div class="row g-3 align-items-end">
+                    <div class="col-md-auto">
+                        <label for="filter-max-socials" class="form-label">Max Socials (0-100):</label>
+                        <input type="number" class="form-control form-control-sm" id="filter-max-socials" value="100" min="0" max="100" style="width: 100px;">
+                    </div>
+                    <div class="col-md-auto">
+                        <label for="filter-max-rugcheck" class="form-label">Max Rugcheck (0-10000):</label>
+                        <input type="number" class="form-control form-control-sm" id="filter-max-rugcheck" value="10000" min="0" max="10000" style="width: 120px;">
+                    </div>
+                    <div class="col-md-auto">
+                        <label for="filter-min-volume" class="form-label">Min Volume (SOL):</label>
+                        <input type="number" class="form-control form-control-sm" id="filter-min-volume" value="0" min="0" step="0.01" style="width: 100px;">
+                    </div>
+                    <div class="col-md-auto">
+                        <label for="filter-time-window" class="form-label">Volume Time Window:</label>
+                        <select class="form-select form-select-sm" id="filter-time-window" style="width: 150px;">
+                            <option value="60" selected>Last 1 Hour</option>
+                            <option value="360">Last 6 Hours</option>
+                            <option value="1440">Last 24 Hours</option>
+                            <option value="10080">Last 7 Days</option>
+                        </select>
+                    </div>
+                    <div class="col-md-auto">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="filter-portfolio-only">
+                            <label class="form-check-label" for="filter-portfolio-only">
+                                Portfolio Only
+                            </label>
+                        </div>
+                    </div>
+                    <div class="col-md-auto">
+                        <button id="apply-filters-btn" class="btn btn-secondary btn-sm">Apply Filters</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header">
+                Select Tokens (Click Mint to Copy)
+            </div>
+            <div class="card-body">
+                <div id="token-list-container" class="list-group" style="max-height: 300px; overflow-y: auto; margin-bottom: 1rem;">
+                    <!-- Token list will be populated by JavaScript -->
+                    <div class="list-group-item">Apply filters to load tokens...</div>
+                </div>
+                <button id="generate-chart-btn" class="btn btn-primary mt-3">Generate Chart</button>
+            </div>
+        </div>
+        <div id="status-message" class="mt-3 text-muted"></div>
+    </div>
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header">
+                Price Chart
+            </div>
+            <div class="card-body">
+                <div id="chart-div"></div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

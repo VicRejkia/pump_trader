@@ -16,6 +16,9 @@ from logger import logger
 # from trading import has_active_position
 from state_manager import GlobalState
 
+# SIZE OF BATCHES TO UNSUBSCRIBE DURING SHUTDOWN
+UNSUBSCRIBE_BATCH_COUNT = 15
+
 class WebSocketHandler:
     def __init__(self, db_client: DatabaseClient):
         self.state = GlobalState.get_instance() 
@@ -314,7 +317,7 @@ class WebSocketHandler:
             # Unsubscribe from all active token trade subscriptions regardless of websocket open state.
             active_subs = list(await self.state.get_token_subscriptions())
             if active_subs:
-                batches = [active_subs[i:i+10] for i in range(0, len(active_subs), 10)]
+                batches = [active_subs[i:i+UNSUBSCRIBE_BATCH_COUNT] for i in range(0, len(active_subs), UNSUBSCRIBE_BATCH_COUNT)]
                 logger.info(f"Processing {len(batches)} unsubscribe batches for {len(active_subs)} tokens")
                 
                 for batch in batches:

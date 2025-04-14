@@ -18,7 +18,7 @@ from state_manager import GlobalState
 from utils import is_valid_website, is_valid_telegram, is_valid_twitter
 
 # --- Configuration for Retries ---
-MAX_FETCH_ATTEMPTS = 2 # Allow 2 attempts (initial + 1 retry)
+MAX_FETCH_ATTEMPTS = 4 # Allow 2 attempts (initial + 1 retry)
 DEPRIORITIZED_PRIORITY = float('inf') # Very low priority for requeueing after max attempts
 
 class SocialsProcessor:
@@ -86,19 +86,32 @@ class SocialsProcessor:
                         return metadata
                     except json.JSONDecodeError:
                          logger.error(f"Failed to decode non-JSON content from {uri}. Content: {response.text[:200]}...")
-                         return None
+                         return "Error :" + response.text[:200]
 
         except httpx.HTTPStatusError as e:
-            logger.warning(f"HTTP error fetching social metadata from {uri}: {e.response.status_code} {e.response.reason_phrase}")
+            status_code = e.response.status_code
+            logger.warning(f"HTTP error fetching social metadata from {uri}: {status_code} {e.response.reason_phrase}")
+            if 400 <= status_code < 500:
+                return f"Error {status_code}" # Client-side error (e.g., 404)
+            elif 500 <= status_code < 600:
+                return f"Error {status_code}" # Server-side error
+            else:
+                return f"Error {status_code}" # Other HTTP error
         except httpx.TimeoutException:
             logger.warning(f"Timeout fetching social metadata from {uri}")
+            return "Error Timeout"
         except httpx.RequestError as e:
+            # Includes connection errors, DNS errors, etc.
             logger.warning(f"Request error fetching social metadata from {uri}: {e}")
+            return "Error Request"
         except json.JSONDecodeError as e:
-             logger.error(f"Failed to decode JSON from {uri}: {e}. Response text: {response.text[:200]}...")
+            # Use response variable safely, might not be defined if request failed earlier
+            response_text = getattr(e, 'response', None) and getattr(e.response, 'text', '')
+            logger.error(f"Failed to decode JSON from {uri}: {e}. Response text: {response_text[:200]}...")
+            return "Error Decode"
         except Exception as e:
             logger.error(f"Unexpected error fetching social metadata from {uri}: {e}", exc_info=True)
-
+            return "Error Unknown"
         return None
 
     async def _verify_website_details(self, url: str, token_name: str, token_symbol: str) -> dict:
@@ -425,11 +438,14 @@ class SocialsProcessor:
 
             # 2. Fetch metadata from URI
             metadata = await self._fetch_metadata(token_info['uri'])
-            if not metadata:
-                logger.warning(f"Could not fetch or parse metadata for {mint} from {token_info['uri']}. Cannot process socials.")
-                 # Update DB to mark as checked but failed? Score as high penalty?
+            # Check if metadata fetch failed (returned None or an error string)
+            if metadata is None or (isinstance(metadata, str) and metadata.startswith("Error")):
+                error_reason = metadata if metadata else "Unknown fetch failure" # Use specific error or default
+                logger.warning(f"Metadata fetch failed for {mint} from {token_info['uri']}: {error_reason}. Cannot process socials.")
+                # Update DB to mark as checked but failed, using high penalty score
                 await self._update_token_socials(mint, None, None, None, self.score_failed_metadata)
-                return "FAILED_METADATA"
+                # Return the specific error reason for retry logic
+                return error_reason if isinstance(metadata, str) else "FAILED_METADATA_UNKNOWN" # Propagate specific error
 
             # 3. Extract social links (handle different possible keys)
             website_url = metadata.get("website") or metadata.get("homepage") or metadata.get("url") or metadata.get("external_url")
@@ -532,10 +548,10 @@ class SocialsProcessor:
                     SELECT t.mint, COALESCE(SUM(tr.sol_amount), 0) AS volume
                     FROM tokens t
                     LEFT JOIN trades tr ON t.mint = tr.mint AND tr.timestamp >= NOW() - INTERVAL '1 hour' -- Consider recent volume
-                    WHERE t.is_active = TRUE AND (t.socials_score IS NULL OR t.socials_last_checked < NOW() - (10 || ' minutes')::interval) -- Select tokens not checked recently
+                    WHERE t.is_active = TRUE AND (t.socials_score IS NULL OR t.socials_last_checked < NOW() - ($1 || ' minutes')::interval) -- Select tokens not checked recently
                     GROUP BY t.mint
                     ORDER BY volume DESC
-                """)
+                """, str(self.config['SOCIALS_CHECK_REFRESH_INTERVAL'])) # Use refresh interval from config
 
                 logger.debug(f"🔍 Found {len(rows)} active tokens missing Socials Check data for refresh.")
 
@@ -623,19 +639,39 @@ class SocialsProcessor:
                     # Fetch, store, check score, etc.
                     process_status = await self.process_token(mint)
 
-                    # --- Handle Retry/Deprioritize Logic ---  NO_URI FAILED_METADATA NOT_FOUND
-                    if process_status in ['NO_URI', 'FAILED_METADATA', 'NOT_FOUND']:
-                        status_reason = "No valid token uri"
+                    # --- Handle Retry/Deprioritize Logic ---
+                    # process_status can now be True, False, "NO_URI", "NOT_FOUND", or specific error strings like "Error 404", "Error Timeout", etc.
+                    if process_status is True: # Success
+                        logger.debug(f"✅ Successfully processed Socials Check for {mint}.")
+                        async with self.db_client.pool.acquire() as conn:
+                            try:
+                                await conn.execute('''
+                                    UPDATE tokens SET socials_last_checked = NOW() WHERE mint = $1
+                                ''', mint)
+                                logger.debug(f"Updated socials_last_checked for {mint} to NOW()")
+                            except Exception as e:
+                                logger.error(f"Error updating socials_last_checked for {mint}: {e}", exc_info=True)
+                        self.fetch_attempts.pop(mint, None) # Clear attempts on success
+
+                    elif process_status in ["NO_URI", "NOT_FOUND"] or (isinstance(process_status, str) and process_status.startswith("Error 4")): # No URI, Token Gone, or Client Error (4xx)
+                        status_reason = process_status
+                        logger.warning(f"Socials Check for {mint} failed with likely permanent error: {status_reason}. Deprioritizing immediately.")
+                        # Deprioritize immediately by setting attempts high and requeueing low
+                        self.fetch_attempts[mint] = MAX_FETCH_ATTEMPTS # Mark as max attempts reached
+                        await self.queue.put((DEPRIORITIZED_PRIORITY, mint))
+
+                    elif process_status is False or (isinstance(process_status, str) and process_status.startswith("Error")): # General error or Transient Error (Timeout, Request, 5xx, Decode, Unknown)
+                        status_reason = process_status if isinstance(process_status, str) else "General processing error"
                         current_attempts = self.fetch_attempts.get(mint, 0) + 1
                         self.fetch_attempts[mint] = current_attempts
-                        logger.warning(f"🔄 Socials API failed for {mint} ({status_reason}). Attempt {current_attempts}/{MAX_FETCH_ATTEMPTS}.")
+                        logger.warning(f"🔄 Socials Check failed for {mint} ({status_reason}). Attempt {current_attempts}/{MAX_FETCH_ATTEMPTS}.")
 
                         if current_attempts < MAX_FETCH_ATTEMPTS:
                             # Requeue with original priority for retry
                             await self.queue.put((priority, mint))
                             logger.info(f"Retrying Socials Check for {mint} later (attempt {current_attempts}).")
                         else:
-                            # Max attempts reached, requeue with very low priority
+                            # Max attempts reached for transient error, deprioritize
                             await self.queue.put((DEPRIORITIZED_PRIORITY, mint))
                             logger.warning(f"Max socials check fetch attempts ({MAX_FETCH_ATTEMPTS}) reached for {mint} due to {status_reason}. Deprioritizing.")
                             # Keep attempt count high so refresh doesn't re-add with high priority
@@ -646,18 +682,7 @@ class SocialsProcessor:
                         await self.queue.put((priority, mint)) # Requeue
                         self.fetch_attempts.pop(mint, None) # Clear attempts counter
 
-                    else: # process_status is True (Success)
-                        logger.debug(f"✅ Successfully processed Socials Check for {mint}.")
-                        async with self.db_client.pool.acquire() as conn:
-                            try:
-                                await conn.execute('''
-                                    UPDATE tokens SET socials_last_checked = NOW() WHERE mint = $1
-                                ''', mint)
-                                logger.debug(f"Updated socials_last_checked for {mint} to NOW()")
-                            except Exception as e:
-                                logger.error(f"Error updating socials_last_checked for {mint}: {e}", exc_info=True)
-
-                        self.fetch_attempts.pop(mint, None)
+                    # else block removed as logic is now handled within the elif conditions above
                     
 
                     # Mark task as done regardless of outcome (requeueing handles retries)

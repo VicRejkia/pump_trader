@@ -1,4 +1,5 @@
 import os
+import queue
 import inspect
 from datetime import datetime
 import logging
@@ -8,6 +9,7 @@ from rich.console import Console
 from config import LOGGER_NAME, LOG_LEVEL_CONSOLE, LOG_LEVEL_FILE, LOG_STORAGE_PATH
 
 logger = logging.getLogger(LOGGER_NAME)
+log_queue = queue.Queue()
 console = Console()
 
 def setup_logging():
@@ -52,6 +54,14 @@ def setup_logging():
     logger.addHandler(console_handler)
 
     logger.debug(":writing_hand: [green]Logging system initialized with level:[/green] [bold red]%s[/bold red]", logging.getLevelName(logger.level))
+    
+    def log_to_queue(record):
+        log_queue.put(record.getMessage())
+    
+    log_handler = logging.StreamHandler()
+    log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    log_handler.emit = log_to_queue
+    logger.addHandler(log_handler)
 
 
 def rotate_log_file():
