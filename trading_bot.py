@@ -10,7 +10,7 @@ import config
 from database_handler import DatabaseClient
 from trading_logic import TradingManager
 from websocket_handler import WebSocketHandler
-from logger import setup_logging, log_info, log_debug, log_error, rotate_log_file
+from logger import setup_logging, log_info, log_debug, log_error, log_warning, rotate_log_file
 from state_manager import GlobalState
 from trade_processor import trade_worker
 from sol_price_api import update_sol_price
