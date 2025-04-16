@@ -12,3 +12,4 @@ pydantic
 Flask
 pandas
 pygad
+nest_asyncio

@@ -29,9 +29,9 @@ async def update_sol_price(state, db_client: DatabaseClient):
                             continue
 
                         # Update the in-memory state and database
-                        async with state.lock:
-                            await state.set_sol_price(new_price)
-                            await db_client.insert_sol_price(new_price)
+                        #async with state.lock:
+                        await state.set_sol_price(new_price)
+                        await db_client.insert_sol_price(new_price)
 
                         logger.info(f"✅ Updated Solana price: {new_price} USD")
                     else:

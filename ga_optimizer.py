@@ -11,6 +11,7 @@ import pandas as pd
 from datetime import datetime, timedelta, timezone
 import time
 import json
+import nest_asyncio # Import nest_asyncio
 
 from logger import logger, setup_logging
 from ga_config import (
@@ -26,6 +27,8 @@ from backtester import run_backtest
 historical_data_sets = {}
 # Global variable for database client
 db_client = None
+
+nest_asyncio.apply() # Apply the patch
 
 # --- Data Preparation ---
 
@@ -48,7 +51,7 @@ async def load_and_split_data(start_date_str: str, end_date_str: str):
 
     try:
         start_date = datetime.strptime(start_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        start_date = datetime.strptime(start_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        # Removed duplicate assignment of start_date
         end_date = datetime.strptime(end_date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
         logger.info(f"Attempting to load data from {start_date} to {end_date}")
 
@@ -130,46 +133,61 @@ async def load_and_split_data(start_date_str: str, end_date_str: str):
 # backtests for the whole population concurrently outside the PyGAD loop if possible,
 # or using a shared event loop with careful management).
 
-async def run_backtest_for_fitness(solution):
-    """Helper async function to run backtests for a given solution."""
-    parameters = {param['name']: solution[i] for i, param in enumerate(OPTIMIZABLE_PARAMETERS)}
-    total_fitness = 0.0
-    num_tokens_backtested = 0
+async def run_backtest_for_fitness(solutions):
+    """
+    Helper async function to run backtests for a batch of solutions.
+    Args:
+        solutions: List of solutions (each solution is a list of parameters).
+    Returns:
+        List of fitness values corresponding to each solution.
+    """
+    fitness_results = []
+    for solution in solutions:
+        # Convert the raw solution list to a parameter dictionary
+        parameters = {param['name']: solution[i] for i, param in enumerate(OPTIMIZABLE_PARAMETERS)}
+        total_fitness = 0.0
+        num_tokens_backtested = 0
+        tasks = []
 
-    tasks = []
-    for mint, df_train in historical_data_sets.get('train', {}).items():
-        # Create a task for each token's backtest
-        tasks.append(run_backtest(parameters.copy(), df_train.copy(), BACKTEST_INITIAL_CAPITAL))
+        # Create tasks for backtesting each token's data in the training set
+        for mint, df_train in historical_data_sets.get('train', {}).items():
+            tasks.append(run_backtest(parameters.copy(), df_train.copy(), BACKTEST_INITIAL_CAPITAL))
 
-    if not tasks:
-        logger.warning("No training data available for any token to run backtest.")
-        return 0.0 # Return worst fitness if no data
-
-    backtest_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    for result in backtest_results:
-        if isinstance(result, Exception):
-            logger.error(f"Backtest failed for a token: {result}")
-            # Penalize fitness heavily for errors? Or just ignore? Let's ignore for now.
+        if not tasks:
+            logger.warning("No training data available for any token to run backtest for this solution.")
+            fitness_results.append(-float('inf') if FITNESS_GOAL == 'max' else float('inf')) # Worst fitness
             continue
-        elif isinstance(result, dict):
-            # Aggregate fitness (e.g., sum of PnL, average Sharpe)
-            # Using FITNESS_METRIC from ga_config
-            fitness_value = result.get(FITNESS_METRIC, 0.0)
-            total_fitness += fitness_value
-            num_tokens_backtested += 1
-        else:
-             logger.warning(f"Unexpected backtest result type: {type(result)}")
 
+        # Run all backtests concurrently
+        backtest_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    if num_tokens_backtested == 0:
-        logger.warning("No backtests completed successfully for this solution.")
-        return 0.0 # Or negative infinity if maximizing
+        # Aggregate results
+        valid_results_count = 0
+        for result in backtest_results:
+            if isinstance(result, Exception):
+                logger.error(f"Backtest failed for a token: {result}")
+                continue # Skip failed backtests
+            elif isinstance(result, dict):
+                fitness_value = result.get(FITNESS_METRIC) # Get the specific metric
+                if fitness_value is None or pd.isna(fitness_value):
+                    logger.warning(f"Backtest for a token returned invalid fitness metric '{FITNESS_METRIC}': {fitness_value}. Skipping.")
+                    continue # Skip results without a valid fitness metric
+                total_fitness += fitness_value
+                valid_results_count += 1
+            else:
+                logger.warning(f"Unexpected backtest result type: {type(result)}")
 
-    # Average the fitness metric across all successfully backtested tokens
-    average_fitness = total_fitness / num_tokens_backtested
-    logger.debug(f"Solution evaluated. Average {FITNESS_METRIC}: {average_fitness:.4f} across {num_tokens_backtested} tokens.")
-    return average_fitness
+        if valid_results_count == 0:
+            logger.warning("No backtests completed successfully with a valid fitness metric for this solution.")
+            fitness_results.append(-float('inf') if FITNESS_GOAL == 'max' else float('inf')) # Worst fitness
+            continue
+
+        # Compute average fitness for this solution based on successful backtests
+        average_fitness = total_fitness / valid_results_count
+        logger.debug(f"Solution evaluated. Average {FITNESS_METRIC}: {average_fitness:.4f} across {valid_results_count} tokens.")
+        fitness_results.append(average_fitness)
+
+    return fitness_results
 
 
 def fitness_func(ga_instance, solution, sol_idx):
@@ -180,46 +198,48 @@ def fitness_func(ga_instance, solution, sol_idx):
     start_time = time.time()
     logger.debug(f"Evaluating solution index: {sol_idx}")
 
-    # Run the async backtest helper
-    try:
-        # Ensure an event loop is available or create one
-        loop = asyncio.get_event_loop()
-        logger.debug(f"Is event loop running? {asyncio.get_event_loop().is_running()}")
-        if loop.is_running():
-             # If running in an environment like Jupyter, need careful handling.
-             # For simple script execution, asyncio.run might be okay here,
-             # but let's try running in the existing loop if possible.
-             # This part might need adjustment based on execution context.
-             # Using asyncio.run() is simpler for standalone scripts.
-             fitness = asyncio.run(run_backtest_for_fitness(solution))
-        else:
-             fitness = loop.run_until_complete(run_backtest_for_fitness(solution))
+    fitness = -float('inf') if FITNESS_GOAL == 'max' else float('inf') # Default to worst fitness
 
-    except RuntimeError as e:
-         # Fallback if get_event_loop causes issues or no loop exists
-         logger.warning(f"RuntimeError getting event loop ({e}), falling back to asyncio.run().")
-         try:
-            #fitness = asyncio.run(run_backtest_for_fitness(solution))
-            fitness = loop.run_until_complete(run_backtest_for_fitness(solution))
-         except Exception as inner_e:
-             logger.exception(f"Error running backtest within fitness function (asyncio.run): {inner_e}")
-             fitness = -float('inf') if FITNESS_GOAL == 'max' else float('inf') # Worst possible fitness
+    try:
+        # Consistently use asyncio.run() to call the async helper function.
+        # run_backtest_for_fitness expects a list of solutions.
+        results = asyncio.run(run_backtest_for_fitness([solution]))
+
+        # Check if results list is valid and extract the fitness value
+        if results and len(results) > 0:
+            fitness = results[0]
+            # Handle potential None or NaN from the backtest result itself (already handled inside helper, but double-check)
+            if fitness is None or pd.isna(fitness):
+                 logger.warning(f"Backtest result for solution {sol_idx} was None or NaN after helper. Assigning worst fitness.")
+                 fitness = -float('inf') if FITNESS_GOAL == 'max' else float('inf')
+        else:
+            logger.warning(f"run_backtest_for_fitness returned invalid results for solution {sol_idx}. Assigning worst fitness.")
+            fitness = -float('inf') if FITNESS_GOAL == 'max' else float('inf')
 
     except Exception as e:
+        # Catch any exception during asyncio.run or backtest execution
         logger.exception(f"Error running backtest within fitness function for solution {sol_idx}: {e}")
-        fitness = -float('inf') if FITNESS_GOAL == 'max' else float('inf') # Worst possible fitness
+        fitness = -float('inf') if FITNESS_GOAL == 'max' else float('inf') # Assign worst fitness
 
     end_time = time.time()
     logger.debug(f"Solution {sol_idx} evaluation took {end_time - start_time:.2f} seconds. Fitness: {fitness}")
 
-    # PyGAD maximizes fitness by default. If we want to minimize (e.g., drawdown),
-    # return the negative or inverse of the value.
+    # Adjust fitness based on optimization goal (handle NaN/inf explicitly)
+    if pd.isna(fitness) or fitness == -float('inf') or fitness == float('inf'):
+         # If fitness is invalid, return the worst possible value directly
+         return -float('inf') if FITNESS_GOAL == 'max' else float('inf')
+
     if FITNESS_GOAL == 'min':
-        # Avoid division by zero if fitness is 0
-        return 1.0 / (fitness + 1e-9) if fitness >= 0 else -fitness # Example for minimization
-
-    return fitness
-
+        # Ensure fitness is not negative before division, handle potential division by zero
+        if fitness > 0:
+            return 1.0 / fitness
+        elif fitness == 0:
+            # Return a very large number for minimization if the target metric is exactly 0
+            return float('inf')
+        else: # fitness < 0
+             # If minimizing a negative number (like drawdown), make it positive
+            return -fitness
+    return fitness # Return as is for maximization
 
 # --- GA Execution ---
 
@@ -231,7 +251,7 @@ async def main():
     db_client = DatabaseClient()
     try:
         await db_client.connect()
-        await db_client.init_db() # Ensure schema exists
+        #await db_client.init_db() # Ensure schema exists
     except Exception as e:
         logger.critical(f"Failed to connect to database or initialize schema: {e}")
         return # Cannot proceed without DB
@@ -304,34 +324,49 @@ async def main():
     best_params = {param['name']: solution[i] for i, param in enumerate(OPTIMIZABLE_PARAMETERS)}
     logger.info(json.dumps(best_params, indent=4))
 
-    # --- Phase 4: Validation (Placeholder) ---
+    # --- Phase 4: Validation ---
     logger.info("Running validation on the best solution...")
-    validation_fitness = 0.0
+    validation_fitness = -float('inf') if FITNESS_GOAL == 'max' else float('inf') # Default worst
     if historical_data_sets.get('validation'):
-         # Similar structure to fitness func, but run on validation set
-         # Re-running the async helper function
+         # Temporarily swap 'train' data with 'validation' data for the helper function
+         temp_train_data = historical_data_sets.get('train', {})
+         historical_data_sets['train'] = historical_data_sets['validation']
          try:
-             validation_fitness = await run_backtest_for_fitness(solution) # Pass the best solution
+             validation_results = asyncio.run(run_backtest_for_fitness([solution])) # Use asyncio.run here too
+             if validation_results and len(validation_results) > 0:
+                 validation_fitness = validation_results[0]
+                 # Handle potential None/NaN from validation run
+                 if validation_fitness is None or pd.isna(validation_fitness):
+                     logger.warning("Validation run returned None/NaN fitness.")
+                     validation_fitness = -float('inf') if FITNESS_GOAL == 'max' else float('inf')
              logger.info(f"Validation Fitness ({FITNESS_METRIC}): {validation_fitness}")
          except Exception as e:
              logger.exception(f"Error during validation run: {e}")
+         finally:
+             historical_data_sets['train'] = temp_train_data # Restore original training data
     else:
         logger.warning("No validation data set found. Skipping validation.")
 
-    # --- Phase 4: Final Testing (Placeholder) ---
+    # --- Phase 4: Final Testing ---
     logger.info("Running final test on the best solution...")
-    test_fitness = 0.0
+    test_fitness = -float('inf') if FITNESS_GOAL == 'max' else float('inf') # Default worst
     if historical_data_sets.get('test'):
-         # Similar structure, run on test set
+         # Temporarily swap 'train' data with 'test' data
+         temp_train_data = historical_data_sets.get('train', {})
+         historical_data_sets['train'] = historical_data_sets['test']
          try:
-             # Need to adapt run_backtest_for_fitness or create a variant for test set
-             # For now, just logging placeholder
-             logger.info("Test run placeholder...") # Replace with actual test run
-             # test_fitness = await run_backtest_on_set(solution, historical_data_sets['test'])
-             # logger.info(f"Test Fitness ({FITNESS_METRIC}): {test_fitness}")
+             test_results = asyncio.run(run_backtest_for_fitness([solution])) # Use asyncio.run here too
+             if test_results and len(test_results) > 0:
+                 test_fitness = test_results[0]
+                 # Handle potential None/NaN from test run
+                 if test_fitness is None or pd.isna(test_fitness):
+                     logger.warning("Test run returned None/NaN fitness.")
+                     test_fitness = -float('inf') if FITNESS_GOAL == 'max' else float('inf')
+             logger.info(f"Test Fitness ({FITNESS_METRIC}): {test_fitness}")
          except Exception as e:
              logger.exception(f"Error during test run: {e}")
-
+         finally:
+             historical_data_sets['train'] = temp_train_data # Restore original training data
     else:
         logger.warning("No test data set found. Skipping final test.")
 
@@ -342,7 +377,7 @@ async def main():
         'best_solution_parameters': best_params,
         'best_solution_fitness_training': solution_fitness,
         'validation_fitness': validation_fitness,
-        'test_fitness': test_fitness, # Add test fitness if calculated
+        'test_fitness': test_fitness,
         'ga_config': {
             'population_size': POPULATION_SIZE,
             'num_generations': NUM_GENERATIONS,
@@ -358,14 +393,31 @@ async def main():
         'optimizable_parameters_config': OPTIMIZABLE_PARAMETERS
     }
     try:
+        # Convert numpy types to standard Python types for JSON serialization
+        def convert_numpy_types(obj):
+            if isinstance(obj, np.integer):
+                return int(obj)
+            elif isinstance(obj, np.floating):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, (datetime, pd.Timestamp)):
+                 return obj.isoformat()
+            return obj
+
         with open(results_filename, 'w') as f:
-            json.dump(results_data, f, indent=4)
+            json.dump(results_data, f, indent=4, default=convert_numpy_types)
         logger.info(f"Saved GA results to {results_filename}")
     except Exception as e:
         logger.error(f"Failed to save results to JSON: {e}")
 
     # Plot fitness graph
-    ga_instance.plot_fitness(title="PyGAD Fitness Progress", save_dir="ga_fitness_plot.png")
+    try:
+        ga_instance.plot_fitness(title="PyGAD Fitness Progress", save_dir="ga_fitness_plot.png")
+        logger.info("Saved fitness plot to ga_fitness_plot.png")
+    except Exception as e:
+        logger.error(f"Failed to save fitness plot: {e}")
+
 
     # --- Cleanup ---
     await db_client.close()
