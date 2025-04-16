@@ -11,3 +11,4 @@ beautifulsoup4
 pydantic
 Flask
 pandas
+pygad

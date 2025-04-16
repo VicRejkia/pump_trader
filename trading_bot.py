@@ -3,9 +3,10 @@ import asyncio
 import signal
 import traceback
 import inspect
-import threading # Import threading module
-import os # Import os module
-import time # Import time module
+import threading
+import os
+import time
+import json # <-- Add json import
 import config
 from database_handler import DatabaseClient
 from trading_logic import TradingManager
@@ -25,13 +26,14 @@ STATUS_FILE = os.path.join('data', 'bot_status.txt')
 class TradingBot:
     """Main class for running the trading bot."""
 
-    def __init__(self, cleanup: bool = False, backup: bool = False):
-        """Initialize the TradingBot with optional cleanup and backup flags."""
+    def __init__(self, cleanup: bool = False, backup: bool = False, params_file: str = None):
+        """Initialize the TradingBot with optional cleanup, backup flags, and optimized params file path."""
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         self.state = GlobalState.get_instance()
         self.cleanup = cleanup
         self.backup = backup
+        self.params_file = params_file # Store the params file path
         self.db_client = DatabaseClient()
         self.ws_handler = WebSocketHandler(db_client=self.db_client)
         self.tasks = []
@@ -219,14 +221,49 @@ class TradingBot:
                 log_error(f":x: [bold red]Missing critical configuration variables[/bold red]: {missing_critical}")
                 return
 
-            self.config = config_vars
-            log_info(":gear: [bold green]Configuration loaded successfully.[/bold green]")
+            base_config = config_vars
+            log_info(":gear: Base configuration loaded successfully.")
+
+            # Load and merge optimized parameters if file provided
+            if self.params_file:
+                log_info(f":dna: Attempting to load optimized parameters from: {self.params_file}")
+                try:
+                    if os.path.exists(self.params_file):
+                        with open(self.params_file, 'r') as f:
+                            optimized_data = json.load(f)
+                        optimized_params = optimized_data.get('best_solution_parameters')
+                        if optimized_params:
+                            log_info(f":white_check_mark: Found {len(optimized_params)} optimized parameters.")
+                            # Merge optimized params into base config, overriding defaults
+                            merged_config = base_config.copy()
+                            merged_config.update(optimized_params)
+                            self.config = merged_config
+                            log_info(":sparkles: Merged optimized parameters into configuration.")
+                            # Log which parameters were overridden
+                            overridden_keys = set(base_config.keys()) & set(optimized_params.keys())
+                            log_debug(f"Overridden parameters: {overridden_keys}")
+                        else:
+                            log_warning(f":warning: 'best_solution_parameters' not found in {self.params_file}. Using default config.")
+                            self.config = base_config
+                    else:
+                        log_warning(f":warning: Parameter file not found: {self.params_file}. Using default config.")
+                        self.config = base_config
+                except json.JSONDecodeError as e:
+                    log_error(f":x: Error decoding JSON from {self.params_file}: {e}. Using default config.")
+                    self.config = base_config
+                except Exception as e:
+                    log_error(f":x: Error loading parameters file {self.params_file}: {e}. Using default config.", exc_info=True)
+                    self.config = base_config
+            else:
+                log_info(":notebook: No optimized parameters file provided. Using default config.")
+                self.config = base_config
 
         except Exception as e:
             log_error(f":x: [bold red]Failed to load configuration[/bold red]: {e}", exc_info=True)
+            self._write_status("ERROR")
             return
 
-        log_debug(f":wrench: CONFIG: {self.config}")
+        log_debug(f":wrench: FINAL CONFIG: {self.config}")
 
         await self.db_client.connect()
         await self.state.set_db_client(self.db_client)
@@ -257,7 +294,7 @@ class TradingBot:
 
         self.tasks = [
             asyncio.create_task(self.monitor_tasks(), name="task_monitor"),
-            asyncio.create_task(update_sol_price(self.state), name="sol_price_updater"),
+            asyncio.create_task(update_sol_price(self.state, self.db_client), name="sol_price_updater"),
             asyncio.create_task(trade_worker(), name="trade_worker"),
             rugchecker.start(),
             socials_proc.start(),

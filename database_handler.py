@@ -8,8 +8,9 @@ import glob
 from datetime import datetime, timezone,timedelta
 import asyncio
 import asyncpg
-import aiofiles # <-- Add this import
-import json # <-- Add this import
+import aiofiles
+import json
+import pandas as pd
 from dotenv import load_dotenv
 from logger import logger
 from config import TOTAL_SUPPLY
@@ -58,6 +59,15 @@ class DatabaseClient:
                 except Exception as e:
                     logger.exception("Error executing SQL file %s: %s", os.path.basename(file_path), e)
                     raise
+
+    async def insert_sol_price(self, price: float, timestamp: datetime = datetime.now(timezone.utc)):
+        """Insert a new SOL price into the database."""
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute("INSERT INTO sol_price_usd (price, timestamp) VALUES ($1, $2)", price, timestamp)
+        except Exception as e:
+            logger.exception("Error inserting SOL price into the database: %s", e)
+            raise
 
     async def insert_token(self, data: dict):
         """Checks if the token is valid and stores it if conditions are met."""
@@ -527,7 +537,7 @@ class DatabaseClient:
                 SELECT
                     mint,
                     score,
-                    ROW_NUMBER() OVER(PARTITION BY mint ORDER BY timestamp DESC) as rn
+                    ROW_NUMBER() OVER(PARTITION BY mint ORDER BY last_checked DESC) as rn
                 FROM v_rugcheck -- Use the rugcheck view
             )
             SELECT
@@ -867,3 +877,255 @@ class DatabaseClient:
             logger.info("Closing database connection pool...")
             await self.pool.close()
             logger.info("Database connection pool closed.")
+
+    async def get_historical_data_for_backtesting(self, mints: list[str], start_date: datetime, end_date: datetime) -> dict[str, pd.DataFrame]:
+        """
+        Fetches comprehensive historical data for specified tokens within a date range,
+        structured for backtesting.
+
+        Args:
+            mints: A list of token mint addresses.
+            start_date: The start datetime (inclusive, UTC).
+            end_date: The end datetime (exclusive, UTC).
+
+        Returns:
+            A dictionary where keys are mint addresses and values are pandas DataFrames.
+            Each DataFrame contains time-series data (price, volume, market_cap,
+            rugcheck_score, socials_score) indexed by timestamp for that token.
+            Returns an empty dictionary if no mints are provided or an error occurs.
+        """
+        if not mints:
+            logger.warning("get_historical_data_for_backtesting called with empty mints list.")
+            return {}
+
+        # Ensure dates are timezone-aware (UTC)
+        if start_date.tzinfo is None:
+            start_date = start_date.replace(tzinfo=timezone.utc)
+        if end_date.tzinfo is None:
+            end_date = end_date.replace(tzinfo=timezone.utc)
+
+        logger.info(f"Fetching historical data for {len(mints)} tokens from {start_date} to {end_date}...")
+
+        # Use parameters $1=mints, $2=start_date, $3=end_date
+        trade_query = """
+            SELECT
+                mint, timestamp, price, sol_amount, marketcapsol AS market_cap_sol
+            FROM v_trades
+            WHERE mint = ANY($1::text[])
+              AND timestamp >= $2 AND timestamp < $3
+            ORDER BY mint, timestamp;
+        """
+
+        rugcheck_query = """
+            SELECT
+                mint, last_checked AS timestamp, score AS rugcheck_score
+            FROM v_rugcheck
+            WHERE mint = ANY($1::text[])
+              AND last_checked >= $2 AND last_checked < $3
+            ORDER BY mint, last_checked;
+        """
+
+        # Assuming v_tokens stores the *latest* socials score and creation time.
+        # If socials score changes over time and is logged elsewhere, adjust this query.
+        # For now, we fetch the creation time and the *most recent* socials score before the end_date.
+        token_info_query = """
+            WITH LatestSocials AS (
+                SELECT
+                    mint,
+                    socials_score,
+                    timestamp AS token_creation_time, -- Assuming timestamp in v_tokens is creation time
+                    ROW_NUMBER() OVER (PARTITION BY mint ORDER BY timestamp DESC) as rn -- Get latest entry if multiple exist
+                FROM v_tokens
+                WHERE mint = ANY($1::text[]) -- $1 is mints
+                  AND timestamp < $2 -- $2 is end_date (changed from $3)
+            )
+            SELECT mint, token_creation_time, socials_score
+            FROM LatestSocials
+            WHERE rn = 1;
+         """
+
+        # Query to fetch SOL price history within the date range
+        sol_price_query = """
+            SELECT timestamp, price AS sol_price_usd
+            FROM sol_price_usd -- Assuming this view/table exists
+            WHERE timestamp >= $1 AND timestamp < $2 -- Use start_date ($1) and end_date ($2)
+            ORDER BY timestamp;
+        """
+
+        results_dict = {}
+        async with self.pool.acquire() as conn:
+            try:
+                # Fetch data sequentially on the same connection
+                logger.debug("Fetching trade data...")
+                trade_records_raw = await conn.fetch(trade_query, mints, start_date, end_date)
+                logger.debug(f"Fetched {len(trade_records_raw)} trade records.")
+
+                logger.debug("Fetching rugcheck data...")
+                rugcheck_records_raw = await conn.fetch(rugcheck_query, mints, start_date, end_date)
+                logger.debug(f"Fetched {len(rugcheck_records_raw)} rugcheck records.")
+
+                logger.debug("Fetching token info data...")
+                token_info_records_raw = await conn.fetch(token_info_query, mints, end_date)
+                logger.debug(f"Fetched {len(token_info_records_raw)} token info records.")
+
+                logger.debug("Fetching SOL price data...")
+                sol_price_records_raw = await conn.fetch(sol_price_query, start_date, end_date)
+                logger.debug(f"Fetched {len(sol_price_records_raw)} SOL price records.")
+
+                # --- Process SOL Price Data ---
+                if sol_price_records_raw:
+                    sol_prices_df = pd.DataFrame(sol_price_records_raw, columns=['timestamp', 'sol_price_usd'])
+                    sol_prices_df['timestamp'] = pd.to_datetime(sol_prices_df['timestamp'], utc=True)
+                    sol_prices_df.set_index('timestamp', inplace=True)
+                    sol_prices_df = sol_prices_df.astype({'sol_price_usd': float})
+                    # Resample to a common frequency (e.g., 1 minute) and forward fill
+                    # Adjust frequency as needed based on how often SOL price is stored
+                    sol_prices_df = sol_prices_df.resample('1min').ffill().ffill() # Forward fill gaps
+                else:
+                    logger.warning("No SOL price data found for the period. Market cap checks in backtest might be inaccurate.")
+                    sol_prices_df = pd.DataFrame(columns=['sol_price_usd']).set_index(pd.to_datetime([]))
+
+
+                # --- Process Trade Data ---
+                if trade_records_raw:
+                    trades_df = pd.DataFrame(trade_records_raw, columns=['mint', 'timestamp', 'price', 'volume', 'market_cap_sol'])
+                    trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'], utc=True)
+                    trades_df.set_index('timestamp', inplace=True)
+                    trades_df = trades_df.astype({'price': float, 'volume': float, 'market_cap_sol': float})
+                    #logger.debug(f"Trade data first 5 rows:\n{trades_df.head()}")
+                else:
+                    trades_df = pd.DataFrame(columns=['mint', 'price', 'volume', 'market_cap_sol']).set_index(pd.to_datetime([]))
+
+                # --- Process RugCheck Data ---
+                if rugcheck_records_raw:
+                    rugcheck_df = pd.DataFrame(rugcheck_records_raw, columns=['mint', 'timestamp', 'rugcheck_score'])
+                    rugcheck_df['timestamp'] = pd.to_datetime(rugcheck_df['timestamp'], utc=True) # Convert 'last_checked' to 'timestamp' index
+                    rugcheck_df.set_index('timestamp', inplace=True) # Set index as 'timestamp'
+                    rugcheck_df = rugcheck_df[['mint', 'rugcheck_score']] # Keep only needed columns after setting index
+                    rugcheck_df = rugcheck_df.astype({'rugcheck_score': int}) # Assuming integer score
+                    #logger.debug(f"Trade data first 5 rows:\n{rugcheck_df.head()}")
+                else:
+                    # Ensure the empty DataFrame has the correct columns expected later
+                    rugcheck_df = pd.DataFrame(columns=['mint', 'rugcheck_score']).set_index(pd.to_datetime([]))
+
+                # --- Process Token Info (Creation Time, Socials) ---
+                token_info = {r['mint']: {'creation_time': r['token_creation_time'], 'socials_score': r['socials_score']}
+                              for r in token_info_records_raw}
+
+                # --- Combine data per mint (Optimized) ---
+                logger.info("Grouping data by mint for processing...")
+                # Ensure mint column exists before grouping
+                if 'mint' not in trades_df.columns:
+                     trades_df['mint'] = None # Or handle error appropriately
+                if 'mint' not in rugcheck_df.columns:
+                     rugcheck_df['mint'] = None
+
+                grouped_trades = trades_df.groupby('mint') if 'mint' in trades_df.columns else {}
+                grouped_rugcheck = rugcheck_df.groupby('mint') if 'mint' in rugcheck_df.columns else {}
+                processed_mints = set(trades_df['mint'].dropna().unique()) | set(rugcheck_df['mint'].dropna().unique())
+                logger.info(f"Processing data for {len(processed_mints)} mints found in trades/rugcheck data...")
+
+                logger.debug(f"Processed mints (first 10): {list(processed_mints)[:10]}")
+                # Log the first 10 groups in grouped_trades
+                # if grouped_trades:
+                #     trade_groups = list(grouped_trades.groups.keys())
+                #     logger.debug(f"Grouped trades (first 10): {trade_groups[:10]}")
+                # else:
+                #     logger.debug("No grouped trades available.")
+
+                # # Log the first 10 groups in grouped_rugcheck
+                # if grouped_rugcheck:
+                #     rugcheck_groups = list(grouped_rugcheck.groups.keys())
+                #     logger.debug(f"Grouped rugcheck (first 10): {rugcheck_groups[:10]}")
+                # else:
+                #     logger.debug("No grouped rugcheck available.")
+
+                for mint in processed_mints:
+                    # Get data for the current mint, or empty DataFrame if not present
+                    if mint in grouped_trades.groups:
+                        mint_trades = grouped_trades.get_group(mint)[['price', 'volume', 'market_cap_sol']]
+
+                    if mint in grouped_rugcheck.groups:
+                        mint_rugcheck = grouped_rugcheck.get_group(mint)[['rugcheck_score']]
+
+                    #logger.debug(f"First 10 entries for mint_trades for {mint}:\n{mint_trades.head(10)}")
+                    #logger.debug(f"First 10 entries for mint_rugcheck for {mint}:\n{mint_rugcheck.head(10)}")
+
+                    if mint_trades.empty and mint_rugcheck.empty:
+                        logger.debug(f"No trade or rugcheck data found for {mint} after grouping.")
+                        continue
+
+                    # Combine trades and rugcheck scores based on timestamp index
+                    # Use outer join to keep all timestamps, forward fill scores between updates
+                    # Ensure indices are Timestamps before merging
+                    mint_trades.index = pd.to_datetime(mint_trades.index, utc=True)
+                    mint_rugcheck.index = pd.to_datetime(mint_rugcheck.index, utc=True)
+
+                    # Merge with SOL prices first (use left merge to keep all token timestamps)
+                    combined_df = pd.merge_ordered(mint_trades, sol_prices_df, on='timestamp', fill_method='ffill', how='left')
+                    # Then merge rugcheck scores
+                    combined_df = pd.merge_ordered(combined_df, mint_rugcheck, on='timestamp', fill_method='ffill', how='left')
+
+                    # If merge_ordered drops the index, set it back
+                    if 'timestamp' in combined_df.columns:
+                         combined_df.set_index('timestamp', inplace=True)
+                    elif not isinstance(combined_df.index, pd.DatetimeIndex):
+                         # Handle cases where index might be lost or incorrect after merge
+                         logger.warning(f"Timestamp index lost for mint {mint} after merge, attempting recovery or skipping.")
+                         # Attempt recovery if possible, or skip this mint
+                         continue # Skip if index is not usable
+
+                    # Add static token info (creation time and latest socials score)
+                    mint_info = token_info.get(mint)
+                    if mint_info:
+                        combined_df['token_creation_time'] = pd.to_datetime(mint_info['creation_time'], utc=True)
+                        combined_df['socials_score'] = mint_info['socials_score'] # Assign static score
+                    else:
+                        combined_df['token_creation_time'] = pd.NaT
+                        combined_df['socials_score'] = None # Or a default value like 100
+
+                    # Ensure numeric columns are properly typed before filling
+                    numeric_columns = ['rugcheck_score', 'socials_score']
+                    for col in numeric_columns:
+                        if col in combined_df.columns:
+                            combined_df[col] = pd.to_numeric(combined_df[col], errors='coerce')
+
+                    # Forward fill scores (important!) and backfill initial NaNs
+                    combined_df['rugcheck_score'] = combined_df['rugcheck_score'].ffill().bfill()
+                    combined_df['socials_score'] = combined_df['socials_score'].ffill().bfill()
+
+                    # Fill remaining NaNs with defaults (safer method, avoids inplace on slice)
+                    combined_df['rugcheck_score'] = combined_df['rugcheck_score'].fillna(10000).astype(int)
+                    combined_df['socials_score'] = combined_df['socials_score'].fillna(100).astype(int)
+
+                    # Ensure correct types after potential fills
+                    # Use astype on the whole DataFrame or specific columns directly, handle potential missing sol_price_usd
+                    convert_dtypes = {'rugcheck_score': int, 'socials_score': int}
+                    if 'sol_price_usd' in combined_df.columns:
+                        convert_dtypes['sol_price_usd'] = float
+                    combined_df = combined_df.astype(convert_dtypes, errors='ignore')
+
+                    # Drop rows outside the requested date range that might have been introduced by merging/ffilling
+                    combined_df = combined_df[(combined_df.index >= start_date) & (combined_df.index < end_date)]
+
+                    # Calculate market_cap_usd
+                    if 'market_cap_sol' in combined_df.columns and 'sol_price_usd' in combined_df.columns:
+                         combined_df['market_cap_usd'] = combined_df['market_cap_sol'] * combined_df['sol_price_usd']
+                    else:
+                         combined_df['market_cap_usd'] = None # Or 0, or handle as needed if data missing
+
+                    if not combined_df.empty:
+                        results_dict[mint] = combined_df
+                        # Reduce log verbosity inside the loop
+                        # logger.debug(f"Processed data for {mint}: {len(combined_df)} rows.")
+                    else:
+                         logger.debug(f"No combined data remained for {mint} after date filtering.")
+
+                logger.info(f"Finished processing data for {len(processed_mints)} mints.")
+
+            except Exception as e:
+                logger.exception(f"Error fetching historical data: {e}")
+                return {} # Return empty dict on error
+
+        logger.info(f"Successfully fetched and processed historical data for {len(results_dict)} tokens.")
+        return results_dict
