@@ -1,9 +1,9 @@
 CREATE TABLE IF NOT EXISTS migrations (
-    signature TEXT PRIMARY KEY, -- Use signature as the primary key
-    mint TEXT,
-    txType TEXT,
-    pool TEXT,
-    timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    signature TEXT PRIMARY KEY, -- signature of the token event
+    mint TEXT,                  -- tokens mint address
+    txType TEXT,                -- event type 'migrate'
+    pool TEXT,                  -- migration pool
+    timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP    -- TIMESTAMP of migration event
 );
 
 -- Backup table creation

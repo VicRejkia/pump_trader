@@ -21,7 +21,7 @@ UNSUBSCRIBE_BATCH_COUNT = 15
 
 class WebSocketHandler:
     def __init__(self, db_client: DatabaseClient):
-        self.state = GlobalState.get_instance() 
+        self.state = GlobalState.get_instance()  # Get the singleton instance of GlobalState 
         self.db_client = db_client  # Store reference to the database client
         self.websocket = None
         self.tasks = []
@@ -93,53 +93,57 @@ class WebSocketHandler:
 
     async def message_handler(self):
         """Processes incoming WebSocket messages."""
-        try:
+        try:             
             async for message in self.websocket:
-                try:
-                    data = json.loads(message)
-                    
-                    # Handle messages
-                    if 'message' in data:
-                        logger.debug(f"📡 WebSocket confirmation: {data['message']}")
-                        continue
+                sol_price = await self.state.get_sol_price()
+                if sol_price is None or sol_price <= 0:
+                    logger.warning(f"⚠ Invalid SOL_PRICE ({sol_price}); skipping connection to PumpPortal WebSocket.")
+                else:
+                    try:
+                        data = json.loads(message)
+                        
+                        # Handle messages
+                        if 'message' in data:
+                            logger.debug(f"📡 WebSocket confirmation: {data['message']}")
+                            continue
 
-                    # Handle new token events
-                    if data.get('txType') == "create": # Use .get() for safety
-                        mint = data.get('mint', 'N/A') # Get mint for logging
-                        logger.debug(f"➕ Received 'new token': {mint}") # Log reception immediately
-                        try:
-                            token_stored = await self.db_client.insert_token(data)
-                            if not token_stored:
-                                #logger.warning(f"⚠️ Token {mint} not stored (business rule violation in insert_token). Skipping subscription.")
-                                creator = data.get('traderPublicKey')
-                                if await self.db_client.is_suspicious_creator(creator):
-                                    await self.unsubscribe_tokens_from_creator(creator)
-                                    # logger.info(f"Unsubscribed from all tokens from suspicious creator {creator}.")
-                                continue # Skip if DB insert logic rejects it
-                        except Exception as e:
-                            logger.error(f"❌ DB Error storing new token {mint}: {e}", exc_info=True)
-                            continue # Skip on DB error
+                        # Handle new token events
+                        if data.get('txType') == "create": # Use .get() for safety
+                            mint = data.get('mint', 'N/A') # Get mint for logging
+                            logger.debug(f"➕ Received 'new token': {mint}") # Log reception immediately
+                            try:
+                                token_stored = await self.db_client.insert_token(data)
+                                if not token_stored:
+                                    #logger.warning(f"⚠️ Token {mint} not stored (business rule violation in insert_token). Skipping subscription.")
+                                    creator = data.get('traderPublicKey')
+                                    if await self.db_client.is_suspicious_creator(creator):
+                                        await self.unsubscribe_tokens_from_creator(creator)
+                                        # logger.info(f"Unsubscribed from all tokens from suspicious creator {creator}.")
+                                    continue # Skip if DB insert logic rejects it
+                            except Exception as e:
+                                logger.error(f"❌ DB Error storing new token {mint}: {e}", exc_info=True)
+                                continue # Skip on DB error
 
-                        await self.websocket.send(json.dumps({
-                            "method": "subscribeTokenTrade",
-                            "keys": [data['mint']]
-                        }))
-                        await self.state.add_token_subscription(data['mint'])
-                        active_subs = list(await self.state.get_token_subscriptions())
-                        logger.debug(f"✅ Subscribed to {data['mint']} --> {len(active_subs)} active subscriptions")
+                            await self.websocket.send(json.dumps({
+                                "method": "subscribeTokenTrade",
+                                "keys": [data['mint']]
+                            }))
+                            await self.state.add_token_subscription(data['mint'])
+                            active_subs = list(await self.state.get_token_subscriptions())
+                            logger.debug(f"✅ Subscribed to {data['mint']} --> {len(active_subs)} active subscriptions")
 
-                    elif data["txType"] == "migrate":                        
-                        await self.db_client.insert_migration(data)
+                        elif data["txType"] == "migrate":                        
+                            await self.db_client.insert_migration(data)
 
-                    elif data["txType"] == "buy" or data["txType"] == "sell": 
-                        #logger.debug(f"📡 WebSocket trade received: {data}")
-                        self.last_update_times[data['mint']] = datetime.now(timezone.utc)
-                        await self.trade_queue.put(data) 
-                    else:
-                        logger.warning(f"❔ WEBSOCKET - Unknown message type: {data}")                        
+                        elif data["txType"] == "buy" or data["txType"] == "sell": 
+                            #logger.debug(f"📡 WebSocket trade received: {data}")
+                            self.last_update_times[data['mint']] = datetime.now(timezone.utc)
+                            await self.trade_queue.put(data) 
+                        else:
+                            logger.warning(f"❔ WEBSOCKET - Unknown message type: {data}")                        
 
-                except Exception as e:
-                    logger.error(f"Message processing error: {e}" , exc_info=True)
+                    except Exception as e:
+                        logger.error(f"Message processing error: {e}" , exc_info=True)
         except websockets.exceptions.ConnectionClosed:
             logger.error("WebSocket connection closed, reconnecting...")
             await self.reconnect()

@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS portfolio (
     price NUMERIC,                    -- Price per token at the time of tx
     market_cap NUMERIC,               -- Market cap at the time of tx
     sol_amount NUMERIC,               -- Gross SOL spent (buy) or received (sell, before fees)
+    sol_price_usd NUMERIC,            -- SOL price in USD at the time of tx
     tokens NUMERIC,                   -- Number of tokens bought or sold in this tx
     fee NUMERIC,                      -- Fee associated with this tx
     tip NUMERIC,                      -- Tip associated with this tx

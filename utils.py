@@ -63,14 +63,14 @@ async def play_sell_tp_sound_async():
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, play_sell_tp_sound)
 
-def format_buy_order_log(state, mint: str, price_per_token: float, tokens_bought: float, market_cap: float, sol_price: float, total_investment: float) -> str:
+def format_buy_order_log(state, name: str, mint: str, price_per_token: float, tokens_bought: float, market_cap: float, sol_price: float, total_investment: float) -> str:
     """Formats the log message for a buy order."""
     if sol_price:
         price_usd = price_per_token * sol_price
         market_cap_usd = market_cap * sol_price
         return (
-            f"★★★ BUY Order ★★★\n"
-            f"│ Token: {mint}\n"
+            f"★★★ 💲 BUY Order 💲 ★★★\n"
+            f"│ Token: {name} - {mint}\n"
             f"│ Price: {price_per_token:.8f} SOL (${price_usd:.8f} USD)\n"
             f"│ Market Cap: {market_cap:,.2f} SOL (${market_cap_usd:,.2f} USD)\n"
             f"│ Tokens Bought: {tokens_bought}\n"
@@ -149,9 +149,9 @@ def calculate_social_score(social_data: dict, token_name: str, token_symbol: str
             
     return min(max(total_penalty, 0), 100)
 
-def calculate_market_cap(vTokensInBondingCurve: float, vSolInBondingCurve: float, totalSupply: float) -> float:
+def calculate_market_cap(vTokensInBondingCurve: float, vSolInBondingCurve: float, totalSupply: float, sol_price: float) -> float:
     """Calculates the market cap of a token using bonding curve data."""
     if vTokensInBondingCurve <= 0 or totalSupply <= 0:
         return 0.0
     price_per_token = vSolInBondingCurve / vTokensInBondingCurve
-    return price_per_token * totalSupply
+    return price_per_token * totalSupply * sol_price

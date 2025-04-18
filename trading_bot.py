@@ -201,9 +201,6 @@ class TradingBot:
         else:
              log_info("Running in a secondary thread (likely Flask). Skipping log rotation and signal handlers.")
 
-        # Setup logging regardless of thread
-        setup_logging()
-
         if is_main_thread:
             self.register_signal_handlers() # Only register signals if running as main script
 

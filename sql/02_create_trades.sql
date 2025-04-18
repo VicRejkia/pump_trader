@@ -1,17 +1,18 @@
 -- Create the trades table
 CREATE TABLE IF NOT EXISTS trades (
-    signature TEXT PRIMARY KEY,
-    mint TEXT,
-    tx_type TEXT,
-    token_amount NUMERIC,
-    sol_amount NUMERIC,
-    price NUMERIC,
-    bondingCurveKey TEXT,
-    vTokensInBondingCurve NUMERIC,
-    vSolInBondingCurve NUMERIC,
-    marketCapSol NUMERIC,
-    market_cap_calculated NUMERIC,
-    timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    signature TEXT PRIMARY KEY,         -- signature of the token event
+    mint TEXT,                          -- tokens mint address
+    tx_type TEXT,                       -- event type 'buy' or 'sell'
+    token_amount NUMERIC,               -- amount of tokens traded
+    sol_amount NUMERIC,                 -- amount of SOL traded
+    price NUMERIC,                      -- token price in SOL
+    bondingCurveKey TEXT,               -- BondingCurve key
+    vTokensInBondingCurve NUMERIC,      -- tokens in BondingCurve
+    vSolInBondingCurve NUMERIC,         -- amount of SOL in BondingCurve
+    marketCapSol NUMERIC,               -- market cap in SOL
+    sol_price_usd NUMERIC,              -- actual SOL price in USD at the time of the trade event
+    market_cap_calculated NUMERIC,      -- calculated market cap in USD
+    timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP    -- TIMESTAMP of the trade event
 );
 
 -- Backup table creation

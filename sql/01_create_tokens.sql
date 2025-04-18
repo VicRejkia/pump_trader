@@ -1,24 +1,25 @@
 -- Create the tokens table
 CREATE TABLE IF NOT EXISTS tokens (
-    mint TEXT PRIMARY KEY,
-    traderPublicKey TEXT,
-    initialBuy NUMERIC,
-    solAmount NUMERIC,
-    bondingCurveKey TEXT,
-    vTokensInBondingCurve NUMERIC,
-    vSolInBondingCurve NUMERIC,
-    marketCapSol NUMERIC,
-    name TEXT,
-    symbol TEXT,
-    uri TEXT,
-    website TEXT,
-    telegram TEXT,
-    twitter TEXT,
-    socials_score INTEGER,
-    socials_last_checked TIMESTAMP WITH TIME ZONE,
-    is_active BOOLEAN DEFAULT TRUE,
-    last_trade TIMESTAMP WITH TIME ZONE,
-    timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    mint TEXT PRIMARY KEY,          -- token mint
+    traderPublicKey TEXT,           -- token creator's wallet address
+    initialBuy NUMERIC,             -- initially buyed tokens
+    solAmount NUMERIC,              -- initially spent amount of SOL
+    bondingCurveKey TEXT,           -- bondingCurve key
+    vTokensInBondingCurve NUMERIC,  -- tokens in BondingCurve
+    vSolInBondingCurve NUMERIC,     -- SOL in BondingCurve
+    marketCapSol NUMERIC,           -- market cap in SOL
+    name TEXT,                      -- token name
+    symbol TEXT,                    -- token symbol
+    uri TEXT,                       -- META URL
+    website TEXT,                   -- website link, fetched from META URL
+    telegram TEXT,                  -- telegram link, fetched from META URL
+    twitter TEXT,                   -- twitter link, fetched from META URL
+    socials_score INTEGER,          -- calculated social score
+    socials_last_checked TIMESTAMP WITH TIME ZONE,  -- last try to fetch META URL
+    sol_price_usd NUMERIC,                          -- SOL price at token creation
+    is_active BOOLEAN DEFAULT TRUE,                 -- TRUE or FALLS for considering in check_buy_opportunities
+    last_trade TIMESTAMP WITH TIME ZONE,            -- TIMESTAMP of the last Trade event, updated when a new TRADE is fetched
+    timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP    -- creation TIMESTAMP
 );
 
 -- Backup table creation

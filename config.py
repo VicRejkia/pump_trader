@@ -27,13 +27,13 @@ DEFAULT_SELL_FEE = 0.001                    # Fee for selling in SOL
 DEFAULT_SELL_TIP = 0.001                    # Tip for selling in SOL
 
 # Trading thresholds
-DEFAULT_RUGCHECK_SCORE_THRESHOLD = 600      # No trading if Rugcheck score is above this threshold
-DEFAULT_SOCIAL_SCORE_THRESHOLD = 65         # No trading if Social score is above this threshold
+DEFAULT_RUGCHECK_SCORE_THRESHOLD = 600      # No trading if Rugcheck score is equal or above this threshold
+DEFAULT_SOCIAL_SCORE_THRESHOLD = 65         # No trading if Social score is equal or above this threshold
 DEFAULT_VOLUME_THRESHOLD = 7500             # Minimum volume threshold in USD
-MIN_MARKETCAP_THRESHOLD = 4000              # Minimum market cap threshold in USD to sell
+MIN_MARKETCAP_THRESHOLD = 4000              # Minimum market cap threshold in USD to make emergency sell
 DEFAULT_MARKETCAP_THRESHOLD = 10000         # Minimum market cap threshold in USD to search for buy opportunities
-MIN_VOLATILITY = 0.2                        # Minimum volatility threshold in %
-DEFAULT_TIME_INTERVALL = 10                 # Time interval for checking volatility, volume and marketcap in XX minutes
+MIN_VOLATILITY = 0.2                        # Minimum volatility threshold in % to search for buy opportunities
+DEFAULT_TIME_INTERVALL = 10                 # Time interval for checking volatility, volume and marketcap in minutes
 MAX_DRAWDOWN_SOL = 10                       # Maximum allowed 24h loss in SOL (not integrated)
 DRAWDOWN_CHECK_INTERVAL = 3600              # Drawdown check interval (seconds) (not integrated)
 
@@ -101,7 +101,7 @@ SOCIALS_PENALTY_WEBSITE_HTTP_ERROR = 35
 SOCIALS_PENALTY_WEBSITE_OTHER_ERROR = 35
 SOCIALS_PENALTY_NO_HTTPS = 10
 SOCIALS_PENALTY_WEBSITE_NO_MENTION = 10         # No mention of token name or symbol in website
-SOCIALS_PENALTY_COMMON_PLATFORM_WEBSITE = 25    # Common platforms like Youtube, TikTok, etc.
+SOCIALS_PENALTY_COMMON_PLATFORM_WEBSITE = 25    # Common platforms like Youtube, TikTok, etc. 'SOCIALS_DISALLOWED_WEBSITE_DOMAINS'
 SOCIALS_PENALTY_NO_TELEGRAM = 25
 SOCIALS_PENALTY_INVALID_TELEGRAM_TYPE = 25
 SOCIALS_PENALTY_INVALID_TELEGRAM_URL = 25
@@ -112,8 +112,8 @@ SOCIALS_PENALTY_DUPLICATE_LINKS = 15            # Duplicate links in metadata
 SOCIALS_PENALTY_ACTION_TRIGGER_URL = 15         # Action trigger URL in metadata
 
 # Bonuses (Negative = Better)
-SOCIALS_BONUS_DOMAIN_MATCH = -10
-SOCIALS_BONUS_NEWS_GOV_WEBSITE = 0              # No penalty/bonus currently applied for news/gov sites
+SOCIALS_BONUS_DOMAIN_MATCH = -10                # Bonus if domain mentions token name or symbol
+SOCIALS_BONUS_NEWS_GOV_WEBSITE = 0              # No penalty/bonus currently applied for news/gov sites in 'SOCIALS_ALLOWED_NEWS_DOMAINS'
 
 # Default Scores
 SOCIALS_SCORE_FAILED_METADATA = 100             # Score assigned if metadata fetch fails

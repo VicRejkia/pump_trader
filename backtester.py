@@ -1,9 +1,11 @@
+# FILE: backtester.py (Refactored)
+
 """
 Backtesting Engine Module
 
 Simulates trading strategies on historical data to evaluate performance.
 """
-
+import numpy as np
 import pandas as pd
 from datetime import datetime, timezone
 from logger import logger
@@ -12,8 +14,14 @@ from logger import logger
 # from state_manager import StateManager # Or simulate state management here
 # from config import ... # We'll use parameters dict instead of direct config import
 
-# --- Performance Metrics Calculation ---
 
+def calculate_volatility(prices, window=120):
+    """Calculate rolling volatility based on log returns over a window of 120 periods."""
+    price_ratio = prices / prices.shift(1)
+    log_returns = np.where(price_ratio <= 0, 0, np.log(price_ratio))
+    return log_returns.rolling(window=window).std() * np.sqrt(window)
+
+# --- Performance Metrics Calculation ---
 def calculate_performance_metrics(trade_history: list, initial_capital: float, final_capital: float) -> dict:
     """
     Calculates various performance metrics based on simulated trades.
@@ -32,7 +40,7 @@ def calculate_performance_metrics(trade_history: list, initial_capital: float, f
         - win_rate: Percentage of profitable trades.
         - avg_profit_per_trade: Average SOL profit on winning trades.
         - avg_loss_per_trade: Average SOL loss on losing trades.
-        - max_drawdown: Maximum peak-to-trough decline in portfolio value.
+        - max_drawdown: Maximum peak-to-trough decline in portfolio value (simplified).
         # - sharpe_ratio: (Requires risk-free rate and return series) - Optional
         # - sortino_ratio: (Requires risk-free rate and downside deviation) - Optional
     """
@@ -46,278 +54,241 @@ def calculate_performance_metrics(trade_history: list, initial_capital: float, f
         "win_rate": 0.0,
         "avg_profit_per_trade": 0.0,
         "avg_loss_per_trade": 0.0,
-        "max_drawdown": 0.0,
+        "max_drawdown": 0.0, # Placeholder for simplified drawdown
         # Add more metrics as needed
-    }
+    } 
 
     if not trade_history:
         metrics["total_pnl"] = final_capital - initial_capital
         return metrics # Return basic PnL if no trades occurred
 
     # --- Basic Metrics ---
-    metrics["total_trades"] = len([t for t in trade_history if t['type'] == 'sell']) # Count sell events as completed trades
+    metrics["total_trades"] = len([t for t in trade_history if t['type'] == 'sell']) # Count sell events as completed trades 
     sell_trades = [t for t in trade_history if t['type'] == 'sell' and 'pnl' in t]
 
-    for trade in sell_trades:
-        pnl = trade.get('pnl', 0.0)
-        if pnl > 0:
-            metrics["winning_trades"] += 1
-            metrics["total_profit"] += pnl
-        elif pnl < 0:
-            metrics["losing_trades"] += 1
-            metrics["total_loss"] += abs(pnl) # Loss is positive here
+    portfolio_value = initial_capital
+    peak_value = initial_capital
+    current_max_drawdown = 0.0
 
+    for trade in trade_history:
+        if trade['type'] == 'buy':
+            portfolio_value -= trade.get('amount_sol', 0) # Decrease value by investment
+        elif trade['type'] == 'sell':
+            portfolio_value += trade.get('amount_sol', 0) # Increase value by net SOL received
+            pnl = trade.get('pnl', 0.0)
+            if pnl > 0:
+                metrics["winning_trades"] += 1
+                metrics["total_profit"] += pnl
+            elif pnl < 0:
+                metrics["losing_trades"] += 1
+                metrics["total_loss"] += abs(pnl) # Loss is positive here 
+
+        # Simplified Drawdown Calculation (Equity Curve based on trades)
+        if portfolio_value > peak_value:
+            peak_value = portfolio_value
+        drawdown = (peak_value - portfolio_value) / peak_value if peak_value > 0 else 0
+        if drawdown > current_max_drawdown:
+            current_max_drawdown = drawdown
+
+    # --- Calculate derived metrics ---
     if metrics["total_trades"] > 0:
-        metrics["win_rate"] = (metrics["winning_trades"] / metrics["total_trades"]) * 100 if metrics["total_trades"] > 0 else 0.0
+        metrics["win_rate"] = (metrics["winning_trades"] / metrics["total_trades"]) * 100
+    else:
+         metrics["win_rate"] = 0.0
 
     if metrics["winning_trades"] > 0:
         metrics["avg_profit_per_trade"] = metrics["total_profit"] / metrics["winning_trades"]
+    else:
+        metrics["avg_profit_per_trade"] = 0.0
 
     if metrics["losing_trades"] > 0:
-        metrics["avg_loss_per_trade"] = metrics["total_loss"] / metrics["losing_trades"]
+        metrics["avg_loss_per_trade"] = metrics["total_loss"] / metrics["losing_trades"] 
+    else:
+         metrics["avg_loss_per_trade"] = 0.0
 
     metrics["total_pnl"] = final_capital - initial_capital # Based on final portfolio value
-
-    # --- Max Drawdown Calculation (Simplified Example) ---
-    # Requires tracking portfolio value over time. This is a placeholder.
-    # A more accurate calculation needs a time series of portfolio equity.
-    # For now, just using the final PnL relative to initial capital as a rough idea (not true drawdown).
-    peak_value = initial_capital
-    portfolio_value = initial_capital # Start with initial capital
-    max_drawdown = 0.0
-
-    # This needs a proper equity curve simulation within run_backtest
-    # Placeholder:
-    # for value in equity_curve: # equity_curve needs to be generated during simulation
-    #     if value > peak_value:
-    #         peak_value = value
-    #     drawdown = (peak_value - value) / peak_value
-    #     if drawdown > max_drawdown:
-    #         max_drawdown = drawdown
-    # metrics["max_drawdown"] = max_drawdown * 100 # As percentage
+    metrics["max_drawdown"] = current_max_drawdown * 100 # Store as percentage
 
     logger.debug(f"Calculated Metrics: {metrics}")
     return metrics
 
 
 # --- Backtesting Core Function ---
-
-async def run_backtest(parameters: dict, historical_data: pd.DataFrame, initial_capital: float) -> dict:
+async def run_backtest(parameters: dict, raw_trade_data: pd.DataFrame, initial_capital: float) -> dict:
     """
-    Runs a backtest simulation for a single token using the provided parameters
-    and historical data.
-
-    Args:
-        parameters: A dictionary containing the trading parameters to use for this run
-                    (e.g., {'SOL_TO_BUY': 0.1, 'INITIAL_STOP_LOSS_PERCENT': 20.0, ...}).
-        historical_data: A pandas DataFrame for a single token, indexed by timestamp,
-                         containing columns like 'price', 'volume', 'market_cap',
-                         'rugcheck_score', 'socials_score', 'token_creation_time'.
-        initial_capital: The starting capital in SOL for the simulation.
-
-    Returns:
-        A dictionary containing the performance metrics calculated by
-        calculate_performance_metrics().
+    Simulates real-time trading with 10-second intervals using 5-second candlestick summaries.
+    Includes volatility filtering and full trade logic.
     """
-    logger.info(f"Starting backtest for token (inferred from data) with parameters: {parameters}")
-    if historical_data.empty:
-        logger.warning("Historical data is empty. Cannot run backtest.")
-        # Return metrics indicating no activity and zero PnL from initial capital
+
+    if raw_trade_data.empty:
+        logger.warning("Historical trade data is empty.")
         return calculate_performance_metrics([], initial_capital, initial_capital)
 
-    # --- Simulation Setup ---
-    current_sol = initial_capital
-    current_tokens = 0.0
-    active_position = None # Stores info about the current buy position
-    trade_history = []
-    portfolio_value_over_time = [] # To track equity curve for drawdown
+    # Prepare data
+    df = raw_trade_data.copy()
+    df.index = pd.to_datetime(df.index)  # Ensure datetime index
+    df = df.sort_index()
 
-    # Extract parameters for easier access
+    # --- Resample to 5-second candles
+    candles = df.resample("5s").agg({
+        "price": "last",
+        "volume": "sum",
+        "market_cap_calculated": "last",
+        "rugcheck_score": "last",
+        "socials_score": "last"
+    }).dropna()
+
+    # --- Calculate volatility
+    price_ratio = candles["price"] / candles["price"].shift(1)
+    candles["log_return"] = np.where(price_ratio <= 0, 0, np.log(price_ratio))
+    candles["volatility"] = candles["log_return"].rolling(window=120).std() * np.sqrt(120)
+
+    # --- Extract Parameters
     sol_to_buy = parameters.get('SOL_TO_BUY', 0.1)
     initial_stop_loss_percent = parameters.get('INITIAL_STOP_LOSS_PERCENT', 50.0)
     first_sell_percent = parameters.get('FIRST_SELL_PERCENT', 75.0)
     trailing_stop_loss_percent = parameters.get('TRAILING_STOP_LOSS_PERCENT', 50.0)
     second_take_profit_percent = parameters.get('SECOND_TAKE_PROFIT_PERCENT', 300.0)
     first_sell_profit_margin = parameters.get('FIRST_SELL_PROFIT_MARGIN', 30.0)
-    # Add other parameters as needed (volume, marketcap thresholds etc.)
+
     volume_threshold = parameters.get('DEFAULT_VOLUME_THRESHOLD', 7500)
     marketcap_threshold = parameters.get('DEFAULT_MARKETCAP_THRESHOLD', 10000)
     rugcheck_threshold = parameters.get('DEFAULT_RUGCHECK_SCORE_THRESHOLD', 600)
     socials_threshold = parameters.get('DEFAULT_SOCIAL_SCORE_THRESHOLD', 65)
-    min_volatility = parameters.get('MIN_VOLATILITY', 0.2) # Need volatility calculation if used
-    # Fees (consider making these optimizable too?)
-    buy_fee_pct = 0.001 # Example fee
-    sell_fee_pct = 0.001 # Example fee
+    min_volatility = parameters.get('MIN_VOLATILITY', 0.2)
 
-    # --- Simulation Loop ---
-    # Iterate through the historical data, timestamp by timestamp
-    for timestamp, row in historical_data.iterrows():
-        current_price = row['price']
-        # Skip data points with invalid prices
-        if pd.isna(current_price) or current_price <= 0:
+    buy_fee_pct = 0.001
+    sell_fee_pct = 0.001
+
+    current_sol = initial_capital
+    current_tokens = 0.0
+    trade_history = []
+    active_position = None
+
+    # --- Simulate every 10s
+    logger.debug(f"Candles index type: {type(candles.index)}") # Debug log index type
+    if not candles.empty: # Check if candles is not empty before accessing index
+        sample_timestamp = candles.index[0] if not candles.empty else None # Get sample timestamp
+        logger.debug(f"Sample timestamp from candles index: {sample_timestamp}") # Debug log sample timestamp
+
+    for timestamp in candles.index[::2]:  # 2x5s = 10s interval
+        try:
+            row = candles.loc[timestamp]
+        except KeyError as e:
+            logger.error(f"KeyError accessing timestamp: {timestamp}, type: {type(timestamp)}, value: {timestamp}, in candles index: {e}")
+            continue
+        # row = candles.iloc[i] # Use integer index instead of timestamp
+
+        if (
+            row["volume"] < volume_threshold or
+            row["market_cap_calculated"] < marketcap_threshold or
+            row["rugcheck_score"] >= rugcheck_threshold or
+            row["socials_score"] >= socials_threshold or
+            row["volatility"] < min_volatility
+        ):
             continue
 
-        # Update portfolio value for drawdown calculation
-        current_portfolio_value = current_sol + (current_tokens * current_price * (1 - sell_fee_pct)) # Estimate value if sold now
-        portfolio_value_over_time.append({'timestamp': timestamp, 'value': current_portfolio_value})
+        price = row["price"]
 
-
-        # --- Sell Logic ---
+        # --- Sell logic
         if active_position:
-            highest_price_since_buy = max(active_position['highest_price'], current_price)
-            active_position['highest_price'] = highest_price_since_buy
+            hp = max(active_position['highest_price'], price)
+            active_position['highest_price'] = hp
             sell_reason = None
-            sell_price = current_price
-            tokens_to_sell = 0.0
+            tokens_to_sell = 0
 
-            # 1. Check Stop Loss (Initial or Trailing)
-            current_stop_loss_price = active_position['stop_loss_price']
-            if not active_position['first_tp_hit']: # Initial Stop Loss
-                if current_price <= current_stop_loss_price:
-                    sell_reason = "Initial Stop Loss Hit"
+            if price <= active_position['stop_loss_price']:
+                sell_reason = "Stop Loss"
+                tokens_to_sell = active_position['remaining_tokens']
+            elif active_position['first_tp_hit']:
+                trailing_sl = hp * (1 - trailing_stop_loss_percent / 100.0)
+                effective_sl = max(active_position['stop_loss_price'], trailing_sl)
+                if price <= effective_sl:
+                    sell_reason = "Trailing Stop Loss"
                     tokens_to_sell = active_position['remaining_tokens']
-            else: # Trailing Stop Loss (after TP1)
-                trailing_sl_price = highest_price_since_buy * (1 - trailing_stop_loss_percent / 100.0)
-                # Adjust SL upwards if trailing SL is higher than current SL (breakeven or previous trail)
-                active_position['stop_loss_price'] = max(current_stop_loss_price, trailing_sl_price)
-                if current_price <= active_position['stop_loss_price']:
-                    sell_reason = "Trailing Stop Loss Hit"
+                elif price >= active_position['second_tp_price']:
+                    sell_reason = "Second Take Profit"
                     tokens_to_sell = active_position['remaining_tokens']
-
-            # 2. Check Second Take Profit (if TP1 already hit)
-            if not sell_reason and active_position['first_tp_hit'] and current_price >= active_position['second_tp_price']:
-                 sell_reason = "Second Take Profit Hit"
-                 tokens_to_sell = active_position['remaining_tokens']
-
-            # 3. Check First Take Profit (if not hit yet)
-            if not sell_reason and not active_position['first_tp_hit'] and current_price >= active_position['initial_tp_price']:
-                sell_reason = "First Take Profit Hit"
+            elif price >= active_position['initial_tp_price']:
+                sell_reason = "First Take Profit"
                 tokens_to_sell = active_position['initial_tokens'] * (first_sell_percent / 100.0)
-                # Ensure we don't sell more than we have
+
+            if sell_reason and tokens_to_sell > 0:
                 tokens_to_sell = min(tokens_to_sell, active_position['remaining_tokens'])
-
-
-            # --- Execute Sell ---
-            if sell_reason:
-                sol_received = tokens_to_sell * sell_price
-                sell_fee = sol_received * sell_fee_pct
-                net_sol_received = sol_received - sell_fee
-                current_sol += net_sol_received
+                sol_received = tokens_to_sell * price * (1 - sell_fee_pct)
+                pnl = sol_received - (tokens_to_sell * (active_position['total_investment_sol'] / active_position['initial_tokens']))
+                current_sol += sol_received
                 current_tokens -= tokens_to_sell
-
-                # Calculate PnL for this specific sell portion
-                cost_basis_per_token = active_position['total_investment_sol'] / active_position['initial_tokens']
-                cost_of_sold_tokens = tokens_to_sell * cost_basis_per_token
-                pnl = net_sol_received - cost_of_sold_tokens
-
-                logger.debug(f"{timestamp}: SELL {tokens_to_sell:.4f} tokens at {sell_price:.6f} SOL. Reason: {sell_reason}. PnL: {pnl:.4f} SOL.")
-                trade_history.append({
-                    'timestamp': timestamp, 'type': 'sell', 'price': sell_price,
-                    'amount_sol': net_sol_received, 'amount_tokens': tokens_to_sell,
-                    'fee': sell_fee, 'reason': sell_reason, 'pnl': pnl
-                })
-
                 active_position['remaining_tokens'] -= tokens_to_sell
 
-                # Update position state after sell
-                if sell_reason == "First Take Profit Hit":
-                    active_position['first_tp_hit'] = True
-                    # Adjust SL to breakeven (buy price)
-                    active_position['stop_loss_price'] = active_position['buy_price']
-                    logger.debug(f"{timestamp}: First TP hit. Stop loss adjusted to breakeven: {active_position['stop_loss_price']:.6f} SOL.")
-
-                # If all tokens sold, close position
-                if active_position['remaining_tokens'] < 1e-9: # Use tolerance for float comparison
-                    logger.debug(f"{timestamp}: Position closed.")
-                    active_position = None
-
-
-        # --- Buy Logic ---
-        if not active_position and current_sol >= sol_to_buy: # Check if we have enough SOL
-            # Check conditions (Volume, Market Cap, Rugcheck, Socials, etc.)
-            # Note: Historical data needs to have these values available at each timestamp.
-            # The provided DataFrame structure assumes this.
-            # We might need to calculate volume/volatility over a rolling window if not pre-calculated.
-            current_volume = row.get('volume', 0) # Need volume calculation/data
-            current_market_cap = row.get('market_cap', 0)
-            current_rugcheck = row.get('rugcheck_score', 10000)
-            current_socials = row.get('socials_score', 100)
-            # current_volatility = row.get('volatility', 0) # Need volatility calculation/data
-
-            passes_volume = True # Assume true if no volume data
-            passes_marketcap = current_market_cap >= marketcap_threshold
-            passes_rugcheck = current_rugcheck < rugcheck_threshold
-            passes_socials = current_socials < socials_threshold
-            # passes_volatility = current_volatility >= min_volatility
-
-            # TODO: Add more sophisticated checks (e.g., rate of change, indicators) if needed.
-
-            if passes_marketcap and passes_rugcheck and passes_socials: # Add other conditions
-                # --- Execute Buy ---
-                buy_amount_sol = min(sol_to_buy, current_sol) # Don't spend more than available
-                buy_fee = buy_amount_sol * buy_fee_pct
-                sol_for_tokens = buy_amount_sol - buy_fee
-                tokens_bought = sol_for_tokens / current_price
-                total_investment = buy_amount_sol # Including fee
-
-                current_sol -= total_investment
-                current_tokens += tokens_bought
-
-                # Calculate initial SL and TP prices
-                initial_sl_price = current_price * (1 - initial_stop_loss_percent / 100.0)
-                # Calculate TP1 based on profit margin on *investment*
-                required_sol_at_tp1 = total_investment * (1 + first_sell_profit_margin / 100.0)
-                # Estimate tokens to sell at TP1
-                tokens_to_sell_at_tp1 = tokens_bought * (first_sell_percent / 100.0)
-                # Calculate price needed to achieve the required SOL from selling that portion (ignoring sell fee for simplicity here, or add it)
-                initial_tp1_price = required_sol_at_tp1 / tokens_to_sell_at_tp1 if tokens_to_sell_at_tp1 > 0 else float('inf')
-
-                second_tp_price = current_price * (1 + second_take_profit_percent / 100.0)
-
-
-                active_position = {
-                    'buy_timestamp': timestamp,
-                    'buy_price': current_price,
-                    'initial_tokens': tokens_bought,
-                    'remaining_tokens': tokens_bought,
-                    'total_investment_sol': total_investment,
-                    'stop_loss_price': initial_sl_price,
-                    'initial_tp_price': initial_tp1_price,
-                    'second_tp_price': second_tp_price,
-                    'highest_price': current_price,
-                    'first_tp_hit': False,
-                }
-
-                logger.debug(f"{timestamp}: BUY {tokens_bought:.4f} tokens at {current_price:.6f} SOL. Invested: {total_investment:.4f} SOL. SL: {initial_sl_price:.6f}, TP1: {initial_tp1_price:.6f}, TP2: {second_tp_price:.6f}")
                 trade_history.append({
-                    'timestamp': timestamp, 'type': 'buy', 'price': current_price,
-                    'amount_sol': total_investment, 'amount_tokens': tokens_bought,
-                    'fee': buy_fee
+                    'timestamp': timestamp,
+                    'type': 'sell',
+                    'price': price,
+                    'amount_sol': sol_received,
+                    'amount_tokens': tokens_to_sell,
+                    'fee': sol_received * sell_fee_pct,
+                    'reason': sell_reason,
+                    'pnl': pnl
                 })
 
+                if sell_reason == "First Take Profit":
+                    active_position['first_tp_hit'] = True
+                    active_position['stop_loss_price'] = active_position['buy_price']
 
-    # --- End of Simulation ---
-    # Calculate final portfolio value (remaining SOL + value of remaining tokens)
-    final_portfolio_value = current_sol
-    if active_position and active_position['remaining_tokens'] > 0:
-        # Use the last known price to value remaining tokens
-        last_price = historical_data['price'].iloc[-1]
-        if pd.notna(last_price) and last_price > 0:
-             final_portfolio_value += active_position['remaining_tokens'] * last_price * (1 - sell_fee_pct) # Assume sold at last price
-        else:
-            logger.warning("Could not value remaining tokens at end of backtest due to invalid last price.")
+                if active_position['remaining_tokens'] < 1e-9:
+                    active_position = None
 
+        # --- Buy logic
+        if not active_position and current_sol >= sol_to_buy:
+            buy_fee = sol_to_buy * buy_fee_pct
+            tokens_bought = sol_to_buy / price
+            total_investment = sol_to_buy + buy_fee
 
-    logger.info(f"Backtest finished. Initial SOL: {initial_capital:.4f}, Final SOL: {current_sol:.4f}, Remaining Tokens: {current_tokens:.4f}, Final Portfolio Value: {final_portfolio_value:.4f}")
+            tp1_profit_margin = first_sell_profit_margin / 100.0
+            sell_percent_tp1 = first_sell_percent / 100.0
+            target_net_return = total_investment * (1 + tp1_profit_margin)
+            gross_needed = target_net_return  # ignoring sell fees for now
+            tokens_to_sell_tp1 = tokens_bought * sell_percent_tp1
+            tp1_price = gross_needed / tokens_to_sell_tp1 if tokens_to_sell_tp1 > 0 else float('inf')
+            tp2_price = price * (1 + second_take_profit_percent / 100.0)
+            stop_loss_price = price * (1 - initial_stop_loss_percent / 100.0)
 
-    # --- Calculate Performance Metrics ---
-    # Pass the proper equity curve to the calculator if implemented
-    metrics = calculate_performance_metrics(trade_history, initial_capital, final_portfolio_value)
+            current_sol -= total_investment
+            current_tokens += tokens_bought
 
-    # Add parameters used to the results for easy tracking
-    metrics['parameters'] = parameters
-    metrics['initial_capital'] = initial_capital
-    metrics['final_portfolio_value'] = final_portfolio_value
+            active_position = {
+                'buy_price': price,
+                'initial_tokens': tokens_bought,
+                'remaining_tokens': tokens_bought,
+                'total_investment_sol': total_investment,
+                'stop_loss_price': stop_loss_price,
+                'initial_tp_price': tp1_price,
+                'second_tp_price': tp2_price,
+                'highest_price': price,
+                'first_tp_hit': False
+            }
+
+            trade_history.append({
+                'timestamp': timestamp,
+                'type': 'buy',
+                'price': price,
+                'amount_sol': total_investment,
+                'amount_tokens': tokens_bought,
+                'fee': buy_fee
+            })
+
+    # --- Final Value
+    final_value = current_sol
+    if active_position:
+        final_value += active_position['remaining_tokens'] * candles.iloc[-1]["price"] * (1 - sell_fee_pct)
+
+    metrics = calculate_performance_metrics(trade_history, initial_capital, final_value)
+    metrics.update({
+        "parameters": parameters,
+        "initial_capital": initial_capital,
+        "final_portfolio_value": final_value
+    })
 
     return metrics
 
@@ -326,36 +297,48 @@ async def main_test():
     # This is a placeholder for testing the backtester module directly.
     # You would need to:
     # 1. Connect to DB (or load data from file)
-    # 2. Get historical data for a test token and date range
+    # 2. Get historical data for a test token and date range using the updated DB handler
     # 3. Define test parameters
     # 4. Run the backtest
-    # 5. Print the results
+    # 5. Print the results 
 
     from database_handler import DatabaseClient # Assuming relative import works
-    from ga_config import OPTIMIZABLE_PARAMETERS, BACKTEST_INITIAL_CAPITAL
+    from ga_config import OPTIMIZABLE_PARAMETERS, BACKTEST_INITIAL_CAPITAL, HISTORICAL_DATA_START_TS, HISTORICAL_DATA_END_TS
     import random
+    from logger import setup_logging
 
-    # --- Dummy Data Generation (Replace with actual DB call) ---
-    # Create a sample DataFrame
-    dates = pd.date_range(start='2024-01-01', periods=1000, freq='1min', tz='UTC')
-    prices = 10 + pd.Series(range(1000)).apply(lambda x: random.uniform(-0.1, 0.1)).cumsum()
-    prices = prices.clip(lower=0.01) # Ensure price doesn't go below zero
-    data = pd.DataFrame({
-        'price': prices,
-        'volume': [random.uniform(100, 5000) for _ in range(1000)],
-        'market_cap': [random.uniform(5000, 20000) for _ in range(1000)],
-        'rugcheck_score': [random.randint(0, 800) for _ in range(1000)],
-        'socials_score': [random.randint(20, 90) for _ in range(1000)],
-        'token_creation_time': dates[0] # Dummy creation time
-    }, index=dates)
-    test_historical_data = data
-    # --- End Dummy Data ---
+    setup_logging()
+    db_client = DatabaseClient()
+    await db_client.connect()
+
+    # --- Get Real Data (Example for one token) ---
+    # Replace 'YOUR_TEST_MINT' with an actual mint address that has data in your DB
+    test_mint = "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm" # Example SOL faucet token, replace!
+    start_dt = HISTORICAL_DATA_START_TS
+    end_dt = HISTORICAL_DATA_END_TS
+
+    logger.info(f"⏱ Backtest time window: {start_dt.isoformat()} to {end_dt.isoformat()}")
+    logger.info(f"Fetching test data for mint {test_mint} from {start_dt} to {end_dt}")
+    hist_data_dict = await db_client.get_historical_data_for_backtesting([test_mint], start_dt, end_dt)
+
+    if not hist_data_dict or test_mint not in hist_data_dict:
+        logger.error(f"Could not fetch historical data for test mint {test_mint}. Exiting test.")
+        await db_client.close()
+        return
+
+    test_historical_data = hist_data_dict[test_mint]
+    logger.info(f"Fetched {len(test_historical_data)} data points for {test_mint}.")
+    logger.debug(f"Test Data Head:\n{test_historical_data.head()}")
+    logger.debug(f"Test Data Tail:\n{test_historical_data.tail()}")
+    logger.debug(f"Test Data Columns: {test_historical_data.columns}")
+    # --- End Real Data Fetch ---
 
 
     # --- Test Parameters ---
     test_params = {p['name']: random.uniform(p['low'], p['high']) if p['type'] == float else random.randint(p['low'], p['high'])
                    for p in OPTIMIZABLE_PARAMETERS}
-    test_params['SOL_TO_BUY'] = 0.5 # Override for testing
+    test_params['SOL_TO_BUY'] = 0.5 # Override for testing 
+    test_params['DEFAULT_MARKETCAP_THRESHOLD'] = 5000 # Example override for USD market cap
 
     logger.info("--- Running Backtester Test ---")
     logger.info(f"Test Parameters: {test_params}")
@@ -366,6 +349,8 @@ async def main_test():
     logger.info("--- Backtester Test Results ---")
     import pprint
     pprint.pprint(results)
+
+    await db_client.close()
 
 if __name__ == "__main__":
     import asyncio

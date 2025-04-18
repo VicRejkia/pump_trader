@@ -150,12 +150,13 @@ class TradingManager:
                         trailing_sl_price = 0 # Default
                         if first_tp_hit:
                             # Calculate trailing SL based on highest price since the buy
+                            # Formula: trailing_sl_price = highest_price * (1 - TRAILING_STOP_LOSS_PERCENT/100)
+                            # Example: 0.0000002 * (1 - 50/100) = 0.0000001
                             trailing_sl_price = highest_price * (1 - self.config['TRAILING_STOP_LOSS_PERCENT'] / 100.0)
                             # Note: The active SL is either the initial SL, breakeven (buy_price), or potentially this trailing_sl_price
                             # depending on the exact logic chosen after first TP hit.
                             # For now, we assume SL moves to buy_price after first TP, and trailing SL is checked separately.
 
-                        # --- Check Sell Conditions ---
                         # --- Check Sell Conditions (Order Matters!) ---
                         sell_reason = None
                         sell_all = False
@@ -163,6 +164,8 @@ class TradingManager:
                         sell_percentage = 0.0
 
                         # 1. Initial Stop Loss / Breakeven Stop Loss
+                        # Formula: active_stop_loss_price = buy_price * (1 - INITIAL_STOP_LOSS_PERCENT/100)
+                        # Example: 0.000000125 * 0.5 = 0.0000000625
                         if current_price <= active_stop_loss_price:
                             sell_reason = "Stop Loss" if not first_tp_hit else "Breakeven SL"
                             sell_all = True
@@ -170,6 +173,8 @@ class TradingManager:
                             logger.info(f"🛑 {sell_reason} hit for {mint} (ID: {pos_id}) at price {current_price:.9f} (SL: {active_stop_loss_price:.9f})")
 
                         # 2. Second Take Profit (Sell Remaining)
+                        # Formula: second_tp_price = buy_price * (1 + SECOND_TAKE_PROFIT_PERCENT/100)
+                        # Example: 0.000000125 * 4 = 0.0000005
                         elif current_price >= second_tp_price:
                              # Check if first TP was hit is implicit, as remaining_tokens would be < initial_tokens
                              # Sell remaining regardless of whether first TP was hit or not if price reaches this high
@@ -179,6 +184,8 @@ class TradingManager:
                             logger.info(f"🚀 Second TP hit for {mint} (ID: {pos_id}) at price {current_price:.9f} (Threshold: {second_tp_price:.9f})")
 
                         # 3. First Take Profit (Partial Sell, only if not hit before)
+                        # Formula: initial_tp_price = (total_investment * (1 + profit_margin)) / initial_tokens
+                        # Example: (0.2 * 1.3) / 1,600,000 = 0.0000001625
                         elif not first_tp_hit and current_price >= initial_tp_price:
                             sell_reason = "First TP"
                             sell_partial = True
@@ -187,6 +194,8 @@ class TradingManager:
                             logger.info(f"🎯 First TP hit for {mint} (ID: {pos_id}) at price {current_price:.9f} (Threshold: {initial_tp_price:.9f}). Selling {sell_percentage*100}%.")
 
                         # 4. Trailing Stop Loss (Only active *after* First TP is hit)
+                        # Formula: trailing_sl_price = highest_price * (1 - TRAILING_STOP_LOSS_PERCENT/100)
+                        # Example: 0.0000002 * 0.5 = 0.0000001
                         elif first_tp_hit and current_price <= trailing_sl_price:
                             sell_reason = "Trailing SL"
                             sell_all = True
@@ -194,6 +203,8 @@ class TradingManager:
                             logger.info(f"📉 Trailing SL hit for {mint} (ID: {pos_id}) at price {current_price:.9f} (Trailing SL: {trailing_sl_price:.9f}, Highest: {highest_price:.9f})")
 
                         # 5. Emergency Stop Loss (if applicable)
+                        # Formula: market_cap_usd = current_market_cap * sol_price
+                        # Example: 30 * 130 = 3,900 < 4,000
                         elif (current_market_cap*sol_price) < self.config['MIN_MARKET_CAP']:
                             sell_reason = "Emergency SL"
                             sell_all = True
@@ -291,7 +302,9 @@ class TradingManager:
                 logger.warning(f"⚠ Invalid token amounts for position ID {position_id_to_update} ({mint}). Remaining: {remaining_tokens}, Initial: {initial_tokens}")
                 return None # Indicate nothing was sold
 
-            # Determine amount to sell based on the reason
+            # Determine amount to sell based on the reason    
+            # Formula: tokens_to_sell = initial_tokens * sell_percentage (First TP)
+            # Example: 1,600,000 * 0.75 = 1,200,000 tokens
             if reason == "First TP":
                 # Sell a percentage of the *initial* amount for First TP
                 tokens_to_sell = initial_tokens * sell_percentage
@@ -305,13 +318,23 @@ class TradingManager:
                  logger.info(f"ℹ Sell amount for {mint} (ID: {position_id_to_update}, Reason: {reason}) is negligible ({tokens_to_sell:.12f}). Skipping sell execution.")
                  return None # Return None as nothing was effectively sold
 
+            # Get SOL price for logging
+            sol_price = await self.state.get_sol_price()
 
-            # Calculate financials
+            # -- Calculate financials --
+            # --- Gross SOL Calculation ---
+            # Formula: gross_sol_received = tokens_to_sell * current_price
+            # Example: 1,200,000 * 0.000000162 = 0.1944 SOL
             gross_sol_received = tokens_to_sell * current_price
+           
             # Use the full configured sell fee and tip for every sell transaction
             # Convert config Decimals to float if they aren't already
             sell_fee = float(self.config['DEFAULT_SELL_FEE'])
             sell_tip = float(self.config['DEFAULT_SELL_TIP'])
+            
+            # --- Net SOL Calculation ---
+            # Formula: net_sol_received = gross_sol_received - sell_fee - sell_tip
+            # Example: 0.1944 - 0.001 - 0.001 = 0.1924 SOL
             net_sol_received = gross_sol_received - sell_fee - sell_tip
 
             # Calculate cost basis for the sold portion based on the total initial investment
@@ -319,8 +342,15 @@ class TradingManager:
             if initial_tokens <= 0: # Avoid division by zero
                  logger.error(f"Cannot calculate cost basis for {mint} (ID: {position_id_to_update}) due to zero initial tokens.")
                  return None # Or handle error appropriately
+            
+            # --- Cost Basis Calculation ---
+            # Formula: cost_basis = total_investment_sol * (tokens_to_sell / initial_tokens)
+            # Example: (0.2 SOL) * (1,200,000 / 1,600,000) = 0.2 * 0.75 = 0.15 SOL
             cost_basis = total_investment_sol * (tokens_to_sell / initial_tokens)
 
+            # --- Profit Calculation ---
+            # Formula: profit = net_sol_received - cost_basis
+            # Example: 0.1924 - 0.15 = 0.0424 SOL profit
             profit = net_sol_received - cost_basis
 
             # Update portfolio: Reduce remaining tokens and potentially close the original buy entry
@@ -347,7 +377,7 @@ class TradingManager:
             # Insert sell transaction record using the new DatabaseClient method, including settings
             await self.db.insert_portfolio_sell_record(
                 mint=mint, current_price=current_price, market_cap_sol=market_cap_sol,
-                net_sol_received=net_sol_received, tokens_sold=tokens_to_sell,
+                net_sol_received=net_sol_received, sol_price_usd=sol_price, tokens_sold=tokens_to_sell,
                 sell_fee=sell_fee, sell_tip=sell_tip, profit=profit, reason=reason,
                 timestamp=datetime.now(timezone.utc), settings=sell_settings, conn=conn
             )
@@ -356,8 +386,6 @@ class TradingManager:
             token_name_row = await self.db.get_token_name(mint, conn)
             token_name = token_name_row['name'] if token_name_row else mint # Fallback to mint if name not found
 
-            # Get SOL price for logging
-            sol_price = await self.state.get_sol_price()
 
             # Use the new formatted log message
             logger.info(format_sell_order_log(
@@ -406,7 +434,7 @@ class TradingManager:
                         # This check might be redundant if check_trading_opportunities already filters, but good safety measure
                         logger.warning(f"⚠ Attempted to buy {mint}, but it's already active in portfolio. Skipping.")
                         return
-
+                    sol_price = await self.state.get_sol_price() # Fetch SOL price for logging
                     sol_base_amount = self.config['SOL_TO_BUY'] # Base amount intended for token purchase
                     buy_fee = self.config['DEFAULT_BUY_FEE']
                     buy_tip = self.config['DEFAULT_BUY_TIP']
@@ -423,9 +451,14 @@ class TradingManager:
                         return
 
                     tokens_bought = sol_for_tokens / current_price
+
+                    # --- Initial Stop Loss Calculation ---
                     # Calculate initial SL based on config percentage
+                    # Formula: initial_stop_loss_price = buy_price * (1 - INITIAL_STOP_LOSS_PERCENT/100)
+                    # Example: 0.000000125 * 0.5 = 0.0000000625
                     initial_stop_loss_price = current_price * (1 - self.config['INITIAL_STOP_LOSS_PERCENT'] / 100.0)
 
+                    
                     # --- Calculate First TP Price based on covering costs and margin (Net Income approach) ---
                     # Ensure config values are floats for calculation
                     sell_fee_tp1 = float(self.config['DEFAULT_SELL_FEE'])
@@ -433,16 +466,26 @@ class TradingManager:
                     profit_margin_tp1 = float(self.config['FIRST_SELL_PROFIT_MARGIN']) / 100.0
                     sell_percent_tp1 = float(self.config['FIRST_SELL_PERCENT']) / 100.0
 
+                    # --- First TP Price Calculation (Net Income Approach) ---
                     # Calculate the total cost base including initial investment and the TP1 sell costs
+                    # Formula: total_cost_base_tp1 = sol_to_buy + buy_fee + buy_tip + sell_fee + sell_tip
+                    # Example: total_cost_base = 0.2 + 0.001 + 0.001 + 0.001 + 0.001 = 0.204
                     total_cost_base_tp1 = total_sol_investment + sell_fee_tp1 + sell_tip_tp1
 
                     # Calculate the target NET SOL return (cost base + profit margin on cost base)
+                    # Formula: target_net_sol_return_tp1 = total_cost_base_tp1 * (1 + profit_margin)
+                    # Example: target_net_return = 0.204 * 1.3 = 0.2652
                     target_net_sol_return_tp1 = total_cost_base_tp1 * (1 + profit_margin_tp1)
 
                     # Calculate the target GROSS SOL needed from the sale to achieve the target NET return
-                    # Gross = Net + Fees + Tip for *this* specific TP1 sale
+                    # Note: This is the total gross SOL needed from the sale to achieve the target NET return
+                    # This includes the sell fee and tip for the first TP sale
+                    # Formula: target_gross_sol_return_tp1 = target_net_return + sell_fee + sell_tip
+                    # Example: target_gross_sol_return = 0.2652 + 0.001 + 0.001 = 0.2672
                     target_gross_sol_return_tp1 = target_net_sol_return_tp1 + sell_fee_tp1 + sell_tip_tp1
 
+                    # Calculate the number of tokens to sell at TP1 based on the target GROSS return and the percentage to sell
+                    # Example: tokens_to_sell_tp1 = 1,600,000 * 0.75 = 1,200,000
                     tokens_to_sell_tp1 = tokens_bought * sell_percent_tp1
 
                     if tokens_to_sell_tp1 <= 1e-9: # Avoid division by zero
@@ -450,8 +493,13 @@ class TradingManager:
                          return # Skip buy
 
                     # Calculate the required price per token to achieve the target GROSS return by selling the specified percentage of tokens
+                    # Formula: initial_tp_price = target_gross_return / (tokens_bought * sell_percent)
+                    # Example: initial_tp_price = 0.2672 / 1,200,000 ≈ 0.0000002227
                     initial_tp_price = target_gross_sol_return_tp1 / tokens_to_sell_tp1
-                    # --- Calculate Second TP Price ---
+                    
+                    # --- Second TP Price Calculation ---
+                    # Formula: second_tp_price = buy_price * (1 + SECOND_TAKE_PROFIT_PERCENT/100)
+                    # Example: 0.000000125 * 4 = 0.0000005
                     second_tp_price = current_price * (1 + self.config['SECOND_TAKE_PROFIT_PERCENT'] / 100.0)
 
                     # --- Prepare Settings for Buy Record ---
@@ -483,7 +531,7 @@ class TradingManager:
                     # Insert buy record using the new DatabaseClient method, including settings
                     await self.db.insert_portfolio_buy_record(
                         mint=mint, current_price=current_price, market_cap_sol=market_cap_sol,
-                        sol_base_amount=sol_base_amount, total_sol_investment=total_sol_investment,
+                        sol_base_amount=sol_base_amount, sol_price_usd=sol_price, total_sol_investment=total_sol_investment,
                         tokens_bought=tokens_bought, buy_fee=buy_fee, buy_tip=buy_tip,
                         initial_stop_loss_price=initial_stop_loss_price,
                         initial_tp_price=initial_tp_price, second_tp_price=second_tp_price,
@@ -492,10 +540,12 @@ class TradingManager:
 
                     # Log only if insert happened (check affected rows?) - fetchval might be better
                     # For simulation, we assume insert worked if no exception
-                    sol_price = await self.state.get_sol_price() # Fetch SOL price for logging
+                    token_name_row = await self.db.get_token_name(mint, conn) # Fetch token name for logging
+                    token_name = token_name_row['name'] if token_name_row else mint
                     # Update log format if needed to show total_sol_investment
                     logger.info(format_buy_order_log(
                         self.state,
+                        name=token_name,
                         mint=mint,
                         price_per_token=current_price,
                         tokens_bought=tokens_bought,
