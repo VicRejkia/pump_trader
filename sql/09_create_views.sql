@@ -6,13 +6,13 @@ CREATE OR REPLACE VIEW v_tokens AS
 SELECT
     mint, traderPublicKey, initialBuy, solAmount, bondingCurveKey, vTokensInBondingCurve,
     vSolInBondingCurve, marketCapSol, name, symbol, uri, website, telegram, twitter,
-    socials_score, socials_last_checked, is_active, last_trade, timestamp
+    socials_score, socials_last_checked, sol_price_usd, is_active, last_trade, timestamp
 FROM tokens
 UNION ALL
 SELECT
     mint, traderPublicKey, initialBuy, solAmount, bondingCurveKey, vTokensInBondingCurve,
     vSolInBondingCurve, marketCapSol, name, symbol, uri, website, telegram, twitter,
-    socials_score, socials_last_checked, FALSE AS is_active, last_trade, timestamp -- Treat backed up as inactive
+    socials_score, socials_last_checked, sol_price_usd, FALSE AS is_active, last_trade, timestamp -- Treat backed up as inactive
 FROM tokens_backup tb
 WHERE NOT EXISTS (SELECT 1 FROM tokens t WHERE t.mint = tb.mint);
 
@@ -20,12 +20,12 @@ WHERE NOT EXISTS (SELECT 1 FROM tokens t WHERE t.mint = tb.mint);
 CREATE OR REPLACE VIEW v_trades AS
 SELECT
     signature, mint, tx_type, token_amount, sol_amount, price, bondingCurveKey,
-    vTokensInBondingCurve, vSolInBondingCurve, marketCapSol, market_cap_calculated, timestamp
+    vTokensInBondingCurve, vSolInBondingCurve, marketCapSol, sol_price_usd, market_cap_calculated, timestamp
 FROM trades
 UNION ALL
 SELECT
     signature, mint, tx_type, token_amount, sol_amount, price, bondingCurveKey,
-    vTokensInBondingCurve, vSolInBondingCurve, marketCapSol, market_cap_calculated, timestamp
+    vTokensInBondingCurve, vSolInBondingCurve, marketCapSol, sol_price_usd, market_cap_calculated, timestamp
 FROM trades_backup;
 
 -- View for combined rugcheck and rugcheck_backup

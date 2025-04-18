@@ -65,6 +65,8 @@ async def trade_worker():
             for data in batch:
                 mint = data.get('mint')
                 signature = data.get('signature')
+                sol_price = await state.get_sol_price() # Get current SOL price
+                sol_price = Decimal(sol_price)
 
                 if not mint or not signature:
                     logger.warning(f"Skipping trade with missing mint or signature: {data}")
@@ -83,16 +85,21 @@ async def trade_worker():
                     v_tokens = Decimal(str(data.get('vTokensInBondingCurve', 0)))
                     v_sol = Decimal(str(data.get('vSolInBondingCurve', 0)))
                     market_cap_sol = Decimal(str(data.get('marketCapSol', 0)))
+                    t_supply = Decimal(str(data.get('totalSupply', TOTAL_SUPPLY))) # Use TOTAL_SUPPLY from config
 
                     # Calculate price safely
                     price = (sol_amount / token_amount) if token_amount else Decimal(0)
 
                     # Calculate market cap
-                    market_cap_calculated = calculate_market_cap(
-                        v_tokens,
-                        v_sol,
-                        Decimal(str(data.get('totalSupply', TOTAL_SUPPLY))) # Use TOTAL_SUPPLY from config
-                    )
+                    if v_tokens <= 0 or t_supply <= 0:
+                        market_cap_calculated = market_cap_sol * sol_price
+                    else:
+                        market_cap_calculated = calculate_market_cap(
+                            v_tokens,
+                            v_sol,
+                            t_supply,
+                            sol_price
+                        )
 
                     trade_params.append((
                         signature,
@@ -105,6 +112,7 @@ async def trade_worker():
                         v_tokens,
                         v_sol,
                         market_cap_sol,
+                        sol_price,
                         market_cap_calculated,
                         datetime.now(timezone.utc) # Use current UTC time for timestamp
                     ))

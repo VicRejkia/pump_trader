@@ -4,6 +4,7 @@ Configuration for the Genetic Algorithm (GA) optimizer.
 This file defines the parameters to be optimized by the GA,
 their respective ranges (boundaries), and other GA settings.
 """
+from datetime import datetime, timezone
 
 # --- Parameters to Optimize ---
 # Define the parameters from config.py that the GA will tune.
@@ -11,74 +12,62 @@ their respective ranges (boundaries), and other GA settings.
 OPTIMIZABLE_PARAMETERS = [
     {
         "name": "SOL_TO_BUY",
-        "low": 0.1,
-        "high": 1.0,
+        "values": [round(x * 0.1, 1) for x in range(1, 11)],  # 0.1 to 1.0 in steps of 0.1
         "type": float
     },
     {
         "name": "INITIAL_STOP_LOSS_PERCENT",
-        "low": 20.0,
-        "high": 95.0,
+        "values": list(range(10, 101, 5)),  # 10% to 100%
         "type": float
     },
     {
         "name": "FIRST_SELL_PERCENT",
-        "low": 25.0,
-        "high": 100.0,
+        "values": list(range(25, 101, 5)),  # 25% to 100%
         "type": float
     },
     {
         "name": "TRAILING_STOP_LOSS_PERCENT",
-        "low": 5.0,
-        "high": 100.0,
+        "values": list(range(10, 101, 5)),  # 10% to 100%
         "type": float
     },
     {
         "name": "SECOND_TAKE_PROFIT_PERCENT",
-        "low": 100.0,
-        "high": 1000.0,
+        "values": list(range(50, 1001, 50)),  # 50% to 1000%
         "type": float
     },
     {
         "name": "FIRST_SELL_PROFIT_MARGIN",
-        "low": 5.0,
-        "high": 100.0,
+        "values": list(range(10, 201, 5)),  # 10% to 200%
         "type": float
     },
     {
         "name": "DEFAULT_VOLUME_THRESHOLD",
-        "low": 4000,
-        "high": 50000,
+        "values": list(range(4000, 50001, 2500)),  # 1k to 50k
         "type": int # Assuming volume is treated as integer USD
     },
     {
         "name": "DEFAULT_MARKETCAP_THRESHOLD", # For buying
-        "low": 1000,
-        "high": 50000,
+        "values": list(range(1000, 50001, 2500)),  # 1k to 50k
         "type": int # Assuming market cap is treated as integer USD
     },
     {
         "name": "MIN_VOLATILITY",
-        "low": 0.1,
-        "high": 5.0,
+        "values": [round(x * 0.05, 2) for x in range(1, 11)],  # 0.05 to 0.5
         "type": float
     },
     {
         "name": "DEFAULT_RUGCHECK_SCORE_THRESHOLD",
-        "low": 1,
-        "high": 1000,
+        "values": list(range(1, 1001, 50)),  # Lower = safer
         "type": int
     },
     {
         "name": "DEFAULT_SOCIAL_SCORE_THRESHOLD",
-        "low": 30,
-        "high": 90,
+        "values": list(range(0, 101, 10)),  # 0 to 100
         "type": int
     },
     {
         "name": "DEFAULT_TIME_INTERVALL", # In minutes
-        "low": 1,
-        "high": 60,
+        "values": list(range(1, 61, 10)),  # 1 to 60 minutes
         "type": int
     },
     # Add more parameters here if needed
@@ -108,9 +97,8 @@ DATA_SPLIT = {
 }
 
 # Define the overall date range for historical data to be used
-# Example: "YYYY-MM-DD" (These should be set based on available data)
-HISTORICAL_DATA_START_DATE = "2025-04-09"
-HISTORICAL_DATA_END_DATE = "2025-04-15"
+HISTORICAL_DATA_START_TS = datetime(2025, 4, 17, 17, 0, 0, tzinfo=timezone.utc)  # <-- adjust here
+HISTORICAL_DATA_END_TS   = datetime(2025, 4, 17, 20, 0, 0, tzinfo=timezone.utc)
 
 # --- Backtester Settings ---
 # Initial capital for backtesting simulations (can be different from live)
