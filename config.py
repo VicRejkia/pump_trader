@@ -7,18 +7,18 @@ from datetime import timedelta
 """ Configuration constants and settings for the trading bot. """
 
 # Trading configuration
-SOL_TO_BUY = 0.2                            # Amount of SOL to spend on each buy
-INITIAL_SOL_BALANCE = 10.0                  # Starting SOL balance for PnL tracking
+SOL_TO_BUY = 0.9                            # Amount of SOL to spend on each buy
+INITIAL_SOL_BALANCE = 100.0                  # Starting SOL balance for PnL tracking
 PLAY_BUY_SOUND = True                      # Play the buy sound when a buy is made
 PLAY_SELL_SOUND = True                     # Play the sell sound when a sell is made
 
 # --- New Multi-Stage Sell Logic Configuration ---
-INITIAL_STOP_LOSS_PERCENT = 50.0            # Initial SL as % below buy price (e.g., 25.0 for -25%)
+INITIAL_STOP_LOSS_PERCENT = 10.0            # Initial SL as % below buy price (e.g., 25.0 for -25%)
 # INITIAL_TAKE_PROFIT_PERCENT is removed as TP1 price is now calculated based on investment, costs, and margin.
-FIRST_SELL_PERCENT = 75.0                   # % of *initial* tokens to sell at First TP (e.g., 50.0 for 50%)
-TRAILING_STOP_LOSS_PERCENT = 50.0           # Trailing SL % drop from highest price *after* First TP (e.g., 15.0 for -15%)
-SECOND_TAKE_PROFIT_PERCENT = 300.0          # Second TP as % above buy price (e.g., 200.0 for +200%)
-FIRST_SELL_PROFIT_MARGIN = 30.0             # Desired profit margin % on the *total initial investment* for the first TP sell
+FIRST_SELL_PERCENT = 65.0                   # % of *initial* tokens to sell at First TP (e.g., 50.0 for 50%)
+TRAILING_STOP_LOSS_PERCENT = 15.0           # Trailing SL % drop from highest price *after* First TP (e.g., 15.0 for -15%)
+SECOND_TAKE_PROFIT_PERCENT = 550.0          # Second TP as % above buy price (e.g., 200.0 for +200%)
+FIRST_SELL_PROFIT_MARGIN = 170.0             # Desired profit margin % on the *total initial investment* for the first TP sell
 
 # --- Fees and Tips ---
 DEFAULT_BUY_FEE = 0.001                     # Fee for buying in SOL
@@ -27,13 +27,13 @@ DEFAULT_SELL_FEE = 0.001                    # Fee for selling in SOL
 DEFAULT_SELL_TIP = 0.001                    # Tip for selling in SOL
 
 # Trading thresholds
-DEFAULT_RUGCHECK_SCORE_THRESHOLD = 600      # No trading if Rugcheck score is equal or above this threshold
-DEFAULT_SOCIAL_SCORE_THRESHOLD = 65         # No trading if Social score is equal or above this threshold
-DEFAULT_VOLUME_THRESHOLD = 7500             # Minimum volume threshold in USD
-MIN_MARKETCAP_THRESHOLD = 4000              # Minimum market cap threshold in USD to make emergency sell
+DEFAULT_RUGCHECK_SCORE_THRESHOLD = 801      # No trading if Rugcheck score is equal or above this threshold
+DEFAULT_SOCIAL_SCORE_THRESHOLD = 50         # No trading if Social score is equal or above this threshold
+DEFAULT_VOLUME_THRESHOLD = 19000            # Minimum volume threshold in USD
+MIN_MARKETCAP_THRESHOLD = 6000              # Minimum market cap threshold in USD to make emergency sell
 DEFAULT_MARKETCAP_THRESHOLD = 10000         # Minimum market cap threshold in USD to search for buy opportunities
-MIN_VOLATILITY = 0.2                        # Minimum volatility threshold in % to search for buy opportunities
-DEFAULT_TIME_INTERVALL = 10                 # Time interval for checking volatility, volume and marketcap in minutes
+MIN_VOLATILITY = 0.1                        # Minimum volatility threshold in % to search for buy opportunities
+DEFAULT_TIME_INTERVALL = 30                 # Time interval for checking volatility, volume and marketcap in minutes
 MAX_DRAWDOWN_SOL = 10                       # Maximum allowed 24h loss in SOL (not integrated)
 DRAWDOWN_CHECK_INTERVAL = 3600              # Drawdown check interval (seconds) (not integrated)
 
