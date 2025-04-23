@@ -63,22 +63,6 @@ class DatabaseClient:
                 except Exception as e:
                     logger.exception("Error executing SQL file %s: %s", os.path.basename(file_path), e)
                     raise
-            
-        # Restore creator_wallets table from backup
-        backup_path = os.path.abspath(os.path.join(
-            os.path.dirname(__file__), 
-            "data", 
-            "creator_wallets_backup.sql"
-        ))
-        if os.path.exists(backup_path):
-            try:
-                with open(backup_path, "r") as f:
-                    backup_sql = f.read()
-                await conn.execute(backup_sql)
-                logger.info("Loaded backup data from %s", backup_path)
-            except Exception as e:
-                logger.exception("Error loading backup data: %s", e)
-                raise
 
     async def insert_sol_price(self, price: float, timestamp: datetime = datetime.now(timezone.utc)):
         """Insert a new SOL price into the database."""
@@ -762,56 +746,65 @@ class DatabaseClient:
             await asyncio.sleep(5)
 
     async def backup_creator_wallets(self):
-        """Dumps the creator_wallets table to an SQL file."""
-        backup_file_path = os.path.join(os.path.dirname(__file__), "data", "creator_wallets_backup.sql")
-        os.makedirs(os.path.dirname(backup_file_path), exist_ok=True) # Ensure data directory exists
+        """Dumps the creator_wallets table to a JSON file."""
+        backup_file_path = os.path.join(os.path.dirname(__file__), "data", "creator_wallets_backup.json")
+        os.makedirs(os.path.dirname(backup_file_path), exist_ok=True)  # Ensure data directory exists
 
         logger.info("Backing up creator_wallets table...")
         try:
             async with self.pool.acquire() as conn:
                 rows = await conn.fetch("SELECT wallet_address, token_count, last_token_time FROM creator_wallets")
+                
+                # Convert rows to a list of dictionaries
+                data = [
+                    {
+                        "wallet_address": row["wallet_address"],
+                        "token_count": row["token_count"],
+                        "last_token_time": row["last_token_time"].isoformat() if row["last_token_time"] else None
+                    }
+                    for row in rows
+                ]
+                
+                # Write the data to a JSON file
                 async with aiofiles.open(backup_file_path, "w") as f:
-                    for row in rows:
-                        wallet_address = row['wallet_address']
-                        token_count = row['token_count']
-                        # Format timestamp correctly for SQL, handle None
-                        last_token_time_str = f"'{row['last_token_time'].isoformat()}'" if row['last_token_time'] else "NULL"
-
-                        # Use INSERT OR IGNORE equivalent for PostgreSQL: ON CONFLICT DO NOTHING
-                        sql_line = (
-                            f"INSERT INTO creator_wallets (wallet_address, token_count, last_token_time) "
-                            f"VALUES ('{wallet_address}', {token_count}, {last_token_time_str}) "
-                            f"ON CONFLICT (wallet_address) DO UPDATE SET token_count = GREATEST(creator_wallets.token_count, EXCLUDED.token_count), last_token_time = CASE WHEN EXCLUDED.token_count > creator_wallets.token_count THEN EXCLUDED.last_token_time ELSE creator_wallets.last_token_time END;\n"
-                        )
-                        await f.write(sql_line)
-            logger.info(f"✅ Successfully backed up {len(rows)} creator wallets to {backup_file_path}")
+                    await f.write(json.dumps(data, indent=4))
+                
+                logger.info(f"✅ Successfully backed up {len(rows)} creator wallets to {backup_file_path}")
         except Exception as e:
             logger.exception(f"Error backing up creator_wallets table: {e}")
             # Decide if we should raise or just log
 
     async def restore_creator_wallets(self):
-        """Restores creator_wallets from the SQL backup file if it exists."""
-        backup_file_path = os.path.join(os.path.dirname(__file__), "data", "creator_wallets_backup.sql")
-        if not os.path.exists(backup_file_path):
-            logger.info("No creator_wallets backup file found. Skipping restore.")
-            return
-
-        logger.info(f"Restoring creator_wallets table from {backup_file_path}...")
-        try:
-            async with aiofiles.open(backup_file_path, "r") as f:
-                sql_script = await f.read()
-
-            if not sql_script.strip():
-                logger.info("Creator wallets backup file is empty. Skipping restore.")
-                return
-
-            async with self.pool.acquire() as conn:
-                # Execute the entire script. The ON CONFLICT clause handles duplicates.
-                await conn.execute(sql_script)
-            logger.info("✅ Successfully restored creator wallets.")
-        except Exception as e:
-            logger.exception(f"Error restoring creator_wallets table: {e}")
-            # Decide if we should raise or just log
+        ## Restore creator_wallets table from backup
+        backup_path = os.path.abspath(os.path.join(
+            os.path.dirname(__file__), 
+            "data", 
+            "creator_wallets_backup.json"
+        ))
+        if os.path.exists(backup_path):
+            try:
+                with open(backup_path, "r") as f:
+                    data = json.load(f)
+                
+                # Generate and execute SQL statements dynamically
+                for record in data:
+                    wallet_address = record["wallet_address"]
+                    token_count = record["token_count"]
+                    last_token_time_str = f"'{record['last_token_time']}'" if record["last_token_time"] else "NULL"
+                    
+                    sql_line = (
+                        f"INSERT INTO creator_wallets (wallet_address, token_count, last_token_time) "
+                        f"VALUES ('{wallet_address}', {token_count}, {last_token_time_str}) "
+                        f"ON CONFLICT (wallet_address) DO UPDATE SET token_count = GREATEST(creator_wallets.token_count, EXCLUDED.token_count), "
+                        f"last_token_time = CASE WHEN EXCLUDED.token_count > creator_wallets.token_count THEN EXCLUDED.last_token_time ELSE creator_wallets.last_token_time END;"
+                    )
+                    async with self.pool.acquire() as conn:
+                        await conn.execute(sql_line)
+                
+                logger.info("Loaded backup data from %s", backup_path)
+            except Exception as e:
+                logger.exception("Error loading backup data: %s", e)
+                raise
 
     async def cleanup_db(self, cleanup_flag: bool):
         """Drop all application tables if cleanup_flag is True."""
