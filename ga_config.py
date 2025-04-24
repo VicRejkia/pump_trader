@@ -97,8 +97,8 @@ DATA_SPLIT = {
 }
 
 # Define the overall date range for historical data to be used
-HISTORICAL_DATA_START_TS = datetime(2025, 4, 17, 17, 0, 0, tzinfo=timezone.utc)  # <-- adjust here
-HISTORICAL_DATA_END_TS   = datetime(2025, 4, 17, 20, 0, 0, tzinfo=timezone.utc)
+HISTORICAL_DATA_START_TS = datetime(2025, 4, 18, 5, 0, 0, tzinfo=timezone.utc)  # <-- adjust here
+HISTORICAL_DATA_END_TS   = datetime(2025, 4, 21, 16, 0, 0, tzinfo=timezone.utc)
 
 # --- Backtester Settings ---
 # Initial capital for backtesting simulations (can be different from live)
