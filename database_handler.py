@@ -281,7 +281,60 @@ class DatabaseClient:
 
 
     async def find_trading_opportunities(self, sol_price: float, volume_threshold: float, marketcap_threshold: float, rugcheck_threshold: int, social_score_threshold: int, time_interval_minutes: int, min_volatility: float):
-        """Fetches potential trading opportunities based on multiple criteria."""
+        """
+        Identify potential token buy opportunities based on trading activity, volatility, and risk metrics.
+        
+        Criteria:
+        - Analyzes trades within a rolling time window ($6 minutes)
+        - Filters by volume, market cap, volatility, and risk scores
+        - Excludes tokens already in active portfolio positions
+
+        CTEs:
+        1. LatestTradeData: Gets most recent trade price/status for each token
+            - Uses row_number() to select latest trade per mint
+        2. RecentTrades: Calculates buy/sell volume and trade count
+            - total_buys_recent: SOL spent on buys
+            - total_sells_recent: SOL received from sells
+            - volume_recent: Total trading volume (SOL)
+        3. VolatilityData: Computes price volatility using log returns
+            - log_return = LN(price/previous_price)
+            - volatility = STDDEV(log_return) * SQRT(return_count)
+            - Requires min 5 valid returns
+
+        Main Query:
+        - Joins token data with rugcheck scores and latest trade metrics
+        - Converts SOL values to USD using $1 (SOL price)
+        - Filters tokens where:
+            * rugcheck_score < $4 AND socials_score < $5
+            * (volume_recent * SOL_price) >= volume_threshold
+            * (market_cap * SOL_price) >= marketcap_threshold
+            * volatility >= min_volatility
+            * NOT already in active portfolio positions
+        - Orders by descending recent volume
+
+        Parameters (Bound in Query):
+        $1: sol_price (float)           - Current SOL/USD price for conversions
+        $2: volume_threshold (float)    - Min USD trading volume requirement
+        $3: marketcap_threshold (float) - Min USD market cap requirement
+        $4: rugcheck_threshold (float)  - Max allowed security risk score
+        $5: social_score_threshold (float) - Max allowed social risk score
+        $6: time_interval_minutes (int) - Analysis window duration (minutes)
+        $7: min_volatility (float)      - Min price volatility requirement
+
+        Volatility Calculation:
+        Computed as standard deviation of log returns multiplied by sqrt(n):
+        volatility = STDDEV(LN(price/prev_price)) * SQRT(GREATEST(COUNT(*), 1))
+        - Uses natural log for continuous compounding returns
+        - Multiplied by sqrt(n) to estimate volatility over full time window
+        - Requires min 5 valid price changes
+
+        Returns:
+        List of candidate tokens sorted by volume, with metrics including:
+        - Latest price, market cap, bonding curve balances
+        - Recent volume/volatility metrics
+        - Token metadata and risk scores
+        """
+        
         query = """
             WITH LatestTradeData AS (
                 SELECT
