@@ -13,3 +13,12 @@ Flask
 pandas
 pygad
 nest_asyncio
+
+# RL Libraries
+stable-baselines3[extra]>=2.0.0a5  # Use a specific version or range if needed
+gymnasium>=0.28.1                  # Core environment standard
+tensorboard                        # For monitoring training progress
+# Ensure compatible torch/tensorflow is installed depending on SB3 backend
+# pip install torch torchvision torchaudio
+# or
+# pip install tensorflow

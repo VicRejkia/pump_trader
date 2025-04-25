@@ -632,7 +632,7 @@ class DatabaseClient:
                 logger.error(f"Error fetching unique mints with names: {e}", exc_info=True)
                 return []
 
-    async def get_filtered_tokens(self, max_socials=100, max_rugcheck=10000, min_volume_sol=0, time_window_minutes=60, portfolio_only=False): # Added portfolio_only
+    async def get_filtered_tokens(self, max_socials=100, max_rugcheck=10000, min_volume_sol=0, time_window_minutes=60, portfolio_only=False, volume_aggregation='avg'): # Added portfolio_only
         """
         Fetches tokens filtered by socials score, latest rugcheck score, recent trade volume,
         and optionally only tokens currently in the active portfolio.
@@ -669,10 +669,9 @@ class DatabaseClient:
             WHERE
                 vt.socials_score IS NOT NULL AND vt.socials_score <= $1
                 AND (lr.score IS NULL OR lr.score <= $2)
-                AND COALESCE(rv.volume_sol, 0) >= $3
         """
         order_by_clause = "ORDER BY name, vt.mint;"
-        params = [max_socials, max_rugcheck, min_volume_sol, interval_str]
+        params = [max_socials, max_rugcheck, min_volume_sol, interval_str, volume_aggregation]
 
         # Add portfolio filter if requested
         if portfolio_only:
@@ -697,21 +696,48 @@ class DatabaseClient:
             ), RecentVolume AS (
                 SELECT
                     mint,
-                    COALESCE(SUM(sol_amount), 0) as volume_sol
+                    COALESCE(
+                        CASE
+                            WHEN $5 = 'avg' THEN AVG(sol_amount)
+                            WHEN $5 = 'max' THEN MAX(sol_amount)
+                            ELSE SUM(sol_amount) -- Default to SUM if invalid aggregation type
+                        END, 0) as volume_sol
                 FROM v_trades
                 WHERE timestamp >= (NOW() - $4::INTERVAL)
                 GROUP BY mint
-            )
-            {select_clause}
-            {from_clause}
-            {where_clause}
-            {order_by_clause}
+        ),
+        Params AS (
+            SELECT
+                $1 AS max_socials,
+                $2 AS max_rugcheck,
+                $3 AS min_volume_sol,
+                $4 AS time_window,
+                $5 AS volume_aggregation
+        )
+        {select_clause}
+        {from_clause}
+        {where_clause}
+        AND CASE
+            WHEN Params.volume_aggregation = 'avg' THEN COALESCE(rv.volume_sol, 0) >= Params.min_volume_sol
+            WHEN Params.volume_aggregation = 'max' THEN COALESCE(rv.volume_sol, 0) >= Params.min_volume_sol
+            ELSE COALESCE(rv.volume_sol, 0) >= Params.min_volume_sol -- Default to SUM if invalid aggregation type
+        END
+        {order_by_clause}
         """
 
         async with self.pool.acquire() as conn:
             try:
-                logger.debug(f"Fetching filtered tokens with params: max_socials={max_socials}, max_rugcheck={max_rugcheck}, min_volume_sol={min_volume_sol}, interval_str={interval_str}, portfolio_only={portfolio_only}")
-                results = await conn.fetch(query, *params) # Use *params to unpack
+                logger.debug(f"Fetching filtered tokens with params: max_socials={max_socials}, max_rugcheck={max_rugcheck}, min_volume_sol={min_volume_sol}, interval_str={interval_str}, portfolio_only={portfolio_only}, volume_aggregation={volume_aggregation}")
+                # Cast parameters to appropriate types to avoid type mismatch
+                query = """
+                    SELECT * FROM tokens
+                    WHERE
+                        COALESCE(CAST(max_rugcheck AS INTEGER), 0) >= $1::INTEGER AND
+                        COALESCE(CAST(max_socials AS INTEGER), 0) >= $2::INTEGER AND
+                        COALESCE(CAST(volume AS FLOAT), 0) >= $3::FLOAT AND
+                        created_at >= NOW() - INTERVAL '1 day'
+                """
+                results = await conn.fetch(query, max_rugcheck, max_socials, min_volume)
                 # Return list of dictionaries including the scores and volume
                 return [
                     {

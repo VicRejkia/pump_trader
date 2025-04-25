@@ -203,6 +203,8 @@ async def get_filtered_tokens_api():
     time_window_minutes = request.args.get('time_window', default=60, type=int) # e.g., 60, 360, 1440
     # Get portfolio_only flag, converting 'true'/'false' string to boolean
     portfolio_only = request.args.get('portfolio_only', default=False, type=lambda v: v.lower() == 'true')
+    # Get volume aggregation type, default to 'avg'
+    volume_aggregation = request.args.get('volume_aggregation', default='avg', type=str)
 
     current_sol_price = get_current_sol_price()
     if current_sol_price is None:
@@ -215,8 +217,8 @@ async def get_filtered_tokens_api():
     app.logger.info(f"Received request for filtered tokens: socials<={max_socials}, rug<={max_rugcheck}, vol>={min_volume_sol} (last {time_window_minutes} min), portfolio_only={portfolio_only}") # Use app.logger
 
     # Wrapper for the specific query needed by this route
-    async def fetch_filtered_tokens_query(db_client, ms, mr, mv, tw, po): # Added po
-        return await db_client.get_filtered_tokens(max_socials=ms, max_rugcheck=mr, min_volume_sol=mv, time_window_minutes=tw, portfolio_only=po) # Pass po
+    async def fetch_filtered_tokens_query(db_client, ms, mr, mv, tw, po, va): # Added po
+        return await db_client.get_filtered_tokens(max_socials=ms, max_rugcheck=mr, min_volume_sol=mv, time_window_minutes=tw, portfolio_only=po, volume_aggregation=va) # Pass po
 
     try:
         # Execute the query using the helper
@@ -226,7 +228,8 @@ async def get_filtered_tokens_api():
             max_rugcheck,
             min_volume_sol,
             time_window_minutes,
-            portfolio_only # Pass portfolio_only
+            portfolio_only, # Pass portfolio_only
+            volume_aggregation
         )
         app.logger.info(f"Returning {len(filtered_tokens)} tokens matching filters.") # Use app.logger
         return jsonify(filtered_tokens)
