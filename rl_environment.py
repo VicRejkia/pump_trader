@@ -84,103 +84,98 @@ class TradingEnv(gym.Env):
 
 
     def _get_observation(self):
-        """
-        Calculates the observation based on the current environment state.
-        Handles normalization.
-        """
         if self.current_data_df is None or self.current_step >= len(self.current_data_df):
-            # Return a default/zero observation if data is missing or episode ended
             return np.zeros(self.observation_space.shape, dtype=np.float32)
 
-        # --- Get current row data safely ---
         try:
             current_row = self.current_data_df.iloc[self.current_step]
+            # Ensure required columns exist, use .get() with defaults
             current_price = current_row.get('price', 0.0)
-            market_cap = current_row.get('market_cap_calculated', 0.0)
+            market_cap = current_row.get('market_cap_calculated', 0.0) # Assuming this is SOL based
             volume = current_row.get('volume', 0.0)
-            rugcheck_score = current_row.get('rugcheck_score', 10000) # Default high score if missing
-            socials_score = current_row.get('socials_score', 100) # Default high score if missing
+            rugcheck_score = current_row.get('rugcheck_score', 10000)
+            socials_score = current_row.get('socials_score', 100)
             creation_time = current_row.get('token_creation_time', pd.NaT)
+            # Assuming 'volatility' is pre-calculated or calculated here
+            volatility = current_row.get('volatility', 0.0)
+            if pd.isna(volatility): volatility = 0.0 # Handle potential NaN
+
         except IndexError:
-             logger.warning(f"IndexError at step {self.current_step} for mint {self.current_mint}. Returning zero observation.")
-             return np.zeros(self.observation_space.shape, dtype=np.float32)
+            logger.warning(f"IndexError at step {self.current_step} for mint {self.current_mint}. Returning zero obs.")
+            return np.zeros(self.observation_space.shape, dtype=np.float32)
+        except KeyError as e:
+            logger.warning(f"KeyError '{e}' accessing data at step {self.current_step}. Mint: {self.current_mint}. Returning zero obs.")
+            return np.zeros(self.observation_space.shape, dtype=np.float32)
 
-        # Update history
-        self._price_history.append(current_price)
-        self._volume_history.append(volume)
-
-        # --- Calculate Features ---
-        # Price change features (use log returns or % change, handle division by zero)
+        # --- Calculate Price Change Features ---
+        # Use self._price_history deque
         prices = np.array(self._price_history)
-        price_change_1 = np.log(prices[-1] / prices[-2]) if len(prices) >= 2 and prices[-2] > 0 else 0.0
-        price_change_5 = np.log(prices[-1] / prices[-6]) if len(prices) >= 6 and prices[-6] > 0 else 0.0
-        price_change_10 = np.log(prices[-1] / prices[-11]) if len(prices) >= 11 and prices[-11] > 0 else 0.0
+        price_change_1 = np.log(prices[-1] / prices[-2]) if len(prices) >= 2 and prices[-2] > 1e-9 else 0.0
+        price_change_5 = np.log(prices[-1] / prices[-6]) if len(prices) >= 6 and prices[-6] > 1e-9 else 0.0
+        price_change_10 = np.log(prices[-1] / prices[-11]) if len(prices) >= 11 and prices[-11] > 1e-9 else 0.0
 
-        # Volatility (requires more history, use precalculated or calculate on the fly)
-        # Using precalculated from DataFrame for simplicity here
-        volatility = current_row.get('volatility', 0.0) # Assuming 'volatility' column exists
-
-        # Time since creation
+        # --- Calculate Time Since Creation ---
         time_since_creation_seconds = 0
-        if pd.notna(creation_time) and isinstance(self.current_data_df.index[self.current_step], pd.Timestamp):
-            time_diff = self.current_data_df.index[self.current_step] - creation_time
-            time_since_creation_seconds = time_diff.total_seconds()
+        current_timestamp = self.current_data_df.index[self.current_step]
+        if pd.notna(creation_time) and isinstance(current_timestamp, pd.Timestamp):
+            # Ensure both are timezone-aware (assuming UTC)
+            if creation_time.tzinfo is None: creation_time = creation_time.tz_localize('UTC')
+            if current_timestamp.tzinfo is None: current_timestamp = current_timestamp.tz_localize('UTC')
+            time_diff = current_timestamp - creation_time
+            time_since_creation_seconds = max(0, time_diff.total_seconds()) # Ensure non-negative
 
-        # Portfolio features
+        # --- Calculate Portfolio Features ---
         is_holding = 1.0 if self.active_position else 0.0
-        position_pnl = 0.0
+        position_pnl_norm = 0.0
         steps_holding = 0
         if self.active_position:
-            unrealized_pnl = (current_price - self.active_position['buy_price']) * self.active_position['remaining_tokens']
-            # Normalize PnL based on initial investment?
-            position_pnl = unrealized_pnl / (self.active_position.get('total_investment_sol', 1) or 1) # Avoid div by zero
+            buy_price = self.active_position['buy_price']
+            rem_tokens = self.active_position['remaining_tokens']
+            total_investment = self.active_position.get('total_investment_sol', 1.0) or 1.0 # Avoid zero investment
+
+            # Calculate unrealized PnL percentage relative to initial investment
+            current_value = current_price * rem_tokens
+            initial_cost_for_remaining = buy_price * rem_tokens # Cost basis for remaining tokens
+            unrealized_pnl = current_value - initial_cost_for_remaining
+            position_pnl_norm = unrealized_pnl / total_investment # Normalize by total initial buy cost
+
             steps_holding = self.current_step - self.active_position['entry_step']
 
-
-        # --- Normalization (Example - Needs Refinement) ---
-        # Normalize features to be roughly within [-1, 1] or [0, 1]
-        # This is highly dependent on expected data ranges! Use robust methods.
-        norm_price_change_1 = np.clip(price_change_1 * 10, -1, 1) # Scale log returns
-        norm_price_change_5 = np.clip(price_change_5 * 5, -1, 1)
-        norm_price_change_10 = np.clip(price_change_10 * 2, -1, 1)
-        norm_volatility = np.clip(volatility, 0, 1) # Assuming volatility is already somewhat scaled
-        norm_market_cap = np.clip(np.log10(market_cap + 1e-9) / 7, -1, 1) # Log scale, assumes max 10M cap
-        norm_volume = np.clip(np.log10(volume + 1e-9) / 7, -1, 1) # Log scale, adjust divisor
-        norm_rugcheck = (1000 - rugcheck_score) / 1000.0 # Invert and scale
-        norm_socials = (100 - socials_score) / 100.0 # Invert and scale
-        norm_time_creation = np.clip(np.log10(time_since_creation_seconds + 1) / 6, 0, 1) # Log scale, assumes max ~1 day
-        norm_pos_pnl = np.clip(position_pnl, -1, 1) # Clip normalized PnL
-        norm_steps_held = np.clip(steps_holding / float(self.max_steps), 0, 1)
-        norm_sol_balance = np.clip(self.current_sol / (self.initial_capital * 2), 0, 1) # Normalize based on potential doubling?
+        # --- Normalization (CRITICAL - MATCH TRAINING) ---
+        # These need refinement based on actual data ranges observed during exploration/analysis
+        norm_price_change_1 = np.clip(price_change_1 * 20, -1, 1) # Scale more for smaller intervals
+        norm_price_change_5 = np.clip(price_change_5 * 10, -1, 1)
+        norm_price_change_10 = np.clip(price_change_10 * 5, -1, 1)
+        norm_volatility = np.clip(volatility * 10, 0, 1) # Scale volatility
+        norm_market_cap = np.clip(np.log10(market_cap + 1e-9) / 7, -1, 1) # Assumes max ~10M SOL cap log10(10M)=7
+        norm_volume = np.clip(np.log10(volume + 1e-9) / 5, -1, 1) # Assumes max ~100k SOL volume log10(100k)=5
+        norm_rugcheck = np.clip(1.0 - (rugcheck_score / 1000.0), 0, 1) # Higher score = lower value (0-1)
+        norm_socials = np.clip(1.0 - (socials_score / 100.0), 0, 1) # Higher score = lower value (0-1)
+        norm_time_creation = np.clip(np.log10(time_since_creation_seconds + 1) / 6, 0, 1) # log10(1M seconds ~ 11 days) = 6
+        norm_pos_pnl = np.clip(position_pnl_norm, -1, 1) # PnL as fraction of investment, clipped
+        norm_steps_held = np.clip(steps_holding / float(self.max_steps), 0, 1) # Fraction of max episode duration
+        norm_sol_balance = np.clip(self.current_sol / (self.initial_capital * 2.0), 0, 1) # Normalize based on potential doubling
 
         # --- Construct observation vector ---
-        # Ensure the order matches rl_config.OBSERVATION_FEATURES
+        # Match the order defined in rl_config.OBSERVATION_FEATURES
         observation = np.array([
             norm_price_change_1, norm_price_change_5, norm_price_change_10,
-            norm_volatility,
-            norm_market_cap,
-            norm_volume,
-            norm_rugcheck,
-            norm_socials,
-            norm_time_creation,
-            is_holding,
-            norm_pos_pnl,
-            norm_steps_held,
-            norm_sol_balance
+            norm_volatility, norm_market_cap, norm_volume,
+            norm_rugcheck, norm_socials, norm_time_creation,
+            is_holding, norm_pos_pnl, norm_steps_held, norm_sol_balance
         ], dtype=np.float32)
 
-        # Final check for NaN/inf
+        # --- Final Checks ---
         if not np.all(np.isfinite(observation)):
-            logger.warning(f"NaN or inf detected in observation at step {self.current_step}. Mint: {self.current_mint}. Clipping.")
-            observation = np.nan_to_num(observation, nan=0.0, posinf=1.0, neginf=-1.0, dtype=np.float32)
-            observation = np.clip(observation, self.obs_low, self.obs_high) # Ensure bounds
+            logger.warning(f"NaN/inf in observation @ step {self.current_step}. Mint: {self.current_mint}. Clipping. Obs: {observation}")
+            observation = np.nan_to_num(observation, nan=0.0, posinf=1.0, neginf=-1.0)
+            observation = np.clip(observation, self.obs_low, self.obs_high)
 
-        # Ensure shape matches
         if observation.shape != self.observation_space.shape:
-             logger.error(f"Observation shape mismatch! Expected {self.observation_space.shape}, got {observation.shape}. Resetting observation.")
-             observation = np.zeros(self.observation_space.shape, dtype=np.float32) # Fallback to zeros
+            logger.error(f"Observation shape mismatch! Expected {self.observation_space.shape}, got {observation.shape}. Returning zeros.")
+            observation = np.zeros(self.observation_space.shape, dtype=np.float32)
 
-        self.last_observation = observation # Store for potential use in reward calc
+        self.last_observation = observation
         return observation
 
     def _apply_action(self, action):
@@ -204,12 +199,11 @@ class TradingEnv(gym.Env):
         self.current_parameters = new_params
         #logger.debug(f"Step {self.current_step}: Agent chose parameters: {self.current_parameters}")
 
-
     def _run_trading_step(self):
         """
         Simulates one step of the trading logic using self.current_parameters.
         Updates portfolio state (self.active_position, self.current_sol).
-        Returns realized PnL for this step.
+        Returns realized PnL for this step and any shaping bonuses/penalties.
         """
         realized_pnl_this_step = 0.0
         reward_bonus_penalty = 0.0 # For shaping rewards like SL/TP hits
@@ -220,163 +214,174 @@ class TradingEnv(gym.Env):
         try:
             current_row = self.current_data_df.iloc[self.current_step]
             price = current_row.get('price', 0.0)
-            market_cap_sol = current_row.get('market_cap_calculated', 0.0) # Assuming this is SOL based
-            # Get necessary fees from config (these are NOT tuned by agent typically)
-            buy_fee = rl_config.DEFAULT_BUY_FEE # Fetch from rl_config or main config?
+            if price <= 1e-12: # Skip step if price is effectively zero
+                return realized_pnl_this_step, reward_bonus_penalty
+            # Use market_cap_sol if available, otherwise calculate (assuming SOL price = 1 in env?)
+            market_cap_sol = current_row.get('market_cap_calculated', 0.0)
+
+            # --- Get parameters chosen by the agent for this step ---
+            agent_params = self.current_parameters
+            # Provide defaults if agent hasn't chosen yet (first step?)
+            initial_sl_percent = agent_params.get('INITIAL_STOP_LOSS_PERCENT', 50.0)
+            first_sell_perc = agent_params.get('FIRST_SELL_PERCENT', 75.0) / 100.0
+            trailing_sl_percent = agent_params.get('TRAILING_STOP_LOSS_PERCENT', 50.0)
+            first_profit_margin = agent_params.get('FIRST_SELL_PROFIT_MARGIN', 30.0) / 100.0
+            # Get fixed fees from rl_config (or main config if consistent)
+            buy_fee = rl_config.DEFAULT_BUY_FEE
             buy_tip = rl_config.DEFAULT_BUY_TIP
             sell_fee = rl_config.DEFAULT_SELL_FEE
             sell_tip = rl_config.DEFAULT_SELL_TIP
-            # Get params chosen by the agent
-            agent_params = self.current_parameters
-        except IndexError:
-             logger.warning(f"IndexError accessing data at step {self.current_step} during trading logic. Mint: {self.current_mint}")
-             return realized_pnl_this_step, reward_bonus_penalty
+            # Get fixed thresholds from rl_config (unless agent tunes them)
+            volume_thresh = rl_config.DEFAULT_VOLUME_THRESHOLD
+            mcap_thresh_buy = rl_config.DEFAULT_MARKETCAP_THRESHOLD
+            rug_thresh = rl_config.DEFAULT_RUGCHECK_SCORE_THRESHOLD
+            social_thresh = rl_config.DEFAULT_SOCIAL_SCORE_THRESHOLD
+            volatility_thresh = rl_config.MIN_VOLATILITY
+            min_mcap_sell = rl_config.MIN_MARKET_CAP
 
+        except (IndexError, KeyError) as e:
+            logger.warning(f"Error accessing data/params at step {self.current_step}. Mint: {self.current_mint}. Error: {e}")
+            return realized_pnl_this_step, reward_bonus_penalty
 
-        # --- Sell Logic Simulation ---
+        # --- Sell Logic Simulation (Adapting from trading_logic.py) ---
         if self.active_position:
             # Update highest price
             hp = max(self.active_position['highest_price'], price)
             self.active_position['highest_price'] = hp
 
-            # Get parameters from agent's action for this step
-            initial_sl_percent = agent_params.get('INITIAL_STOP_LOSS_PERCENT', 50.0)
-            first_sell_perc = agent_params.get('FIRST_SELL_PERCENT', 75.0) / 100.0
-            trailing_sl_percent = agent_params.get('TRAILING_STOP_LOSS_PERCENT', 50.0)
-            first_profit_margin = agent_params.get('FIRST_SELL_PROFIT_MARGIN', 30.0) / 100.0
-            # second_tp_percent = agent_params.get('SECOND_TAKE_PROFIT_PERCENT', 300.0) # Example if added
-
-            # Recalculate trigger prices based on current agent parameters
-            # Note: This means SL/TPs can change dynamically based on agent output
+            # Calculate current trigger prices based on *agent's chosen parameters*
             buy_price = self.active_position['buy_price']
             initial_tokens = self.active_position['initial_tokens']
             total_investment = self.active_position['total_investment_sol']
 
-            # SL based on buy price and agent's chosen SL %
+            # --- Recalculate SL/TPs using agent_params ---
             current_stop_loss_price = buy_price * (1 - initial_sl_percent / 100.0)
             if self.active_position['first_tp_hit']:
-                 current_stop_loss_price = buy_price # Breakeven
+                current_stop_loss_price = buy_price # Breakeven
 
-            # TP1 based on agent's chosen margin %
             total_cost_base_tp1 = total_investment + sell_fee + sell_tip
             target_net_sol_return_tp1 = total_cost_base_tp1 * (1 + first_profit_margin)
             target_gross_sol_return_tp1 = target_net_sol_return_tp1 + sell_fee + sell_tip
             tokens_to_sell_tp1 = initial_tokens * first_sell_perc
             current_initial_tp_price = (target_gross_sol_return_tp1 / tokens_to_sell_tp1) if tokens_to_sell_tp1 > 1e-9 else float('inf')
 
-            # TP2 - Example if agent tuned it
-            # current_second_tp_price = buy_price * (1 + second_tp_percent / 100.0)
+            # Assuming second TP is fixed for now, get from rl_config or main config
+            # If agent tuned it, get from agent_params
+            second_tp_price = buy_price * (1 + rl_config.SECOND_TAKE_PROFIT_PERCENT / 100.0)
 
-            # Trailing SL
             current_trailing_sl_price = 0.0
             if self.active_position['first_tp_hit']:
-                 current_trailing_sl_price = hp * (1 - trailing_sl_percent / 100.0)
+                current_trailing_sl_price = hp * (1 - trailing_sl_percent / 100.0)
+            # --- End Recalculation ---
 
-            # Check sell conditions using *current* calculated trigger prices
+
+            # --- Check Sell Conditions (using calculated trigger prices) ---
             sell_reason = None
             sell_all = False
             sell_partial = False
             sell_percentage = 0.0
-
+            # Use calculated current_stop_loss_price, current_initial_tp_price, etc.
             if price <= current_stop_loss_price:
                 sell_reason = "Stop Loss" if not self.active_position['first_tp_hit'] else "Breakeven SL"
-                sell_all = True
-                sell_percentage = 1.0
+                sell_all = True; sell_percentage = 1.0
                 reward_bonus_penalty += rl_config.REWARD_SL_HIT_PENALTY
-            # Add Second TP check here if implemented
+            elif price >= second_tp_price: # Using fixed second TP here
+                sell_reason = "Second TP"; sell_all = True; sell_percentage = 1.0
+                reward_bonus_penalty += rl_config.REWARD_TP_HIT_BONUS # Bonus for TP2
             elif not self.active_position['first_tp_hit'] and price >= current_initial_tp_price:
-                sell_reason = "First TP"
-                sell_partial = True
-                sell_percentage = first_sell_perc
+                sell_reason = "First TP"; sell_partial = True; sell_percentage = first_sell_perc
                 reward_bonus_penalty += rl_config.REWARD_TP_HIT_BONUS
             elif self.active_position['first_tp_hit'] and price <= current_trailing_sl_price:
-                sell_reason = "Trailing SL"
-                sell_all = True
-                sell_percentage = 1.0
-                reward_bonus_penalty += rl_config.REWARD_SL_HIT_PENALTY # Trailing SL hit is like a SL
+                sell_reason = "Trailing SL"; sell_all = True; sell_percentage = 1.0
+                reward_bonus_penalty += rl_config.REWARD_SL_HIT_PENALTY # Penalty for trailing SL hit
+            # Add Emergency SL check (Requires SOL price - tricky in isolated env)
+            # sol_price_usd = current_row.get('sol_price_usd', 1.0) # Need SOL price history
+            # current_market_cap_usd = market_cap_sol * sol_price_usd
+            # if current_market_cap_usd < min_mcap_sell:
+            #     sell_reason = "Emergency SL"; sell_all = True; sell_percentage = 1.0
+            #     reward_bonus_penalty += rl_config.REWARD_SL_HIT_PENALTY * 2 # Heavier penalty?
+
 
             # --- Execute Simulated Sell ---
             if sell_reason:
                 tokens_to_sell = 0.0
-                if sell_partial:
-                    tokens_to_sell = initial_tokens * sell_percentage
-                elif sell_all:
-                    tokens_to_sell = self.active_position['remaining_tokens']
-
-                tokens_to_sell = min(tokens_to_sell, self.active_position['remaining_tokens']) # Ensure not selling more than held
+                if sell_partial: tokens_to_sell = initial_tokens * sell_percentage
+                elif sell_all: tokens_to_sell = self.active_position['remaining_tokens']
+                tokens_to_sell = min(tokens_to_sell, self.active_position['remaining_tokens'])
 
                 if tokens_to_sell > 1e-9:
                     gross_sol = tokens_to_sell * price
                     net_sol = gross_sol - sell_fee - sell_tip
                     cost_basis = total_investment * (tokens_to_sell / initial_tokens) if initial_tokens > 0 else 0
                     pnl = net_sol - cost_basis
-                    realized_pnl_this_step += pnl # Add to step PnL
+                    realized_pnl_this_step += pnl
 
                     self.current_sol += net_sol
                     self.active_position['remaining_tokens'] -= tokens_to_sell
+                    self.trade_history.append({'step': self.current_step, 'type': 'sell', 'price': price, 'tokens': tokens_to_sell, 'net_sol': net_sol, 'pnl': pnl, 'reason': sell_reason})
 
-                    # Log trade (optional, can be verbose)
-                    self.trade_history.append({
-                         'step': self.current_step, 'type': 'sell', 'price': price,
-                         'tokens': tokens_to_sell, 'net_sol': net_sol, 'pnl': pnl, 'reason': sell_reason
-                    })
-
-                    if sell_partial:
-                         self.active_position['first_tp_hit'] = True
-                         # SL already adjusted based on flag check above for next step
-
-                    # Close position if remaining tokens are negligible
-                    if self.active_position['remaining_tokens'] < 1e-9:
-                         self.active_position = None
+                    if sell_partial: self.active_position['first_tp_hit'] = True
+                    if self.active_position['remaining_tokens'] < 1e-9: self.active_position = None
 
 
-        # --- Buy Logic Simulation ---
-        # Check buy conditions (simplified - use agent params for thresholds?)
-        # For simplicity now, we just buy if not holding and have capital.
-        # A more complex agent might have buy/sell/hold actions directly.
-        # Or, the agent's parameters could include thresholds which are checked here.
-        if not self.active_position and self.current_sol > (rl_config.DEFAULT_BUY_SOL_AMOUNT + buy_fee + buy_tip): # Use a fixed buy amount for now
-            sol_to_spend = rl_config.DEFAULT_BUY_SOL_AMOUNT
-            total_investment = sol_to_spend + buy_fee + buy_tip
-            tokens_bought = sol_to_spend / price if price > 0 else 0
+        # --- Buy Logic Simulation (Adapting from trading_logic.py/backtester.py) ---
+        # Use fixed buy amount from rl_config for simplicity now
+        buy_amount_sol = rl_config.DEFAULT_BUY_SOL_AMOUNT # Or get from agent if tuning SOL_TO_BUY
+        if not self.active_position and self.current_sol >= (buy_amount_sol + buy_fee + buy_tip):
+            # --- Check Buy Conditions (using fixed thresholds for now) ---
+            # These thresholds could also be part of the agent's action space
+            volume = current_row.get('volume', 0.0)
+            market_cap_buy_check = market_cap_sol # Assume MC check is in SOL for env
+            rugcheck_score = current_row.get('rugcheck_score', 10000)
+            socials_score = current_row.get('socials_score', 100)
+            volatility = current_row.get('volatility', 0.0)
 
-            if tokens_bought > 0:
-                self.current_sol -= total_investment
+            # Note: In environment, SOL price is not directly available unless passed in data.
+            # We might need to simplify thresholds or pass SOL price history. Assuming checks are vs SOL values here.
+            meets_buy_criteria = (
+                volume >= volume_thresh # Assuming threshold is SOL volume? Or needs USD calc?
+                and market_cap_buy_check >= mcap_thresh_buy # Assuming SOL threshold
+                and rugcheck_score < rug_thresh
+                and socials_score < social_thresh
+                and volatility >= volatility_thresh
+            )
+            # --- End Buy Condition Check ---
 
-                # Store initial parameters used for this buy (from agent action)
-                buy_params_snapshot = self.current_parameters.copy()
+            if meets_buy_criteria:
+                total_investment = buy_amount_sol + buy_fee + buy_tip
+                tokens_bought = buy_amount_sol / price if price > 0 else 0
 
-                self.active_position = {
-                    'buy_price': price,
-                    'initial_tokens': tokens_bought,
-                    'remaining_tokens': tokens_bought,
-                    'total_investment_sol': total_investment,
-                    'highest_price': price,
-                    'first_tp_hit': False,
-                    'entry_step': self.current_step,
-                    'buy_parameters': buy_params_snapshot # Store params used for this position
-                }
-                # Log trade
-                self.trade_history.append({
-                    'step': self.current_step, 'type': 'buy', 'price': price,
-                    'tokens': tokens_bought, 'investment': total_investment
-                })
+                if tokens_bought > 0:
+                    self.current_sol -= total_investment
+                    # Store params used for this buy (could be useful for analysis)
+                    buy_params_snapshot = self.current_parameters.copy()
+
+                    self.active_position = {
+                        'buy_price': price, 'initial_tokens': tokens_bought,
+                        'remaining_tokens': tokens_bought, 'total_investment_sol': total_investment,
+                        'highest_price': price, 'first_tp_hit': False,
+                        'entry_step': self.current_step, 'buy_parameters': buy_params_snapshot
+                    }
+                    self.trade_history.append({'step': self.current_step, 'type': 'buy', 'price': price, 'tokens': tokens_bought, 'investment': total_investment})
 
         return realized_pnl_this_step, reward_bonus_penalty
 
     def _calculate_reward(self, realized_pnl, shaping_bonus_penalty):
-        """Calculates the reward for the current step."""
-        reward = realized_pnl * rl_config.REWARD_PNL_MULTIPLIER
-        reward += shaping_bonus_penalty # Add bonuses/penalties from SL/TP hits etc.
+        reward = (realized_pnl * rl_config.REWARD_PNL_MULTIPLIER) + shaping_bonus_penalty
 
-        # Optional: Add holding penalty
-        if self.active_position:
+        # Add holding penalty
+        if self.active_position and rl_config.REWARD_SHAPING_HOLDING_PENALTY != 0:
             reward += rl_config.REWARD_SHAPING_HOLDING_PENALTY
 
-        # Optional: Add unrealized PnL shaping (can be tricky)
-        # Requires comparing current unrealized PnL with previous step's
-        # Be cautious as this can lead to undesired short-term optimizing
+        # Optional: Add unrealized PnL shaping (example)
+        if self.active_position and rl_config.REWARD_SHAPING_UNREALIZED_PNL != 0:
+            # Calculate current unrealized pnl (similar to _get_observation)
+            # Compare with unrealized pnl from the *previous* step (need to store it)
+            # Add reward proportional to the *change* in unrealized PnL
+            pass # Implement if desired, requires storing previous state info
 
+        # Clip reward to prevent extreme values? Optional.
+        # reward = np.clip(reward, -10, 10)
         return reward
 
 
