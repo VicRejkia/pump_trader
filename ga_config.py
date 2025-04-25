@@ -37,7 +37,7 @@ OPTIMIZABLE_PARAMETERS = [
     },
     {
         "name": "FIRST_SELL_PROFIT_MARGIN",
-        "values": list(range(10, 201, 20)),  # 10% to 200%
+        "values": list(range(0, 201, 50)),  # 10% to 200%
         "type": float
     },
     {
@@ -47,17 +47,17 @@ OPTIMIZABLE_PARAMETERS = [
     },
     {
         "name": "DEFAULT_MARKETCAP_THRESHOLD", # For buying
-        "values": list(range(5000, 50001, 2500)),  # 1k to 50k
+        "values": list(range(5000, 50001, 5000)),  # 1k to 50k
         "type": int # Assuming market cap is treated as integer USD
     },
     {
         "name": "MIN_VOLATILITY",
-        "values": [round(x * 0.1, 2) for x in range(1, 11, 2)],  # 0.05 to 0.5
+        "values": [round(x * 0.1, 2) for x in range(1, 11, 5)],  # 0.05 to 0.5
         "type": float
     },
     {
         "name": "DEFAULT_RUGCHECK_SCORE_THRESHOLD",
-        "values": list(range(1, 1001, 50)),  # Lower = safer
+        "values": list(range(1, 1001, 100)),  # Lower = safer
         "type": int
     },
     {
@@ -67,7 +67,7 @@ OPTIMIZABLE_PARAMETERS = [
     },
     {
         "name": "DEFAULT_TIME_INTERVALL", # In minutes
-        "values": list(range(0, 61, 10)),  # 1 to 60 minutes
+        "values": list(range(0, 61, 20)),  # 1 to 60 minutes
         "type": int
     },
     # Add more parameters here if needed
@@ -75,7 +75,7 @@ OPTIMIZABLE_PARAMETERS = [
 
 # --- GA Settings ---
 POPULATION_SIZE = 50
-NUM_GENERATIONS = 100
+NUM_GENERATIONS = 50
 # Mating probability (crossover)
 CROSSOVER_PROBABILITY = 0.8
 # Mutation probability
