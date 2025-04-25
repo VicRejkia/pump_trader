@@ -104,7 +104,6 @@ def log_with_context(level, msg, *args, **kwargs):
     context = _get_caller_context()
     logger.log(level, f"{context} {msg}", *args, **kwargs)
 
-
 def log_debug(msg, *args, **kwargs):
     log_with_context(logging.DEBUG, msg, *args, **kwargs)
 

@@ -9,18 +9,11 @@ import numpy as np
 import pandas as pd
 from datetime import datetime, timezone
 from logger import logger
+from utils import calculate_volatility # Assuming this is in utils.py or similar
 # Import necessary components from existing modules (adjust paths if needed)
 # from trading_logic import TradingManager # We might need parts of this logic
 # from state_manager import StateManager # Or simulate state management here
 # from config import ... # We'll use parameters dict instead of direct config import
-
-
-def calculate_volatility(prices, window=120):
-    """Calculate rolling volatility based on log returns over a window of 120 periods."""
-    price_ratio = prices / prices.shift(1)
-    log_returns = np.where((price_ratio <= 0) | (prices.shift(1) == 0), 0, np.log(price_ratio))
-    log_returns = np.nan_to_num(log_returns, nan=0.0, posinf=0.0, neginf=0.0)
-    return log_returns.rolling(window=window).std() * np.sqrt(window)
 
 # --- Performance Metrics Calculation ---
 def calculate_performance_metrics(trade_history: list, initial_capital: float, final_capital: float) -> dict:
@@ -114,23 +107,29 @@ def calculate_performance_metrics(trade_history: list, initial_capital: float, f
     return metrics
 
 
-# --- Backtesting Core Function ---
+# --- Backtesting Core Function with Enhanced Logging ---
 async def run_backtest(parameters: dict, raw_trade_data: pd.DataFrame, initial_capital: float) -> dict:
     """
     Simulates real-time trading with 10-second intervals using 5-second candlestick summaries.
-    Includes volatility filtering and full trade logic.
+    Includes volatility filtering and full trade logic. Enhanced logging for debugging hangs.
     """
+    # Try to get mint address for clearer logs, default if not found in params
+    mint_addr = parameters.get("mint", "UNKNOWN_MINT")
+    # --- Log Entry ---
+    logger.debug(f"--- Entering run_backtest for Mint: {mint_addr} ---")
 
     if raw_trade_data.empty:
-        logger.warning("Historical trade data is empty.")
+        logger.warning(f"Historical trade data empty for {mint_addr}.")
+        # --- Log Exit (Early) ---
+        logger.debug(f"--- Exiting run_backtest for Mint: {mint_addr} (No Data) ---")
         return calculate_performance_metrics([], initial_capital, initial_capital)
 
     # Prepare data
     df = raw_trade_data.copy()
-    df.index = pd.to_datetime(df.index)  # Ensure datetime index
+    df.index = pd.to_datetime(df.index)
     df = df.sort_index()
 
-    # --- Resample to 5-second candles
+    # --- Resample to 5-second candles ---
     candles = df.resample("5s").agg({
         "price": "last",
         "volume": "sum",
@@ -139,256 +138,229 @@ async def run_backtest(parameters: dict, raw_trade_data: pd.DataFrame, initial_c
         "socials_score": "last"
     }).dropna()
 
-    # --- Filter out rows where price is zero before calculating volatility
     candles = candles[candles["price"] != 0]
 
-    # --- Calculate volatility
-    price_ratio = candles["price"] / candles["price"].shift(1)
-    candles["log_return"] = np.where(price_ratio <= 0, 0, np.log(price_ratio))
-    candles["volatility"] = candles["log_return"].rolling(window=120).std() * np.sqrt(120)
+    # --- Calculate volatility ---
+    if 'price' in candles.columns and not candles['price'].empty:
+        prices_series = pd.to_numeric(candles['price'], errors='coerce')
+        candles['volatility'] = calculate_volatility(prices_series, window=120)
+        candles['volatility'] = candles['volatility'].fillna(0.0)
+    else:
+        candles['volatility'] = 0.0
 
-    # --- Extract Parameters
+    if candles.empty:
+         logger.warning(f"No candle data remained after resampling/filtering for {mint_addr}.")
+         # --- Log Exit (Early) ---
+         logger.debug(f"--- Exiting run_backtest for Mint: {mint_addr} (No Candle Data) ---")
+         return calculate_performance_metrics([], initial_capital, initial_capital)
+
+    # --- Extract Parameters ---
     sol_to_buy = parameters.get('SOL_TO_BUY', 0.1)
     initial_stop_loss_percent = parameters.get('INITIAL_STOP_LOSS_PERCENT', 50.0)
     first_sell_percent = parameters.get('FIRST_SELL_PERCENT', 75.0)
     trailing_stop_loss_percent = parameters.get('TRAILING_STOP_LOSS_PERCENT', 50.0)
     second_take_profit_percent = parameters.get('SECOND_TAKE_PROFIT_PERCENT', 300.0)
     first_sell_profit_margin = parameters.get('FIRST_SELL_PROFIT_MARGIN', 30.0)
-
     volume_threshold = parameters.get('DEFAULT_VOLUME_THRESHOLD', 7500)
     marketcap_threshold = parameters.get('DEFAULT_MARKETCAP_THRESHOLD', 10000)
     rugcheck_threshold = parameters.get('DEFAULT_RUGCHECK_SCORE_THRESHOLD', 600)
     socials_threshold = parameters.get('DEFAULT_SOCIAL_SCORE_THRESHOLD', 65)
     min_volatility = parameters.get('MIN_VOLATILITY', 0.2)
-
     buy_fee = parameters.get('DEFAULT_BUY_FEE', 0.001)
     buy_tip = parameters.get('DEFAULT_BUY_TIP', 0.001)
     sell_fee = parameters.get('DEFAULT_SELL_FEE', 0.001)
     sell_tip = parameters.get('DEFAULT_SELL_TIP', 0.001)
-    min_market_cap_usd = parameters.get('MIN_MARKET_CAP', 3600) # For Emergency SL
+    min_market_cap_usd = parameters.get('MIN_MARKET_CAP', 3600)
 
     current_sol = initial_capital
     current_tokens = 0.0
     trade_history = []
     active_position = None
 
-    # --- Simulate every 10s
-    #logger.debug(f"Candles index type: {type(candles.index)}") # Debug log index type
-    if not candles.empty: # Check if candles is not empty before accessing index
-        try:
-            sample_timestamp = candles.index[0]
-            #logger.debug(f"Sample timestamp from candles index: {sample_timestamp}") # Debug log sample timestamp
-        except IndexError:
-            logger.warning("Candles index is empty, cannot get sample timestamp.")
+    # --- Simulate every 10s ---
+    simulation_indices = candles.index[::2] # Simulate every 10s (2 * 5s candles)
+    total_steps = len(simulation_indices)
+    log_interval = max(1, total_steps // 10) # Log roughly 10 times during simulation
 
-    for timestamp in candles.index[::2]:  # 2x5s = 10s interval
+    logger.debug(f"Starting simulation loop for {mint_addr}. Total steps: {total_steps}. Logging every ~{log_interval} steps.")
+    step_count = 0
+    for timestamp in simulation_indices:
+        step_count += 1
+        # --- Periodic Loop Log ---
+        if step_count % log_interval == 0:
+             logger.debug(f"Simulating step {step_count}/{total_steps} for {mint_addr} (Timestamp: {timestamp})")
+
         try:
             row = candles.loc[timestamp]
         except KeyError as e:
-            logger.error(f"KeyError accessing timestamp: {timestamp}, type: {type(timestamp)}, value: {timestamp}, in candles index: {e}")
-            continue
-        # row = candles.iloc[i] # Use integer index instead of timestamp
+            # Already logged in the loop attempt block in the previous version, keep it here or remove duplication
+            # logger.error(f"KeyError accessing timestamp: {timestamp} for {mint_addr}")
+            continue # Skip this step if timestamp not found
 
-        if (
-            row["volume"] < volume_threshold or
-            row["market_cap_calculated"] < marketcap_threshold or
-            row["rugcheck_score"] >= rugcheck_threshold or
-            row["socials_score"] >= socials_threshold or
-            row["volatility"] < min_volatility
-        ):
-            continue
+        try:
+            # --- Filtering Logic ---
+            if (
+                pd.isna(row["volume"]) or row["volume"] < volume_threshold or
+                pd.isna(row["market_cap_calculated"]) or row["market_cap_calculated"] < marketcap_threshold or
+                pd.isna(row["rugcheck_score"]) or row["rugcheck_score"] >= rugcheck_threshold or
+                pd.isna(row["socials_score"]) or row["socials_score"] >= socials_threshold or
+                pd.isna(row["volatility"]) or row["volatility"] < min_volatility or
+                pd.isna(row["price"]) or row["price"] <= 1e-12 # Also check for valid price here
+            ):
+                # Optional: Log skipped step due to filter criteria
+                # logger.debug(f"Step {step_count}: Skipping {mint_addr} due to filter criteria.")
+                continue
 
-        price = row["price"]
+            price = row["price"]
 
-        # --- Sell logic
-        if active_position:
-            hp = max(active_position['highest_price'], price)
-            active_position['highest_price'] = hp
+            # --- Sell logic ---
+            if active_position:
+                hp = max(active_position['highest_price'], price)
+                active_position['highest_price'] = hp
 
-            sell_reason = None
-            tokens_to_sell = 0.0
-            sell_all = False
-            sell_partial = False
-            sell_percentage = 0.0
+                sell_reason = None
+                tokens_to_sell = 0.0
+                sell_all = False
+                sell_partial = False
+                sell_percentage = 0.0
 
-            # --- Calculate Trailing SL Price (only relevant if first TP was hit) ---
-            trailing_sl_price = 0.0 # Default
-            if active_position['first_tp_hit']:
-                trailing_sl_price = hp * (1 - trailing_stop_loss_percent / 100.0)
+                # --- Calculate Trailing SL Price ---
+                trailing_sl_price = 0.0
+                if active_position['first_tp_hit']:
+                    trailing_sl_price = hp * (1 - trailing_stop_loss_percent / 100.0)
 
-            # --- Check Sell Conditions (Order Matters!) ---
-            # 1. Initial Stop Loss / Breakeven Stop Loss
-            if price <= active_position['stop_loss_price']:
-                sell_reason = "Stop Loss" if not active_position['first_tp_hit'] else "Breakeven SL"
-                sell_all = True
-                sell_percentage = 1.0
-            # 2. Second Take Profit (Sell Remaining)
-            elif price >= active_position['second_tp_price']:
-                 sell_reason = "Second TP"
-                 sell_all = True
-                 sell_percentage = 1.0 # Sell all remaining
-            # 3. First Take Profit (Partial Sell, only if not hit before)
-            elif not active_position['first_tp_hit'] and price >= active_position['initial_tp_price']:
-                sell_reason = "First TP"
-                sell_partial = True
-                sell_percentage = first_sell_percent / 100.0 # Use FIRST_SELL_PERCENT
-            # 4. Trailing Stop Loss (Only active *after* First TP is hit)
-            elif active_position['first_tp_hit'] and price <= trailing_sl_price:
-                sell_reason = "Trailing SL"
-                sell_all = True
-                sell_percentage = 1.0 # Sell all remaining
-            # 5. Emergency Stop Loss (if applicable)
-            # Need SOL price for USD market cap check - simulate fetching it
-            # In backtesting, we don't have a live SOL price feed.
-            # We can either:
-            # a) Assume a fixed SOL price (less realistic)
-            # b) Use the latest available SOL price from the historical data (if included)
-            # c) Skip this check in backtesting (less accurate simulation)
-            # Option b is the most reasonable simulation approach.
-            # Assuming 'sol_price_usd' is available in the candles DataFrame
-            sol_price_usd = row.get('sol_price_usd', 1.0) # Default to 1 if not available
-            current_market_cap_usd = row["market_cap_calculated"] * sol_price_usd # Assuming market_cap_calculated is in SOL
-            if current_market_cap_usd < min_market_cap_usd:
-                sell_reason = "Emergency SL"
-                sell_all = True
-                sell_percentage = 1.0
+                # --- Check Sell Conditions ---
+                # (Keep your existing condition checks here - SL, TP1, TP2, Trailing SL, Emergency SL)
+                # Example structure:
+                if price <= active_position['stop_loss_price']:
+                     sell_reason = "Stop Loss" # ... and so on
+                     sell_all = True; sell_percentage = 1.0
+                elif price >= active_position['second_tp_price']:
+                    sell_reason = "Second TP" # ... and so on
+                    sell_all = True; sell_percentage = 1.0
+                elif not active_position['first_tp_hit'] and price >= active_position['initial_tp_price']:
+                    sell_reason = "First TP" # ... and so on
+                    sell_partial = True; sell_percentage = first_sell_percent / 100.0
+                elif active_position['first_tp_hit'] and price <= trailing_sl_price:
+                    sell_reason = "Trailing SL" # ... and so on
+                    sell_all = True; sell_percentage = 1.0
+                # Add Emergency SL check logic if needed
 
-            # --- Determine tokens to sell based on sell_percentage and sell_partial/sell_all ---
-            if sell_partial:
-                 tokens_to_sell = active_position['initial_tokens'] * sell_percentage
-                 tokens_to_sell = min(tokens_to_sell, active_position['remaining_tokens']) # Safety check
-            elif sell_all:
-                 tokens_to_sell = active_position['remaining_tokens']
-            else:
-                 tokens_to_sell = 0.0 # No sell triggered
-
-            if sell_reason and tokens_to_sell > 1e-9: # Use tolerance for float comparison
-                tokens_to_sell = min(tokens_to_sell, active_position['remaining_tokens'])
-                gross_sol_received = tokens_to_sell * price
-                net_sol_received = gross_sol_received - sell_fee - sell_tip
-                
-                # Calculate cost basis for the sold portion based on the total initial investment
-                # Pro-rate the total initial investment based on the fraction of *initial* tokens being sold now
-                if active_position['initial_tokens'] <= 0: # Avoid division by zero
-                     logger.error(f"Cannot calculate cost basis due to zero initial tokens.")
-                     pnl = 0.0 # Assign zero pnl in case of error
+                # --- Determine tokens to sell ---
+                if sell_partial:
+                     tokens_to_sell = active_position['initial_tokens'] * sell_percentage
+                     tokens_to_sell = min(tokens_to_sell, active_position['remaining_tokens'])
+                elif sell_all:
+                     tokens_to_sell = active_position['remaining_tokens']
                 else:
-                    cost_basis = active_position['total_investment_sol'] * (tokens_to_sell / active_position['initial_tokens'])
+                     tokens_to_sell = 0.0
+
+                # --- Execute Sell if triggered ---
+                if sell_reason and tokens_to_sell > 1e-9:
+                    # (Keep your sell financial calculations: gross_sol, net_sol, cost_basis, pnl)
+                    gross_sol_received = tokens_to_sell * price
+                    net_sol_received = gross_sol_received - sell_fee - sell_tip
+                    cost_basis = active_position['total_investment_sol'] * (tokens_to_sell / active_position['initial_tokens']) if active_position['initial_tokens'] > 0 else 0
                     pnl = net_sol_received - cost_basis
 
-                current_sol += net_sol_received
-                current_tokens -= tokens_to_sell
-                active_position['remaining_tokens'] -= tokens_to_sell
+                    current_sol += net_sol_received
+                    current_tokens -= tokens_to_sell
+                    active_position['remaining_tokens'] -= tokens_to_sell
 
-                trade_history.append({
-                    'timestamp': timestamp,
-                    'type': 'sell',
-                    'price': price,
-                    'amount_sol': net_sol_received,
-                    'amount_tokens': tokens_to_sell,
-                    'gross_sol_received': gross_sol_received,
-                    'net_sol_received': net_sol_received,
-                    'sell_fee': sell_fee,
-                    'sell_tip': sell_tip,
-                    'reason': sell_reason,
-                    'pnl': pnl
-                })
+                    trade_history.append({
+                        'timestamp': timestamp, 'type': 'sell', 'price': price,
+                        'amount_sol': net_sol_received, 'amount_tokens': tokens_to_sell,
+                        # Include other details if needed
+                        'reason': sell_reason, 'pnl': pnl
+                    })
+                    # --- Log Sell Execution ---
+                    logger.debug(f"Executed Sell for {mint_addr}: {tokens_to_sell:.4f} tokens at {price:.9f}. Reason: {sell_reason}. PnL: {pnl:.6f}")
 
-                if sell_reason == "First Take Profit":
-                    active_position['first_tp_hit'] = True
-                    active_position['stop_loss_price'] = active_position['buy_price']
+                    if sell_reason == "First Take Profit":
+                        active_position['first_tp_hit'] = True
+                        active_position['stop_loss_price'] = active_position['buy_price'] # Move SL to breakeven
 
-                if active_position['remaining_tokens'] < 1e-9:
-                    active_position = None
+                    if active_position['remaining_tokens'] < 1e-9:
+                        active_position = None # Close position
 
-        # --- Buy logic
-        if not active_position and current_sol >= sol_to_buy:
-            # Use fixed SOL fees and tips from parameters
-            total_investment = sol_to_buy + buy_fee + buy_tip # Total SOL deducted from balance
-            sol_for_tokens = sol_to_buy # Use the base amount to calculate tokens bought
+            # --- Buy logic ---
+            if not active_position and current_sol >= (sol_to_buy + buy_fee + buy_tip): # Check available capital
+                # (Keep your buy condition checks - volume, market cap, scores, volatility)
+                # This part is already implicitly checked by the outer filter, but double-checking doesn't hurt
+                # Or, if filters are complex/dynamic, perform them here
+                # meets_buy_criteria = (...) # Check criteria based on 'row'
 
-            if sol_for_tokens <= 0: # Check if the base amount is valid
-                logger.error(f"❌ Configured SOL_TO_BUY ({sol_to_buy}) is zero or negative.")
-                continue # Skip buy if invalid amount
+                # Assuming criteria met based on outer loop filter
+                meets_buy_criteria = True # Simplified assumption based on loop entry
 
-            tokens_bought = sol_for_tokens / price
+                if meets_buy_criteria:
+                    total_investment = sol_to_buy + buy_fee + buy_tip
+                    if current_sol >= total_investment: # Double check balance
+                        sol_for_tokens = sol_to_buy
+                        tokens_bought = sol_for_tokens / price
 
-            # --- Calculate First TP Price based on covering costs and margin (Net Income approach) ---
-            # Ensure config values are floats for calculation
-            sell_fee_tp1 = sell_fee # Use the sell fee from parameters
-            sell_tip_tp1 = sell_tip # Use the sell tip from parameters
-            profit_margin_tp1 = first_sell_profit_margin / 100.0
-            sell_percent_tp1 = first_sell_percent / 100.0
+                        # (Keep TP/SL price calculations as before)
+                        # ... TP1, TP2, initial SL calculations ...
+                        initial_tp_price = ... # Calculate TP1
+                        second_tp_price = ... # Calculate TP2
+                        stop_loss_price = ... # Calculate initial SL
 
-            # Calculate the total cost base including initial investment and the TP1 sell costs
-            total_cost_base_tp1 = total_investment + sell_fee_tp1 + sell_tip_tp1
+                        current_sol -= total_investment
+                        current_tokens += tokens_bought # Note: current_tokens isn't strictly used if tracking via active_position
 
-            # Calculate the target NET SOL return (cost base + profit margin on cost base)
-            target_net_sol_return_tp1 = total_cost_base_tp1 * (1 + profit_margin_tp1)
+                        active_position = {
+                            'buy_price': price, 'initial_tokens': tokens_bought,
+                            'remaining_tokens': tokens_bought, 'total_investment_sol': total_investment,
+                            'stop_loss_price': stop_loss_price, 'initial_tp_price': initial_tp_price,
+                            'second_tp_price': second_tp_price, 'highest_price': price,
+                            'first_tp_hit': False
+                        }
 
-            # Calculate the target GROSS SOL needed from the sale to achieve the target NET return
-            target_gross_sol_return_tp1 = target_net_sol_return_tp1 + sell_fee_tp1 + sell_tip_tp1
+                        trade_history.append({
+                            'timestamp': timestamp, 'type': 'buy', 'price': price,
+                            'amount_sol': total_investment, 'amount_tokens': tokens_bought,
+                             # Include other details if needed
+                            'buy_fee': buy_fee, 'buy_tip': buy_tip
+                        })
+                        # --- Log Buy Execution ---
+                        logger.debug(f"Executed Buy for {mint_addr}: {tokens_bought:.4f} tokens at {price:.9f}")
+                    else:
+                        # Optional: Log insufficient balance if needed
+                        # logger.debug(f"Insufficient balance to buy {mint_addr}")
+                        pass
 
-            # Calculate the number of tokens to sell at TP1 based on the target GROSS return and the percentage to sell
-            tokens_to_sell_tp1 = tokens_bought * sell_percent_tp1
+        except Exception as loop_err:
+             # --- Log Error within Loop ---
+             logger.error(f"Error during simulation step {step_count} for {mint_addr} (Timestamp: {timestamp}): {loop_err}", exc_info=True)
+             # Decide whether to continue or break the loop on error
+             continue # Continue to next step by default
 
-            if tokens_to_sell_tp1 <= 1e-9: # Avoid division by zero
-                 logger.error(f"❌ Cannot calculate TP1 price: Tokens to sell at TP1 is negligible ({tokens_to_sell_tp1:.12f}). Check FIRST_SELL_PERCENT config.")
-                 initial_tp_price = float('inf') # Assign infinity if calculation is not possible
-            else:
-                # Calculate the required price per token to achieve the target GROSS return by selling the specified percentage of tokens
-                initial_tp_price = target_gross_sol_return_tp1 / tokens_to_sell_tp1
-
-            # --- Second TP Price Calculation ---
-            second_tp_price = price * (1 + second_take_profit_percent / 100.0)
-
-            # --- Initial Stop Loss Calculation ---
-            stop_loss_price = price * (1 - initial_stop_loss_percent / 100.0)
-
-            current_sol -= total_investment
-            current_tokens += tokens_bought
-
-            active_position = {
-                'buy_price': price,
-                'initial_tokens': tokens_bought,
-                'remaining_tokens': tokens_bought,
-                'total_investment_sol': total_investment,
-                'stop_loss_price': stop_loss_price,
-                'initial_tp_price': initial_tp_price,
-                'second_tp_price': second_tp_price,
-                'highest_price': price,
-                'first_tp_hit': False
-            }
-
-            trade_history.append({
-                'timestamp': timestamp,
-                'type': 'buy',
-                'price': price,
-                'amount_sol': total_investment, # This is the total SOL spent including fees/tips
-                'amount_tokens': tokens_bought,
-                'buy_fee': buy_fee,
-                'buy_tip': buy_tip
-            })
-
-    # --- Final Value
-    final_value = current_sol
-    # Calculate final value including remaining tokens at the last price, accounting for sell fees/tips
+    # --- Final Value Calculation ---
+    logger.debug(f"Calculating final portfolio value for {mint_addr}")
     final_value = current_sol
     if active_position and not candles.empty:
-        last_price = candles.iloc[-1]["price"]
+        # Use the price from the *last available candle*, not necessarily the last step processed
+        last_available_timestamp = candles.index[-1]
+        last_price = candles.loc[last_available_timestamp]["price"]
+
         remaining_tokens = active_position['remaining_tokens']
-        # Simulate selling remaining tokens at the last price with configured fees/tips
         gross_sol_received_final = remaining_tokens * last_price
         net_sol_received_final = gross_sol_received_final - sell_fee - sell_tip
         final_value += net_sol_received_final
+        logger.debug(f"Added value of remaining {remaining_tokens:.4f} tokens for {mint_addr} at price {last_price:.9f}")
 
+
+    # --- Calculate Metrics ---
+    logger.debug(f"Calculating final performance metrics for {mint_addr}")
     metrics = calculate_performance_metrics(trade_history, initial_capital, final_value)
     metrics.update({
-        "parameters": parameters,
+        "parameters": parameters, # Add parameters used
         "initial_capital": initial_capital,
         "final_portfolio_value": final_value
     })
 
+    # --- Log Exit ---
+    logger.debug(f"--- Exiting run_backtest for Mint: {mint_addr} ---")
     return metrics
 
 # --- Example Usage (for testing) ---

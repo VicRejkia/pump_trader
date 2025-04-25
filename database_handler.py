@@ -737,7 +737,7 @@ class DatabaseClient:
                         COALESCE(CAST(volume AS FLOAT), 0) >= $3::FLOAT AND
                         created_at >= NOW() - INTERVAL '1 day'
                 """
-                results = await conn.fetch(query, max_rugcheck, max_socials, min_volume)
+                results = await conn.fetch(query, max_rugcheck, max_socials, min_volume_sol)
                 # Return list of dictionaries including the scores and volume
                 return [
                     {

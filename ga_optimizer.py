@@ -1,10 +1,3 @@
-# FILE: ga_optimizer.py (Refactored)
-
-"""
-Genetic Algorithm Optimizer
-
-Uses PyGAD library to optimize trading parameters based on backtesting results.
-"""
 import os
 import asyncio
 import pygad
@@ -13,9 +6,9 @@ import pandas as pd
 from datetime import datetime, timezone
 import time
 import json
-from multiprocessing import Pool
+# Import Pool, cpu_count, AND freeze_support
+from multiprocessing import Pool, cpu_count, freeze_support
 from itertools import islice
-import nest_asyncio
 
 from logger import logger, setup_logging
 from ga_config import (
@@ -25,156 +18,147 @@ from ga_config import (
     HISTORICAL_DATA_START_TS, HISTORICAL_DATA_END_TS
 )
 from database_handler import DatabaseClient
-from backtester import run_backtest
+from backtester import run_backtest, calculate_performance_metrics
+from utils import load_and_split_data, ensure_datetime # ensure_datetime might not be needed directly
+import traceback # <-- Add traceback import
 
-# Global variables
-historical_data_sets = {}
+# Global variables (Keep them here if needed globally by functions)
 db_client = None
-
-nest_asyncio.apply()
-
-
-def ensure_datetime(dt):
-    """Ensure the input is a timezone-aware datetime object."""
-    if isinstance(dt, datetime):
-        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-    if isinstance(dt, str):
-        return datetime.strptime(dt, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    raise ValueError(f"Unsupported date format: {dt}")
+historical_data_sets = {}
+pool = None # Initialize pool as None globally
 
 
-def batch_parameters(parameters, batch_size):
-    """Split parameters into smaller batches."""
-    it = iter(parameters)
-    for i in range(0, len(parameters), batch_size):
-        yield list(islice(it, batch_size))
+# --- Update Fitness Function Helper ---
+
+def run_backtest_sync(task_data):
+    """Synchronous wrapper for run_backtest suitable for multiprocessing."""
+    solution_idx, parameters, mint, df_data, initial_capital, fitness_metric = task_data
+    logger.debug(f"[Worker] Starting sync backtest for Sol {solution_idx}, Mint {mint}") # Log entry
+    result = None
+    fitness = None
+    try:
+        # asyncio.run executes the async function in a new event loop
+        # Important: Ensure run_backtest is async
+        # Log before the potentially blocking call
+        logger.debug(f"[Worker] Calling asyncio.run(run_backtest(...)) for Sol {solution_idx}, Mint {mint}")
+        result = asyncio.run(run_backtest(parameters, df_data, initial_capital))
+        # Log after the call completes
+        logger.debug(f"[Worker] asyncio.run(run_backtest(...)) completed for Sol {solution_idx}, Mint {mint}")
+
+        if isinstance(result, dict):
+            fitness = result.get(fitness_metric)
+            if fitness is not None and pd.notna(fitness):
+                logger.debug(f"[Worker] Finished sync backtest for Sol {solution_idx}, Mint {mint}. Fitness: {fitness:.4f}")
+                return solution_idx, mint, fitness
+            else:
+                logger.warning(f"Invalid fitness metric '{fitness_metric}' in result for Sol {solution_idx}, Mint {mint}. Result: {result}")
+                return solution_idx, mint, None # Indicate invalid fitness
+        else:
+             logger.warning(f"Unexpected result type {type(result)} for Sol {solution_idx}, Mint {mint}.")
+             return solution_idx, mint, None # Indicate failure
+    except Exception as e:
+        # Log the full traceback from the worker process
+        logger.error(f"[Worker] Exception in run_backtest_sync for Sol {solution_idx}, Mint {mint}: {e}")
+        # Log traceback explicitly
+        logger.error(f"[Worker] Traceback:\n{traceback.format_exc()}")
+        # Return failure indicator
+        return solution_idx, mint, None
 
 
-async def load_and_split_data(start_date_str: str, end_date_str: str):
-    """Load historical data and split it into training, validation, and test sets."""
-    global historical_data_sets, db_client
-    if not db_client:
-        logger.error("Database client not initialized.")
-        return False
+def calculate_average_fitness(results):
+    """Calculates average fitness from multiprocessing results."""
+    aggregated_fitness = {} # {sol_idx: {'total': 0.0, 'count': 0}}
+
+    for result_tuple in results:
+        if result_tuple is None: continue # Skip tasks that failed completely
+        sol_idx, mint, fitness = result_tuple
+        if fitness is not None: # Check if fitness was valid
+            if sol_idx not in aggregated_fitness:
+                aggregated_fitness[sol_idx] = {'total': 0.0, 'count': 0}
+            aggregated_fitness[sol_idx]['total'] += fitness
+            aggregated_fitness[sol_idx]['count'] += 1
+        # else: logger.warning(f"Received None fitness for Sol {sol_idx}, Mint {mint}")
+
+    avg_fitness_list = []
+    num_solutions = max(aggregated_fitness.keys()) + 1 if aggregated_fitness else 0
+
+    for sol_idx in range(num_solutions): # Iterate up to the max index encountered
+        if sol_idx in aggregated_fitness and aggregated_fitness[sol_idx]['count'] > 0:
+            total = aggregated_fitness[sol_idx]['total']
+            count = aggregated_fitness[sol_idx]['count']
+            avg_fitness = total / count
+            # logger.debug(f"Sol {sol_idx}: Avg Fitness={avg_fitness:.4f} ({count} tokens)")
+        else:
+            # logger.warning(f"No valid backtests for Sol {sol_idx}. Assigning worst fitness.")
+            avg_fitness = -float('inf') if FITNESS_GOAL == 'max' else float('inf')
+        avg_fitness_list.append(avg_fitness)
+
+    return avg_fitness_list
+
+
+def fitness_func_mp(ga_instance, solution, sol_idx):
+    """
+    PyGAD fitness function using multiprocessing pool for backtests.
+    Uses the 'train' dataset globally.
+    """
+    global historical_data_sets, pool # Access global data and pool
+
+    start_time = time.time()
+    worst_fitness = -float('inf') if FITNESS_GOAL == 'max' else float('inf')
+    fitness = worst_fitness # Default to worst
+
+    data_for_backtest = historical_data_sets.get('train', {})
+    if not data_for_backtest:
+        logger.error("Training data not found globally for fitness calculation.")
+        return worst_fitness
+
+    parameters = {param['name']: solution[i] for i, param in enumerate(OPTIMIZABLE_PARAMETERS)}
+
+    # Prepare tasks for the current solution across all training tokens
+    tasks = []
+    for mint, df_data in data_for_backtest.items():
+        if not df_data.empty:
+            # Pass solution index, params, mint, data, capital, metric name
+            tasks.append((sol_idx, parameters.copy(), mint, df_data.copy(), BACKTEST_INITIAL_CAPITAL, FITNESS_METRIC))
+
+    if not tasks:
+        logger.warning(f"No backtest tasks generated for solution {sol_idx}.")
+        return worst_fitness
 
     try:
-        start_date = ensure_datetime(start_date_str)
-        end_date = ensure_datetime(end_date_str)
-        logger.info(f"Loading data from {start_date} to {end_date}")
+        # Map tasks to the pool
+        # logger.debug(f"Submitting {len(tasks)} backtest tasks for solution {sol_idx} to pool.")
+        results = pool.map(run_backtest_sync, tasks)
 
-        query_mints_in_period = """
-            SELECT DISTINCT mint FROM v_trades
-            WHERE timestamp >= $1 AND timestamp < $2;
-        """
-        active_mints_records = await db_client.pool.fetch(query_mints_in_period, start_date, end_date)
-        if not active_mints_records:
-            logger.error("No tokens found with trades in the specified period.")
-            return False
-        mints_to_load = [r['mint'] for r in active_mints_records]
+        # Aggregate results for this specific solution
+        valid_fitness_values = [res[2] for res in results if res is not None and res[2] is not None]
 
-        all_historical_data = await db_client.get_historical_data_for_backtesting(mints_to_load, start_date, end_date)
-        if not all_historical_data:
-            logger.error("Failed to fetch historical data.")
-            return False
-
-        historical_data_sets = {'train': {}, 'validation': {}, 'test': {}}
-        total_duration = end_date - start_date
-        train_end = start_date + total_duration * DATA_SPLIT['training']
-        validation_end = train_end + total_duration * DATA_SPLIT['validation']
-
-        for mint, df in all_historical_data.items():
-            if df.empty or not isinstance(df.index, pd.DatetimeIndex):
-                continue
-            df_train = df[df.index < train_end].copy()
-            df_validation = df[(df.index >= train_end) & (df.index < validation_end)].copy()
-            df_test = df[df.index >= validation_end].copy()
-
-            if not df_train.empty:
-                historical_data_sets['train'][mint] = df_train
-                if not df_validation.empty:
-                    historical_data_sets['validation'][mint] = df_validation
-                if not df_test.empty:
-                    historical_data_sets['test'][mint] = df_test
-
-        if not historical_data_sets['train']:
-            logger.error("No training data available.")
-            return False
-
-        return True
+        if valid_fitness_values:
+            fitness = sum(valid_fitness_values) / len(valid_fitness_values)
+        else:
+            logger.warning(f"No valid fitness values obtained for solution {sol_idx}.")
+            fitness = worst_fitness
 
     except Exception as e:
-        logger.exception(f"Error loading data: {e}")
-        return False
+        logger.exception(f"Error during multiprocessing fitness calculation for solution {sol_idx}: {e}")
+        fitness = worst_fitness
 
-def run_backtest_sync(task):
-    """Run backtest synchronously."""
-    parameters, df_data, initial_capital = task
-    return asyncio.run(run_backtest(parameters, df_data, initial_capital))
+    end_time = time.time()
+    # logger.debug(f"Sol {sol_idx} Fitness: {fitness:.4f}, Time: {end_time - start_time:.2f}s") # Log fitness + time
 
-async def run_backtest_for_fitness(solutions, data_set_key='train', batch=None):
-    """Run backtests for a batch of solutions."""
-    fitness_results = []
-    data_for_backtest = historical_data_sets.get(data_set_key, {})
-    if not data_for_backtest:
-        return [-float('inf') if FITNESS_GOAL == 'max' else float('inf')] * len(solutions)
+    # Handle NaN/inf before returning
+    if pd.isna(fitness) or fitness == -float('inf') or fitness == float('inf'):
+        return -1e10 # Return a very small number for maximization if fitness is invalid
 
-    tasks_to_run = []
-    solution_indices = []
-
-    for sol_idx, solution in enumerate(solutions):
-        # Debugging: Log the batch and solution
-        logger.debug(f"Batch: {batch}")
-        logger.debug(f"Solution: {solution}")
-
-        # Use the current batch of parameters instead of the full OPTIMIZABLE_PARAMETERS
-        parameters = {param['name']: solution[i] for i, param in enumerate(batch)}
-        logger.debug(f"Parameters: {parameters}")
-
-        for mint, df_data in data_for_backtest.items():
-            if df_data.empty:
-                continue
-            tasks_to_run.append((parameters.copy(), df_data.copy(), BACKTEST_INITIAL_CAPITAL))
-            solution_indices.append(sol_idx)
-
-    # Use multiprocessing to run backtests in parallel
-    with Pool() as pool:
-        backtest_raw_results = pool.map(run_backtest_sync, tasks_to_run)
-
-    aggregated_fitness = {i: {'total': 0.0, 'count': 0} for i in range(len(solutions))}
-    for i, result in enumerate(backtest_raw_results):
-        original_sol_idx = solution_indices[i]
-        if isinstance(result, dict):
-            fitness_value = result.get(FITNESS_METRIC)
-            if fitness_value is not None and not pd.isna(fitness_value):
-                aggregated_fitness[original_sol_idx]['total'] += fitness_value
-                aggregated_fitness[original_sol_idx]['count'] += 1
-
-    for sol_idx in range(len(solutions)):
-        total = aggregated_fitness[sol_idx]['total']
-        count = aggregated_fitness[sol_idx]['count']
-        avg_fitness = total / count if count > 0 else -float('inf') if FITNESS_GOAL == 'max' else float('inf')
-        fitness_results.append(avg_fitness)
-
-    return fitness_results
+    return fitness
 
 
-def create_fitness_func_wrapper(batch):
-    """Create a fitness function wrapper that captures the batch."""
-    def fitness_func_wrapper(ga_instance, solution, solution_idx):
-        """Wrapper for the fitness function."""
-        try:
-            # Pass the batch to the backtest function
-            results = asyncio.run(run_backtest_for_fitness([solution], data_set_key='train', batch=batch))
-            return results[0] if results else -float('inf')
-        except Exception as e:
-            logger.exception(f"Error in fitness function for solution {solution_idx}: {e}")
-            return -float('inf')
-    return fitness_func_wrapper
-
+# --- Main Execution ---
 async def main():
-    global db_client
+    global db_client, historical_data_sets, pool # Declare usage of globals
     setup_logging()
 
+    # --- Database Connection ---
     db_client = DatabaseClient()
     try:
         await db_client.connect()
@@ -182,52 +166,221 @@ async def main():
         logger.critical(f"Failed to connect to database: {e}")
         return
 
-    if not await load_and_split_data(HISTORICAL_DATA_START_TS, HISTORICAL_DATA_END_TS):
+    # --- Load Data using the outsourced function ---
+    # Get dates and split config from ga_config
+    start_date = HISTORICAL_DATA_START_TS
+    end_date = HISTORICAL_DATA_END_TS
+    data_split_config = DATA_SPLIT
+
+    logger.info("Loading and splitting data using function from utils...")
+    loaded_data = await load_and_split_data(db_client, start_date, end_date, data_split_config)
+
+    if loaded_data is None:
+        logger.critical("Failed to load or split data via utils function. Exiting.")
         await db_client.close()
         return
 
-    batches = list(batch_parameters(OPTIMIZABLE_PARAMETERS, batch_size=3))
+    # Assign to global variable (if fitness function relies on it)
+    # Alternatively, pass 'loaded_data' to the fitness function if possible with PyGAD setup
+    historical_data_sets = loaded_data
 
-    for batch_idx, batch in enumerate(batches):
-        logger.info(f"Running GA for batch {batch_idx + 1}/{len(batches)}: {[param['name'] for param in batch]}")
+    if not historical_data_sets.get('train'):
+        logger.critical("No training data loaded. Cannot run GA. Exiting.")
+        await db_client.close()
+        return
+    logger.info("Data loaded and split successfully.")
 
-        gene_space = [param['values'] for param in batch]
-        gene_type = [param['type'] for param in batch]
+    # --- PyGAD Configuration ---
+    gene_space = []
+    gene_type = []
+    init_range_low = []
+    init_range_high = []
 
-        def on_generation(ga_instance):
-            generation = ga_instance.generations_completed
-            best_fitness = ga_instance.best_solution(pop_fitness=ga_instance.last_generation_fitness)[1]
-            logger.info(f"Generation {generation} finished. Best Fitness: {best_fitness:.4f}")
+    for param in OPTIMIZABLE_PARAMETERS:
+        # Determine if using 'values' (discrete) or 'low'/'high' (continuous)
+        if 'values' in param:
+            gene_space.append(param['values'])
+            # For discrete spaces, init_range might not be directly applicable in PyGAD
+            # PyGAD typically samples from the 'values' list for initialization.
+            # Add placeholder bounds, though they might not be used for discrete init.
+            init_range_low.append(min(param['values']))
+            init_range_high.append(max(param['values']))
+        elif 'low' in param and 'high' in param:
+            gene_space.append({'low': param['low'], 'high': param['high']})
+            init_range_low.append(param['low'])
+            init_range_high.append(param['high'])
+        else:
+             logger.error(f"Invalid configuration for parameter {param['name']}. Missing 'values' or 'low'/'high'.")
+             await db_client.close()
+             return
+        gene_type.append(param['type']) # Ensure types are correctly specified (float/int)
 
-        # Create the fitness function wrapper with the current batch
-        fitness_func_wrapper = create_fitness_func_wrapper(batch)
+    # Define callback for generation completion
+    def on_generation(ga_instance):
+        generation = ga_instance.generations_completed
+        # Access fitness securely
+        if ga_instance.last_generation_fitness is not None and len(ga_instance.last_generation_fitness) > 0:
+             best_fitness_idx = ga_instance.best_solution(pop_fitness=ga_instance.last_generation_fitness)[2]
+             best_fitness = ga_instance.last_generation_fitness[best_fitness_idx]
+             logger.info(f"Generation {generation} finished. Best Fitness: {best_fitness:.4f}")
 
-        ga_instance = pygad.GA(
-            num_generations=NUM_GENERATIONS,
-            num_parents_mating=int(POPULATION_SIZE * 0.25),
-            fitness_func=fitness_func_wrapper,
-            sol_per_pop=POPULATION_SIZE,
-            num_genes=len(batch),
-            gene_space=gene_space,
-            gene_type=gene_type,
-            parent_selection_type="sss",
-            crossover_type="single_point",
-            crossover_probability=CROSSOVER_PROBABILITY,
-            mutation_type="random",
-            mutation_probability=MUTATION_PROBABILITY,
-            mutation_by_replacement=True,
-            keep_elitism=2,
-            on_generation=on_generation
-        )
+             # Log best solution periodically
+             if generation % 10 == 0:
+                 solution, _, _ = ga_instance.best_solution(pop_fitness=ga_instance.last_generation_fitness)
+                 best_params_so_far = {param['name']: solution[i] for i, param in enumerate(OPTIMIZABLE_PARAMETERS)}
+                 logger.info(f"Best solution @ Gen {generation}: Fitness={best_fitness:.4f}, Params={json.dumps(best_params_so_far)}")
+        else:
+             logger.warning(f"Generation {generation} finished. Fitness data not available yet.")
 
+
+    logger.info(f"Setting up PyGAD: Pop={POPULATION_SIZE}, Gens={NUM_GENERATIONS}, Genes={len(OPTIMIZABLE_PARAMETERS)}")
+    ga_instance = pygad.GA(
+        num_generations=NUM_GENERATIONS,
+        num_parents_mating=int(POPULATION_SIZE * 0.25),
+        # Use the multiprocessing fitness function
+        fitness_func=fitness_func_mp,
+        sol_per_pop=POPULATION_SIZE,
+        num_genes=len(OPTIMIZABLE_PARAMETERS),
+        gene_space=gene_space,
+        gene_type=gene_type,
+        # Provide initial ranges for mutation if needed, esp. for continuous
+        init_range_low=init_range_low,
+        init_range_high=init_range_high,
+        parent_selection_type="sss",
+        crossover_type="single_point",
+        crossover_probability=CROSSOVER_PROBABILITY,
+        mutation_type="random", # Consider adaptive mutation later if needed
+        mutation_probability=MUTATION_PROBABILITY,
+        # Adjust mutation range for continuous/integer types if using random mutation
+        mutation_num_genes=max(1, int(len(OPTIMIZABLE_PARAMETERS) * 0.1)), # Mutate ~10% of genes
+        keep_elitism=2,
+        on_generation=on_generation,
+        parallel_processing=None # Disable PyGAD internal parallel processing as we use multiprocessing Pool
+        # stop_criteria=["saturate_10"] # Example
+    )
+
+    # --- Run GA ---
+    logger.info("Starting Genetic Algorithm optimization...")
+    start_ga_time = time.time()
+    try:
         ga_instance.run()
+    except Exception as ga_err:
+        logger.exception(f"Error during GA execution: {ga_err}")
+    # Pool closure is handled outside main() in the `if __name__ == '__main__':` block now
 
+    end_ga_time = time.time()
+    logger.info(f"GA optimization finished or stopped after {end_ga_time - start_ga_time:.2f} seconds.")
+
+    # --- Results ---
+    if hasattr(ga_instance, 'best_solution_generation') and ga_instance.best_solution_generation != -1:
         solution, solution_fitness, _ = ga_instance.best_solution()
-        best_params = {param['name']: solution[i] for i, param in enumerate(batch)}
-        logger.info(f"Best solution for batch {batch_idx + 1}: {json.dumps(best_params, indent=4)}")
+        logger.info(f"Best solution found (Fitness = {solution_fitness}):")
+        best_params = {param['name']: solution[i] for i, param in enumerate(OPTIMIZABLE_PARAMETERS)}
+        logger.info(json.dumps(best_params, indent=4))
 
+        # --- Run Validation and Testing Sequentially using Async Helper ---
+        validation_fitness = test_fitness = -float('inf') if FITNESS_GOAL == 'max' else float('inf')
+        all_metrics_validation = {}
+        all_metrics_test = {}
+
+        logger.info("Running validation on the best solution...")
+        if historical_data_sets.get('validation'):
+            val_results = await run_backtest_for_fitness([solution], data_set_key='validation')
+            if val_results: validation_fitness = val_results[0]
+            # Run full backtest again to get all metrics (optional)
+            # all_metrics_validation = await run_backtest(best_params, combined_validation_df, BACKTEST_INITIAL_CAPITAL)
+
+        logger.info("Running final test on the best solution...")
+        if historical_data_sets.get('test'):
+            test_results = await run_backtest_for_fitness([solution], data_set_key='test')
+            if test_results: test_fitness = test_results[0]
+            # Run full backtest again to get all metrics (optional)
+            # all_metrics_test = await run_backtest(best_params, combined_test_df, BACKTEST_INITIAL_CAPITAL)
+
+        logger.info(f"Final Evaluation: Train Fitness={solution_fitness:.4f}, Validation Fitness={validation_fitness:.4f}, Test Fitness={test_fitness:.4f}")
+
+        # --- Save Results ---
+        # ... (saving logic remains largely the same, using the final fitness values) ...
+        results_filename = f"ga_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        results_data = {
+            'best_solution_parameters': best_params,
+            'best_solution_fitness_training': solution_fitness,
+            'validation_fitness': validation_fitness,
+            'test_fitness': test_fitness,
+            # Include detailed metrics if calculated
+            # 'validation_metrics': all_metrics_validation,
+            # 'test_metrics': all_metrics_test,
+            'ga_config': { # Store config used for this run
+                'population_size': POPULATION_SIZE,
+                'num_generations': NUM_GENERATIONS,
+                'crossover_probability': CROSSOVER_PROBABILITY,
+                'mutation_probability': MUTATION_PROBABILITY,
+                'fitness_metric': FITNESS_METRIC,
+                'fitness_goal': FITNESS_GOAL,
+                'data_split': DATA_SPLIT,
+                'backtest_initial_capital': BACKTEST_INITIAL_CAPITAL,
+                'data_start_date': HISTORICAL_DATA_START_TS.isoformat(),
+                'data_end_date': HISTORICAL_DATA_END_TS.isoformat()
+             },
+            'optimizable_parameters_config': OPTIMIZABLE_PARAMETERS
+        }
+        # Save logic... (ensure numpy/datetime conversion)
+        def convert_types(obj):
+              if isinstance(obj, np.integer): return int(obj)
+              elif isinstance(obj, np.floating): return float(obj)
+              elif isinstance(obj, np.ndarray): return obj.tolist()
+              elif isinstance(obj, (datetime, pd.Timestamp)): return obj.isoformat()
+              elif obj == float('inf'): return 'Infinity'
+              elif obj == float('-inf'): return '-Infinity'
+              return obj
+        try:
+            with open(results_filename, 'w') as f:
+                json.dump(results_data, f, indent=4, default=convert_types)
+            logger.info(f"Saved GA results to {results_filename}")
+        except Exception as e:
+             logger.error(f"Failed to save results to JSON: {e}")
+
+
+        # --- Plotting ---
+        try:
+             plot_save_path = os.path.join(os.getcwd(), f"ga_fitness_plot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+             ga_instance.plot_fitness(save_dir=plot_save_path)
+             logger.info(f"Saved fitness plot to {plot_save_path}")
+        except Exception as plot_err:
+             logger.error(f"Failed to save fitness plot: {plot_err}")
+
+
+    else:
+         logger.error("GA did not complete successfully or find a valid solution.")
+
+    # --- Cleanup ---
     await db_client.close()
+    logger.info("Optimizer finished.")
 
-
+# --- !! IMPORTANT GUARD !! ---
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Add freeze_support() here
+    freeze_support()
+
+    # Initialize the pool here, only in the main process
+    num_processes = max(1, cpu_count() - 2)
+    # You can temporarily set num_processes = 1 here for debugging
+    num_processes = 1
+    logger.info(f"[Main] DEBUG: Running with {num_processes} processes.")
+    pool = Pool(processes=num_processes) # Assign to global pool variable
+    logger.info(f"Initialized Multiprocessing Pool with {num_processes} processes.")
+
+    try:
+        # Run the main async function
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Keyboard interrupt received. Shutting down...")
+    except Exception as e:
+         logger.critical(f"Critical error in main execution: {e}", exc_info=True)
+    finally:
+        # Ensure the pool is closed gracefully
+        if pool:
+            logger.info("Closing multiprocessing pool...")
+            pool.close()
+            pool.join()
+            logger.info("Multiprocessing pool closed.")
