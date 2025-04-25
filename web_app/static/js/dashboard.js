@@ -56,6 +56,60 @@ document.addEventListener('DOMContentLoaded', () => {
         sidebarToggle.addEventListener('click', () => {
             sidebar.classList.toggle('expanded');
         });
+        
+        // Add token filtering functionality
+        document.addEventListener('DOMContentLoaded', () => {
+            const applyFiltersBtn = document.getElementById('apply-filters-btn');
+            const tokenListContainer = document.getElementById('token-list-container');
+        
+            applyFiltersBtn.addEventListener('click', async () => {
+                const maxSocials = document.getElementById('filter-max-socials').value;
+                const maxRugcheck = document.getElementById('filter-max-rugcheck').value;
+                const minVolume = document.getElementById('filter-min-volume').value;
+                const timeWindow = document.getElementById('filter-time-window').value;
+                const portfolioOnly = document.getElementById('filter-portfolio-only').checked;
+                const volumeAggregation = document.getElementById('filter-volume-aggregation').value;
+        
+                const params = new URLSearchParams({
+                    max_socials: maxSocials,
+                    max_rugcheck: maxRugcheck,
+                    min_volume: minVolume,
+                    time_window: timeWindow,
+                    portfolio_only: portfolioOnly,
+                    volume_aggregation: volumeAggregation
+                }).toString();
+        
+                try {
+                    const response = await fetch(`/api/filtered_tokens?${params}`);
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                    const tokens = await response.json();
+        
+                    // Clear existing token list
+                    tokenListContainer.innerHTML = '';
+        
+                    if (tokens.length === 0) {
+                        tokenListContainer.innerHTML = '<div class="list-group-item">No tokens found with the selected filters.</div>';
+                    } else {
+                        tokens.forEach(token => {
+                            const listItem = document.createElement('div');
+                            listItem.classList.add('list-group-item');
+                            listItem.textContent = `${token.name} (${token.symbol}) - ${token.mint} - Volume: ${token.volume}`;
+                            listItem.addEventListener('click', () => {
+                                navigator.clipboard.writeText(token.mint).then(() => {
+                                    alert('Mint copied to clipboard!');
+                                });
+                            });
+                            tokenListContainer.appendChild(listItem);
+                        });
+                    }
+                } catch (error) {
+                    console.error('Failed to fetch filtered tokens:', error);
+                    tokenListContainer.innerHTML = '<div class="list-group-item">Failed to load tokens. Please check the console for errors.</div>';
+                }
+            });
+        });
     }
 
     // --- Bot Control Logic ---
