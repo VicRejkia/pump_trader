@@ -117,6 +117,18 @@ async def run_backtest(parameters: dict, raw_trade_data: pd.DataFrame, initial_c
     mint_addr = parameters.get("mint", "UNKNOWN_MINT")
     # --- Log Entry ---
     logger.debug(f"--- Entering run_backtest for Mint: {mint_addr} ---")
+    # logger.debug(f"Initial Capital: {initial_capital}")
+    # logger.debug(f"Parameters: {parameters}")
+    # logger.debug(f"Raw Trade Data Head:\n{raw_trade_data.head()}")
+    # logger.debug(f"Raw Trade Data Tail:\n{raw_trade_data.tail()}")
+    # logger.debug(f"Raw Trade Data Columns: {raw_trade_data.columns}")
+    # logger.debug(f"Raw Trade Data Index: {raw_trade_data.index}")
+    # logger.debug(f"Raw Trade Data Length: {len(raw_trade_data)}")
+    # logger.debug(f"Raw Trade Data Shape: {raw_trade_data.shape}")
+    # logger.debug(f"Raw Trade Data Info:\n{raw_trade_data.info()}")
+    # logger.debug(f"Raw Trade Data Describe:\n{raw_trade_data.describe()}")
+    # logger.debug(f"Raw Trade Data Types:\n{raw_trade_data.dtypes}")
+    # logger.debug(f"Raw Trade Data Memory Usage: {raw_trade_data.memory_usage(deep=True)}")
 
     if raw_trade_data.empty:
         logger.warning(f"Historical trade data empty for {mint_addr}.")
@@ -398,10 +410,10 @@ async def main_test():
         return
 
     test_historical_data = hist_data_dict[test_mint]
-    logger.info(f"Fetched {len(test_historical_data)} data points for {test_mint}.")
-    logger.debug(f"Test Data Head:\n{test_historical_data.head()}")
-    logger.debug(f"Test Data Tail:\n{test_historical_data.tail()}")
-    logger.debug(f"Test Data Columns: {test_historical_data.columns}")
+    # logger.info(f"Fetched {len(test_historical_data)} data points for {test_mint}.")
+    # logger.debug(f"Test Data Head:\n{test_historical_data.head()}")
+    # logger.debug(f"Test Data Tail:\n{test_historical_data.tail()}")
+    # logger.debug(f"Test Data Columns: {test_historical_data.columns}")
     # --- End Real Data Fetch ---
 
 

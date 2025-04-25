@@ -18,8 +18,8 @@ from ga_config import (
     HISTORICAL_DATA_START_TS, HISTORICAL_DATA_END_TS
 )
 from database_handler import DatabaseClient
-from backtester import run_backtest, calculate_performance_metrics
-from utils import load_and_split_data, ensure_datetime # ensure_datetime might not be needed directly
+from backtester import run_backtest
+from utils import load_and_split_data
 import traceback # <-- Add traceback import
 
 # Global variables (Keep them here if needed globally by functions)
@@ -32,6 +32,7 @@ pool = None # Initialize pool as None globally
 
 def run_backtest_sync(task_data):
     """Synchronous wrapper for run_backtest suitable for multiprocessing."""
+    logger.debug(f"run_backtest_sync called with task_data: {task_data}")
     solution_idx, parameters, mint, df_data, initial_capital, fitness_metric = task_data
     logger.debug(f"[Worker] Starting sync backtest for Sol {solution_idx}, Mint {mint}") # Log entry
     result = None
@@ -83,7 +84,8 @@ def calculate_average_fitness(results):
     num_solutions = max(aggregated_fitness.keys()) + 1 if aggregated_fitness else 0
 
     for sol_idx in range(num_solutions): # Iterate up to the max index encountered
-        if sol_idx in aggregated_fitness and aggregated_fitness[sol_idx]['count'] > 0:
+        if (sol_idx in aggregated_fitness and 
+            aggregated_fitness[sol_idx]['count'] > 0):
             total = aggregated_fitness[sol_idx]['total']
             count = aggregated_fitness[sol_idx]['count']
             avg_fitness = total / count
@@ -101,6 +103,7 @@ def fitness_func_mp(ga_instance, solution, sol_idx):
     PyGAD fitness function using multiprocessing pool for backtests.
     Uses the 'train' dataset globally.
     """
+    logger.debug(f"Evaluating solution {sol_idx}: {solution}")
     global historical_data_sets, pool # Access global data and pool
 
     start_time = time.time()
@@ -120,6 +123,7 @@ def fitness_func_mp(ga_instance, solution, sol_idx):
         if not df_data.empty:
             # Pass solution index, params, mint, data, capital, metric name
             tasks.append((sol_idx, parameters.copy(), mint, df_data.copy(), BACKTEST_INITIAL_CAPITAL, FITNESS_METRIC))
+            # logger.debug(f"Created task: {tasks[-1]}") 
 
     if not tasks:
         logger.warning(f"No backtest tasks generated for solution {sol_idx}.")
@@ -141,6 +145,7 @@ def fitness_func_mp(ga_instance, solution, sol_idx):
 
     except Exception as e:
         logger.exception(f"Error during multiprocessing fitness calculation for solution {sol_idx}: {e}")
+        logger.error(traceback.format_exc())  # Add traceback logging
         fitness = worst_fitness
 
     end_time = time.time()
@@ -152,11 +157,32 @@ def fitness_func_mp(ga_instance, solution, sol_idx):
 
     return fitness
 
+def run_backtest_for_fitness(solutions, data_set_key='train'):
+    # ... existing code ...
+    data_for_backtest = historical_data_sets.get(data_set_key, {})
+    if not data_for_backtest:
+        logger.warning(f"No data found for {data_set_key}. Returning worst fitness.")
+        return [-float('inf') if FITNESS_GOAL == 'max' else float('inf')] * len(solutions)
+
+    for sol_idx, solution in enumerate(solutions):
+        logger.debug(f"Processing solution {sol_idx} for {data_set_key}") # Added
+        parameters = {param['name']: solution[i] for i, param in enumerate(OPTIMIZABLE_PARAMETERS)}
+        tasks = []
+        for mint, df_data in data_for_backtest.items():
+            logger.debug(f"Running backtest for mint {mint} in {data_set_key}") # Added
+            if df_data.empty:
+                logger.warning(f"Dataframe is empty for mint {mint} in {data_set_key}") # Added
+                continue
+            try:
+                tasks.append((sol_idx, parameters.copy(), mint, df_data.copy(), BACKTEST_INITIAL_CAPITAL, FITNESS_METRIC))
+                #logger.debug(f"Created task: {tasks[-1]}")  # Log the last added task
+            except Exception as e:
+                logger.exception(f"Error creating task for mint {mint} in {data_set_key}: {e}") # Added
 
 # --- Main Execution ---
 async def main():
     global db_client, historical_data_sets, pool # Declare usage of globals
-    setup_logging()
+    # setup_logging()
 
     # --- Database Connection ---
     db_client = DatabaseClient()
@@ -184,11 +210,20 @@ async def main():
     # Alternatively, pass 'loaded_data' to the fitness function if possible with PyGAD setup
     historical_data_sets = loaded_data
 
+    logger.info(f"Training set size: {len(historical_data_sets.get('train', {}))}")
+    logger.info(f"Validation set size: {len(historical_data_sets.get('validation', {}))}")
+    logger.info(f"Test set size: {len(historical_data_sets.get('test', {}))}")
+
     if not historical_data_sets.get('train'):
         logger.critical("No training data loaded. Cannot run GA. Exiting.")
         await db_client.close()
         return
     logger.info("Data loaded and split successfully.")
+
+    logger.info(f"Keys in hist_data_dict: {list(historical_data_sets.keys())}")  # Corrected variable name
+    # for mint, df in historical_data_sets.items(): # Corrected variable name
+    #     logger.info(f"Data for mint {mint}:")
+        #logger.info(df.head().to_string())  # Print first few rows as string
 
     # --- PyGAD Configuration ---
     gene_space = []
@@ -213,7 +248,21 @@ async def main():
              logger.error(f"Invalid configuration for parameter {param['name']}. Missing 'values' or 'low'/'high'.")
              await db_client.close()
              return
+        
         gene_type.append(param['type']) # Ensure types are correctly specified (float/int)
+
+    # (Temporary - for testing)
+    # for param in OPTIMIZABLE_PARAMETERS:
+    #     if 'type' in param:
+    #         del param['type']
+
+    import copy
+    optimizable_params_serializable = copy.deepcopy(OPTIMIZABLE_PARAMETERS)
+    for param in optimizable_params_serializable:
+        if 'type' in param:
+            param['type'] = str(param['type'])  # Convert type to string
+
+    logger.debug(f"OPTIMIZABLE_PARAMETERS (serializable): {json.dumps(optimizable_params_serializable, indent=4)}")
 
     # Define callback for generation completion
     def on_generation(ga_instance):
@@ -232,6 +281,12 @@ async def main():
         else:
              logger.warning(f"Generation {generation} finished. Fitness data not available yet.")
 
+    def on_initialization(ga_instance):
+        logger.info("Initial population created. Inspecting...")
+        for i in range(min(5, ga_instance.sol_per_pop)):  # Check first 5
+            solution = ga_instance.population[i]
+            fitness = fitness_func_mp(ga_instance, solution, i)
+            logger.info(f"Initial Sol {i}: {solution}, Fitness={fitness}")
 
     logger.info(f"Setting up PyGAD: Pop={POPULATION_SIZE}, Gens={NUM_GENERATIONS}, Genes={len(OPTIMIZABLE_PARAMETERS)}")
     ga_instance = pygad.GA(
@@ -255,6 +310,7 @@ async def main():
         mutation_num_genes=max(1, int(len(OPTIMIZABLE_PARAMETERS) * 0.1)), # Mutate ~10% of genes
         keep_elitism=2,
         on_generation=on_generation,
+        on_start=on_initialization,
         parallel_processing=None # Disable PyGAD internal parallel processing as we use multiprocessing Pool
         # stop_criteria=["saturate_10"] # Example
     )
@@ -285,14 +341,14 @@ async def main():
 
         logger.info("Running validation on the best solution...")
         if historical_data_sets.get('validation'):
-            val_results = await run_backtest_for_fitness([solution], data_set_key='validation')
+            val_results = run_backtest_for_fitness([solution], data_set_key='validation')
             if val_results: validation_fitness = val_results[0]
             # Run full backtest again to get all metrics (optional)
             # all_metrics_validation = await run_backtest(best_params, combined_validation_df, BACKTEST_INITIAL_CAPITAL)
 
         logger.info("Running final test on the best solution...")
         if historical_data_sets.get('test'):
-            test_results = await run_backtest_for_fitness([solution], data_set_key='test')
+            test_results = run_backtest_for_fitness([solution], data_set_key='test')
             if test_results: test_fitness = test_results[0]
             # Run full backtest again to get all metrics (optional)
             # all_metrics_test = await run_backtest(best_params, combined_test_df, BACKTEST_INITIAL_CAPITAL)
@@ -359,13 +415,14 @@ async def main():
 
 # --- !! IMPORTANT GUARD !! ---
 if __name__ == "__main__":
+    setup_logging()
     # Add freeze_support() here
     freeze_support()
 
     # Initialize the pool here, only in the main process
     num_processes = max(1, cpu_count() - 2)
     # You can temporarily set num_processes = 1 here for debugging
-    num_processes = 1
+    #num_processes = 1
     logger.info(f"[Main] DEBUG: Running with {num_processes} processes.")
     pool = Pool(processes=num_processes) # Assign to global pool variable
     logger.info(f"Initialized Multiprocessing Pool with {num_processes} processes.")
