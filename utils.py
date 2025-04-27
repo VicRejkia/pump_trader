@@ -405,24 +405,79 @@ def calculate_volatility(prices: pd.Series, window: int = 120) -> pd.Series: # <
 
 import os
 
-def export_to_csv(historical_data_sets: Dict[str, Dict[str, pd.DataFrame]], output_dir: str):
+def export_to_csv(historical_data_sets: Dict[str, Dict[str, pd.DataFrame]], 
+                 output_dir: str,
+                 token_lifespans: Optional[Dict[str, Dict[str, datetime]]] = None):
     """
-    Exports historical_data_sets to CSV files, organized by dataset type and token.
+    Exports historical_data_sets and token_lifespans to CSV files.
+    
+    Args:
+        historical_data_sets: Dictionary of datasets containing price histories
+        output_dir: Directory to save the exports
+        token_lifespans: Optional dictionary containing token lifespan information
     """
-    # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
-
-    # Save each DataFrame as a CSV file
+    
+    # Export datasets
+    validation_report = []
+    
     for dataset_key, dataset in historical_data_sets.items():
         dataset_dir = os.path.join(output_dir, dataset_key)
         os.makedirs(dataset_dir, exist_ok=True)
-
+        
         for mint, df in dataset.items():
-            csv_file = os.path.join(dataset_dir, f"{mint}.csv")
-            df.to_csv(csv_file, index=True)  # Include the index (timestamp)
-            print(f"Exported {dataset_key}/{mint} to {csv_file}")
-
-    print(f"Exported historical data to {output_dir}")
+            # Data validation
+            zero_prices = df['price'].eq(0).sum()
+            null_prices = df['price'].isnull().sum()
+            
+            if zero_prices > 0 or null_prices > 0:
+                validation_report.append({
+                    'dataset': dataset_key,
+                    'mint': mint,
+                    'zero_prices': zero_prices,
+                    'null_prices': null_prices,
+                    'total_rows': len(df),
+                    'start_ts': df.index[0] if not df.empty else None,
+                    'end_ts': df.index[-1] if not df.empty else None
+                })
+            
+            # Export price data
+            csv_file = os.path.join(dataset_dir, f"{mint}_prices.csv")
+            df.to_csv(csv_file, index=True)
+            
+            # Export lifespan data if available
+            if token_lifespans and mint in token_lifespans:
+                lifespan_file = os.path.join(dataset_dir, f"{mint}_lifespan.json")
+                with open(lifespan_file, 'w') as f:
+                    json.dump({
+                        'mint': mint,
+                        'start_ts': token_lifespans[mint]['start_ts'].isoformat() if token_lifespans[mint]['start_ts'] else None,
+                        'end_ts': token_lifespans[mint]['end_ts'].isoformat() if token_lifespans[mint]['end_ts'] else None
+                    }, f, indent=4)
+    
+    # Write validation report with lifespan comparison
+    if validation_report:
+        report_file = os.path.join(output_dir, "validation_report.txt")
+        with open(report_file, 'w') as f:
+            f.write("Data Validation Report\n")
+            f.write("====================\n\n")
+            for report in validation_report:
+                f.write(f"Dataset: {report['dataset']}\n")
+                f.write(f"Mint: {report['mint']}\n")
+                f.write(f"Zero prices: {report['zero_prices']}\n")
+                f.write(f"Null prices: {report['null_prices']}\n")
+                f.write(f"Total rows: {report['total_rows']}\n")
+                f.write(f"Data range: {report['start_ts']} to {report['end_ts']}\n")
+                
+                # Add lifespan info if available
+                if token_lifespans and report['mint'] in token_lifespans:
+                    lifespan = token_lifespans[report['mint']]
+                    f.write(f"Token lifespan: {lifespan['start_ts']} to {lifespan['end_ts']}\n")
+                f.write("--------------------\n")
+        
+        logger.warning(f"Found data quality issues. Check {report_file} for details.")
+    
+    logger.info(f"Exported historical data and lifespans to {output_dir}")
 
 class NpEncoder(json.JSONEncoder):
     """
