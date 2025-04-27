@@ -46,7 +46,7 @@ import rl_config
 from logger import logger, setup_logging
 from database_handler import DatabaseClient
 from rl_environment import TradingEnv # Ensure TradingEnv takes lifespan info
-from utils import load_and_split_data, calculate_volatility, NpEncoder # Import NpEncoder for saving
+from utils import load_and_split_data, calculate_volatility, export_to_csv, NpEncoder # Import NpEncoder for saving
 
 # --- Global Variables ---
 db_client_global: Optional[DatabaseClient] = None
@@ -70,6 +70,19 @@ class TensorboardCallback(BaseCallback):
         if sol_balances:
              avg_sol_balance = np.mean(sol_balances)
              self.logger.record('rollout/ep_sol_balance_mean', avg_sol_balance)
+        return True
+
+# Add this class after the TensorboardCallback class
+class SaveVecNormalizeCallback(BaseCallback):
+    """Callback to save VecNormalize statistics when a new best model is found."""
+    def __init__(self, save_path: str, verbose=0):
+        super().__init__(verbose)
+        self.save_path = save_path
+
+    def _on_step(self) -> bool:
+        vec_normalize = self.model.get_vec_normalize_env()
+        if vec_normalize is not None:
+            vec_normalize.save(self.save_path)
         return True
 
 # --- Environment Creation Helper ---
@@ -156,7 +169,13 @@ async def train_rl_agent():
         return
 
     loaded_data_sets, token_lifespans = loaded_results # Unpack
-    # --- End Load Data ---
+
+    # Create an output directory for the datasets
+    output_dir = os.path.join("data", "exported_datasets", datetime.now().strftime("%Y%m%d_%H%M%S"))
+
+    # Export the datasets and token lifespans
+    export_to_csv(loaded_data_sets, output_dir, token_lifespans)
+    logger.info(f"Exported datasets and token lifespans to {output_dir}")
 
     training_data = loaded_data_sets.get(rl_config.DATA_SET_KEY_TRAIN)
     eval_data = loaded_data_sets.get(rl_config.DATA_SET_KEY_EVAL)
@@ -272,18 +291,31 @@ async def train_rl_agent():
     agent_params = dict(
         policy="MlpPolicy",
         env=train_env, # Use the normalized env
-        policy_kwargs=rl_config.POLICY_KWARGS,
+        policy_kwargs={
+            "net_arch": {
+                "pi": [64, 64],  # Policy network architecture
+                "vf": [64, 64]   # Value function network architecture
+            }
+        },
         verbose=1,
-        # tensorboard_log=rl_config.TENSORBOARD_LOG_DIR, # Handled by logger now
         device=device,
         seed=42
     )
     # Algorithm-specific hyperparameters
     if rl_config.RL_ALGORITHM == "PPO":
         agent_params.update(dict(
-            n_steps=2048, batch_size=64, n_epochs=10, gamma=0.99,
-            gae_lambda=0.95, clip_range=0.2, ent_coef=0.0, vf_coef=0.5,
-            learning_rate=3e-4
+            n_steps=2048,
+            batch_size=64,
+            n_epochs=10,
+            gamma=0.99,
+            gae_lambda=0.95,
+            clip_range=0.2,
+            ent_coef=0.01,  # Slightly increased for better exploration
+            vf_coef=0.5,
+            learning_rate=3e-4,
+            max_grad_norm=0.5,  # Added to prevent explosive gradients
+            use_sde=False,     # Added explicit SDE setting
+            sde_sample_freq=-1
         ))
     # Add SAC/TD3 params if needed
 
@@ -304,18 +336,20 @@ async def train_rl_agent():
     callbacks.append(checkpoint_callback)
 
     # Evaluation callback
-    if eval_env: # Only add if eval_env exists
+    if eval_env:
+        save_vec_normalize_callback = SaveVecNormalizeCallback(
+            save_path=os.path.join(best_model_save_dir, "best_vecnormalize.pkl")
+        )
         eval_callback = EvalCallback(
-            eval_env, # Use the normalized eval env
+            eval_env,
             best_model_save_path=best_model_save_dir,
             log_path=best_model_save_dir,
-            eval_freq=max(rl_config.EVAL_FREQ // rl_config.N_ENVS, 1), # Adjust freq by n_envs
+            eval_freq=max(rl_config.EVAL_FREQ // rl_config.N_ENVS, 1),
             n_eval_episodes=rl_config.N_EVAL_EPISODES,
             deterministic=True,
             render=False,
             verbose=1,
-            # Callback needs to save VecNormalize stats when saving best model
-            callback_on_new_best=lambda _locals, _globals: _locals['self'].model.get_vec_normalize_env().save(os.path.join(best_model_save_dir, "best_vecnormalize.pkl"))
+            callback_on_new_best=save_vec_normalize_callback  # Use the new callback class
         )
         callbacks.append(eval_callback)
     else:
