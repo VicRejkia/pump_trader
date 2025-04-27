@@ -7,12 +7,13 @@ import os
 import asyncio # <-- Add if used implicitly by called async functions
 import pandas as pd
 import numpy as np
+import json
 from datetime import datetime, timezone, timedelta # <-- Added timedelta
 from logger import logger
 # Type hint for DatabaseClient without creating circular dependency
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Dict, Optional, Tuple, List
 if TYPE_CHECKING:
-    from database_handler import DatabaseClient
+    from database_handler import DatabaseClient, get_token_lifespan 
 from urllib.parse import urlparse
 import winsound
 
@@ -194,13 +195,28 @@ async def load_and_split_data(
     start_date_dt: datetime,
     end_date_dt: datetime,
     data_split_config: dict,
-    min_data_points: int = 100 # Minimum data points required per token after fetching
-) -> Optional[Dict[str, Dict[str, pd.DataFrame]]]:
+    min_data_points: int = 50 # Minimum *trades* required per token
+) -> Optional[Tuple[Dict[str, Dict[str, pd.DataFrame]], Dict[str, Dict[str, datetime]]]]:
     """
-    Loads historical data for relevant tokens within a date range and splits
-    it into training, validation, and test sets.
+    Loads historical data for tokens active within a date range, determines their
+    lifespans, and splits tokens chronologically based on their *start time* into
+    training, validation, and test sets. Ensures complete token lifecycles are
+    assigned to splits.
+
+    Args:
+        db_client: Initialized DatabaseClient instance.
+        start_date_dt: Overall start datetime for data consideration (UTC).
+        end_date_dt: Overall end datetime for data consideration (UTC).
+        data_split_config: Dictionary with 'training', 'validation', 'test' percentages.
+        min_data_points: Minimum number of trades a token must have within the overall
+                         period to be considered.
+
+    Returns:
+        A tuple containing:
+        - historical_data_sets (dict): {'train': {mint: df}, 'validation': {mint: df}, 'test': {mint: df}}
+        - token_lifespans (dict): {mint: {'start_ts': dt, 'end_ts': dt}} for all loaded tokens.
+        Returns None if loading or splitting fails.
     """
-    # ... (function code as provided) ...
     if not db_client or not db_client.pool:
         logger.error("Database client not initialized or connected.")
         return None
@@ -208,97 +224,140 @@ async def load_and_split_data(
     try:
         start_date = ensure_datetime(start_date_dt)
         end_date = ensure_datetime(end_date_dt)
-        if start_date >= end_date:
-             logger.error(f"Start date ({start_date}) must be before end date ({end_date}).")
+        if not start_date or not end_date or start_date >= end_date:
+             logger.error(f"Invalid date range: Start={start_date}, End={end_date}.")
              return None
 
-        logger.info(f"Attempting to load data from {start_date.isoformat()} to {end_date.isoformat()}")
+        logger.info(f"Loading & splitting data. Overall Period: {start_date.isoformat()} to {end_date.isoformat()}")
 
-        # --- Fetch candidate mints ---
-        logger.info("Fetching list of mints with trades in the specified period...")
-        query_mints_in_period = """
-            SELECT mint, COUNT(*) as trade_count
-            FROM v_trades
-            WHERE timestamp >= $1 AND timestamp < $2
-            GROUP BY mint
-            HAVING COUNT(*) >= $3;
+        # --- Fetch candidate mints AND their lifespans ---
+        logger.info("Fetching mints and lifespans active within the period...")
+        # Query to get mints with min trades and their first/last trade time within the period
+        query_mints_lifespans = """
+            WITH RankedTrades AS (
+                SELECT
+                    mint,
+                    timestamp,
+                    ROW_NUMBER() OVER (PARTITION BY mint ORDER BY timestamp ASC) as rn_asc,
+                    ROW_NUMBER() OVER (PARTITION BY mint ORDER BY timestamp DESC) as rn_desc
+                FROM v_trades
+                WHERE timestamp >= $1 AND timestamp < $2
+            ),
+            MintCounts AS (
+                SELECT mint, COUNT(*) as trade_count
+                FROM v_trades
+                WHERE timestamp >= $1 AND timestamp < $2
+                GROUP BY mint
+                HAVING COUNT(*) >= $3
+            )
+            SELECT
+                mc.mint,
+                MIN(rt.timestamp) FILTER (WHERE rt.rn_asc = 1) as first_trade_ts,
+                MAX(rt.timestamp) FILTER (WHERE rt.rn_desc = 1) as last_trade_ts,
+                mc.trade_count
+            FROM MintCounts mc
+            JOIN RankedTrades rt ON mc.mint = rt.mint
+            WHERE rt.rn_asc = 1 OR rt.rn_desc = 1 -- Optimization to only join needed rows
+            GROUP BY mc.mint, mc.trade_count;
         """
-        active_mints_records = await db_client.pool.fetch(query_mints_in_period, start_date, end_date, min_data_points)
-        if not active_mints_records:
+        candidate_records = await db_client.pool.fetch(query_mints_lifespans, start_date, end_date, min_data_points)
+
+        if not candidate_records:
             logger.error(f"No tokens found with at least {min_data_points} trades in the specified period.")
             return None
-        mints_to_load = [r['mint'] for r in active_mints_records]
-        logger.info(f"Found {len(mints_to_load)} unique mints with >= {min_data_points} trades. Fetching detailed data...")
 
-        # --- Fetch detailed historical data ---
+        token_lifespans_map: Dict[str, Dict[str, datetime]] = {}
+        mints_to_load: List[str] = []
+        for r in candidate_records:
+            mint = r['mint']
+            start_ts = r['first_trade_ts']
+            end_ts = r['last_trade_ts']
+            if mint and start_ts and end_ts:
+                 # Ensure UTC
+                start_ts = start_ts.replace(tzinfo=timezone.utc) if start_ts.tzinfo is None else start_ts.astimezone(timezone.utc)
+                end_ts = end_ts.replace(tzinfo=timezone.utc) if end_ts.tzinfo is None else end_ts.astimezone(timezone.utc)
+                # Add buffer to end_ts
+                end_ts += timedelta(seconds=1)
+                token_lifespans_map[mint] = {'start_ts': start_ts, 'end_ts': end_ts}
+                mints_to_load.append(mint)
+            else:
+                 logger.warning(f"Missing lifespan info for mint {mint} in query result. Skipping.")
+
+
+        if not mints_to_load:
+            logger.error("No valid mints with lifespans found after processing query results.")
+            return None
+
+        logger.info(f"Found {len(mints_to_load)} candidate mints with lifespan info. Fetching detailed data...")
+
+        # --- Fetch detailed historical data for these mints ---
+        # Fetch data slightly wider than the lifespan range just in case? No, fetch exact range needed.
         all_historical_data = await db_client.get_historical_data_for_backtesting(mints_to_load, start_date, end_date)
 
         if not all_historical_data:
             logger.error("Failed to fetch any historical data for the candidate mints.")
             return None
-        logger.info(f"Successfully fetched data for {len(all_historical_data)} tokens.")
+        logger.info(f"Successfully fetched detailed data for {len(all_historical_data)} tokens.")
 
-        # --- Split data chronologically ---
-        historical_data_sets = {'train': {}, 'validation': {}, 'test': {}}
-        total_duration_seconds = (end_date - start_date).total_seconds()
-        if total_duration_seconds <= 0:
-             logger.error("Total duration is zero or negative, cannot split data.")
-             return None
-
-        # Calculate split points based on seconds for precision
-        train_end_seconds = start_date.timestamp() + total_duration_seconds * data_split_config['training']
-        validation_end_seconds = train_end_seconds + total_duration_seconds * data_split_config['validation']
-
-        train_end_dt = datetime.fromtimestamp(train_end_seconds, tz=timezone.utc)
-        validation_end_dt = datetime.fromtimestamp(validation_end_seconds, tz=timezone.utc)
-
-        logger.info(f"Data Split Timestamps: Train End={train_end_dt.isoformat()}, Validation End={validation_end_dt.isoformat()}")
-
-        processed_count = 0
+        # --- Filter data based on fetched lifespans (ensure consistency) ---
+        filtered_historical_data = {}
+        final_token_lifespans = {}
         for mint, df in all_historical_data.items():
-            if df.empty or not isinstance(df.index, pd.DatetimeIndex) or df.index.tz is None:
-                logger.warning(f"Skipping token {mint} due to empty data or invalid/naive index.")
-                continue
+             if mint not in token_lifespans_map: continue # Should not happen
 
-            # Ensure data fully overlaps range before splitting
-            if df.index.min() >= end_date or df.index.max() < start_date:
-                logger.warning(f"Data for {mint} does not overlap with range {start_date}-{end_date}. Skipping.")
-                continue
+             lifespan = token_lifespans_map[mint]
+             df_filtered = df[(df.index >= lifespan['start_ts']) & (df.index <= lifespan['end_ts'])]
 
-            # Filter strictly within the requested range *before* splitting
-            df = df[(df.index >= start_date) & (df.index < end_date)]
-            if df.empty:
-                 logger.warning(f"No data remaining for {mint} after filtering by requested date range. Skipping.")
-                 continue
+             if not df_filtered.empty:
+                 filtered_historical_data[mint] = df_filtered
+                 final_token_lifespans[mint] = lifespan # Keep lifespan info for valid tokens
+             else:
+                  logger.warning(f"Data for mint {mint} became empty after filtering by its lifespan. Skipping.")
 
-            df_train = df[df.index < train_end_dt].copy()
-            df_validation = df[(df.index >= train_end_dt) & (df.index < validation_end_dt)].copy()
-            df_test = df[df.index >= validation_end_dt].copy()
-
-            # Basic check for required columns (should be present after DB fetch)
-            required_cols = ['price', 'volume', 'market_cap_calculated', 'rugcheck_score', 'socials_score']
-            if not all(col in df.columns for col in required_cols):
-                logger.warning(f"Token {mint} missing required columns. Columns present: {df.columns}. Skipping.")
-                continue
-
-            # Only include tokens that have data in the training set
-            if not df_train.empty:
-                historical_data_sets['train'][mint] = df_train
-                if not df_validation.empty:
-                    historical_data_sets['validation'][mint] = df_validation
-                if not df_test.empty:
-                    historical_data_sets['test'][mint] = df_test
-                processed_count += 1
-            else:
-                 logger.warning(f"Token {mint} had no data points in the calculated training period ({start_date} to {train_end_dt}). Skipping.")
-
-
-        if not historical_data_sets['train']:
-             logger.error("No tokens had sufficient data for the training period after processing.")
+        if not filtered_historical_data:
+             logger.error("No data remained after filtering tokens by their calculated lifespans.")
              return None
 
+        # --- Split tokens into sets based on their START time ---
+        # Sort tokens by their start time
+        sorted_mints = sorted(final_token_lifespans.keys(), key=lambda m: final_token_lifespans[m]['start_ts'])
+
+        n_tokens = len(sorted_mints)
+        n_train = int(n_tokens * data_split_config['training'])
+        n_val = int(n_tokens * data_split_config['validation'])
+        # Ensure calculation handles potential rounding issues if percentages don't sum perfectly
+        n_test = n_tokens - n_train - n_val
+
+        logger.info(f"Assigning tokens to splits: Train={n_train}, Validation={n_val}, Test={n_test}")
+
+        historical_data_sets: Dict[str, Dict[str, pd.DataFrame]] = {'train': {}, 'validation': {}, 'test': {}}
+
+        for i, mint in enumerate(sorted_mints):
+            df = filtered_historical_data[mint] # Get the filtered df
+            if i < n_train:
+                historical_data_sets['train'][mint] = df
+            elif i < n_train + n_val:
+                historical_data_sets['validation'][mint] = df
+            else:
+                # Only assign to test if n_test > 0
+                if n_test > 0 and i < n_train + n_val + n_test :
+                     historical_data_sets['test'][mint] = df
+                # Handle cases where sum might be slightly off due to int conversion
+                # elif n_test <= 0 and i >= n_train + n_val:
+                #      logger.warning(f"Token {mint} (index {i}) falls outside calculated splits. Assigning to validation as fallback.")
+                #      historical_data_sets['validation'][mint] = df
+
+
+        # Log split sizes
         logger.info(f"Data split complete. Training tokens: {len(historical_data_sets['train'])}, Validation tokens: {len(historical_data_sets['validation'])}, Test tokens: {len(historical_data_sets['test'])}")
-        return historical_data_sets
+
+        # Basic check if training set is populated
+        if not historical_data_sets['train']:
+             logger.error("Training set is empty after chronological splitting!")
+             return None
+
+        # Return both the split datasets and the lifespan map for all loaded tokens
+        return historical_data_sets, final_token_lifespans
 
     except ValueError as ve:
         logger.exception(f"Date parsing or processing error: {ve}")
@@ -343,3 +402,50 @@ def calculate_volatility(prices: pd.Series, window: int = 120) -> pd.Series: # <
 
     # Return the entire volatility Series
     return volatility_series.fillna(0.0) # Fill leading NaNs with 0
+
+import os
+
+def export_to_csv(historical_data_sets: Dict[str, Dict[str, pd.DataFrame]], output_dir: str):
+    """
+    Exports historical_data_sets to CSV files, organized by dataset type and token.
+    """
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Save each DataFrame as a CSV file
+    for dataset_key, dataset in historical_data_sets.items():
+        dataset_dir = os.path.join(output_dir, dataset_key)
+        os.makedirs(dataset_dir, exist_ok=True)
+
+        for mint, df in dataset.items():
+            csv_file = os.path.join(dataset_dir, f"{mint}.csv")
+            df.to_csv(csv_file, index=True)  # Include the index (timestamp)
+            print(f"Exported {dataset_key}/{mint} to {csv_file}")
+
+    print(f"Exported historical data to {output_dir}")
+
+class NpEncoder(json.JSONEncoder):
+    """
+    Custom JSON encoder to handle NumPy, Pandas, and datetime types
+    that are not serializable by default.
+    """
+    def default(self, obj):
+        if isinstance(obj, (np.integer, np.int_)):
+            return int(obj)
+        elif isinstance(obj, (np.floating, np.float_)):
+            # Handle NaN, Infinity, -Infinity separately
+            if np.isnan(obj):
+                return None # Represent NaN as null in JSON
+            elif np.isposinf(obj):
+                return 'Infinity'
+            elif np.isneginf(obj):
+                return '-Infinity'
+            else:
+                return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist() # Convert arrays to lists
+        elif isinstance(obj, (datetime, pd.Timestamp)):
+            # Convert datetime/timestamp to ISO 8601 string format
+            return obj.isoformat()
+        # Let the base class default method raise the TypeError for unsupported types
+        return super(NpEncoder, self).default(obj)

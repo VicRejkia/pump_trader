@@ -15,6 +15,10 @@ from dotenv import load_dotenv
 from logger import logger
 from config import TOTAL_SUPPLY
 from state_manager import GlobalState
+import pandas as pd
+import numpy as np
+from datetime import datetime, timezone, timedelta
+from typing import Dict, Optional, List, Tuple # Added List, Tuple
 
 # Load environment variables from .env file
 load_dotenv()
@@ -976,207 +980,280 @@ class DatabaseClient:
             await self.pool.close()
             logger.info("Database connection pool closed.")
 
-    async def get_historical_data_for_backtesting(self, mints: list[str], start_date: datetime, end_date: datetime) -> dict[str, pd.DataFrame]:
+    async def get_token_lifespan(self, mint: str) -> Optional[Dict[str, datetime]]:
         """
-        Fetches comprehensive historical data for specified tokens within a date range,
-        structured for backtesting. Includes pre-calculated USD market cap.
+        Fetches the approximate start and end timestamp of a token's activity
+        based on its first and last trade records in the v_trades view.
+
         Args:
-            mints: A list of token mint addresses.
-            start_date: The start datetime (inclusive, UTC).
-            end_date: The end datetime (exclusive, UTC).
+            mint: The mint address of the token.
+
         Returns:
-            A dictionary where keys are mint addresses and values are pandas DataFrames.
-            Each DataFrame contains time-series data (price, sol_amount (as volume proxy), market_cap_calculated,
-            rugcheck_score, socials_score) indexed by timestamp for that token.
-            Returns an empty dictionary if no mints are provided or an error occurs.
+            A dictionary {'start_ts': datetime, 'end_ts': datetime} if trades exist,
+            otherwise None. Timestamps are timezone-aware (UTC).
         """
-        if not mints:
-            logger.warning("get_historical_data_for_backtesting called with empty mints list.")
-            return {}
+        if not self.pool:
+            logger.error("Database pool not initialized.")
+            return None
 
-        # Ensure dates are timezone-aware (UTC)
-        if start_date.tzinfo is None:
-            start_date = start_date.replace(tzinfo=timezone.utc)
-        if end_date.tzinfo is None:
-            end_date = end_date.replace(tzinfo=timezone.utc)
-
-        logger.info(f"Fetching historical data for {len(mints)} tokens from {start_date} to {end_date}...")
-
-        # Queries remain the same...
-        trade_query = """
+        query = """
             SELECT
-                mint, timestamp, price, sol_amount AS volume, market_cap_calculated
+                MIN(timestamp) as first_trade_ts,
+                MAX(timestamp) as last_trade_ts
             FROM v_trades
-            WHERE mint = ANY($1::text[])
-              AND timestamp >= $2 AND timestamp < $3
-            ORDER BY mint, timestamp;
+            WHERE mint = $1;
         """
-        rugcheck_query = """
-            SELECT
-                mint, last_checked AS timestamp, score AS rugcheck_score
-            FROM v_rugcheck
-            WHERE mint = ANY($1::text[])
-              AND last_checked >= $2 AND last_checked < $3
-            ORDER BY mint, last_checked;
-        """
-        token_info_query = """
-            WITH LatestSocials AS (
-                SELECT
-                    mint,
-                    socials_score,
-                    timestamp AS token_creation_time,
-                    ROW_NUMBER() OVER (PARTITION BY mint ORDER BY timestamp DESC) as rn
-                FROM v_tokens
-                WHERE mint = ANY($1::text[])
-                  AND timestamp < $2
-            )
-            SELECT mint, token_creation_time, socials_score
-            FROM LatestSocials
-            WHERE rn = 1;
-        """
-
-        results_dict = {}
         async with self.pool.acquire() as conn:
             try:
-                # Fetch data sequentially
-                logger.debug("Fetching trade data (including market_cap_calculated)...")
-                trade_records_raw = await conn.fetch(trade_query, mints, start_date, end_date)
-                logger.debug(f"Fetched {len(trade_records_raw)} trade records.")
-
-                logger.debug("Fetching rugcheck data...")
-                rugcheck_records_raw = await conn.fetch(rugcheck_query, mints, start_date, end_date)
-                logger.debug(f"Fetched {len(rugcheck_records_raw)} rugcheck records.")
-
-                logger.debug("Fetching token info data...")
-                token_info_records_raw = await conn.fetch(token_info_query, mints, end_date)
-                logger.debug(f"Fetched {len(token_info_records_raw)} token info records.")
-
-                # --- Process Trade Data ---
-                if trade_records_raw:
-                    trades_df = pd.DataFrame(trade_records_raw, columns=['mint', 'timestamp', 'price', 'volume', 'market_cap_calculated'])
-                    # Ensure timestamp is datetime before setting index
-                    trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'], errors='coerce', utc=True)
-                    trades_df.dropna(subset=['timestamp'], inplace=True) # Drop rows where timestamp conversion failed
-                    trades_df.set_index('timestamp', inplace=True)
-                    trades_df = trades_df.astype({'price': float, 'volume': float, 'market_cap_calculated': float}, errors='ignore')
-                    trades_df['market_cap_calculated'] = pd.to_numeric(trades_df['market_cap_calculated'], errors='coerce').fillna(0.0)
+                row = await conn.fetchrow(query, mint)
+                if row and row['first_trade_ts'] and row['last_trade_ts']:
+                    # Ensure timestamps are timezone-aware UTC
+                    start_ts = row['first_trade_ts'].replace(tzinfo=timezone.utc) if row['first_trade_ts'].tzinfo is None else row['first_trade_ts'].astimezone(timezone.utc)
+                    end_ts = row['last_trade_ts'].replace(tzinfo=timezone.utc) if row['last_trade_ts'].tzinfo is None else row['last_trade_ts'].astimezone(timezone.utc)
+                    return {'start_ts': start_ts, 'end_ts': end_ts}
                 else:
-                    trades_df = pd.DataFrame(columns=['mint', 'price', 'volume', 'market_cap_calculated']).set_index(pd.DatetimeIndex([], tz='UTC')) # Ensure UTC index for empty DF
-
-                # --- Process RugCheck Data ---
-                if rugcheck_records_raw:
-                    rugcheck_df = pd.DataFrame(rugcheck_records_raw, columns=['mint', 'timestamp', 'rugcheck_score'])
-                    # Ensure timestamp is datetime before setting index
-                    rugcheck_df['timestamp'] = pd.to_datetime(rugcheck_df['timestamp'], errors='coerce', utc=True)
-                    rugcheck_df.dropna(subset=['timestamp'], inplace=True) # Drop rows where timestamp conversion failed
-                    rugcheck_df.set_index('timestamp', inplace=True)
-                    rugcheck_df = rugcheck_df[['mint', 'rugcheck_score']]
-                    rugcheck_df = rugcheck_df.astype({'rugcheck_score': int}, errors='ignore')
-                else:
-                     rugcheck_df = pd.DataFrame(columns=['mint', 'rugcheck_score']).set_index(pd.DatetimeIndex([], tz='UTC')) # Ensure UTC index for empty DF
-
-
-                # --- Process Token Info (Creation Time, Socials) ---
-                token_info = {r['mint']: {'creation_time': r['token_creation_time'], 'socials_score': r['socials_score']}
-                              for r in token_info_records_raw}
-
-                # --- Combine data per mint (Optimized) ---
-                logger.info("Grouping data by mint for processing...")
-                if 'mint' not in trades_df.columns: trades_df['mint'] = None
-                if 'mint' not in rugcheck_df.columns: rugcheck_df['mint'] = None
-
-                grouped_trades = trades_df.groupby('mint') if 'mint' in trades_df.columns else {}
-                grouped_rugcheck = rugcheck_df.groupby('mint') if 'mint' in rugcheck_df.columns else {}
-                processed_mints = set(trades_df['mint'].dropna().unique()) | set(rugcheck_df['mint'].dropna().unique())
-                logger.info(f"Processing data for {len(processed_mints)} mints found in trades/rugcheck data...")
-
-                for mint in processed_mints:
-                    mint_trades = grouped_trades.get_group(mint)[['price', 'volume', 'market_cap_calculated']] if mint in grouped_trades.groups else pd.DataFrame(columns=['price', 'volume', 'market_cap_calculated']).set_index(pd.DatetimeIndex([], tz='UTC'))
-                    mint_rugcheck = grouped_rugcheck.get_group(mint)[['rugcheck_score']] if mint in grouped_rugcheck.groups else pd.DataFrame(columns=['rugcheck_score']).set_index(pd.DatetimeIndex([], tz='UTC'))
-
-                    if mint_trades.empty and mint_rugcheck.empty:
-                        logger.debug(f"No trade or rugcheck data found for {mint} after grouping.")
-                        continue
-
-                    # *** FIX: Ensure both indices are timezone-aware (UTC) before merging ***
-                    if not mint_trades.empty:
-                        if mint_trades.index.tz is None:
-                            logger.warning(f"Localizing naive trades index for {mint} to UTC.")
-                            mint_trades.index = mint_trades.index.tz_localize('UTC')
-                        elif str(mint_trades.index.tz).upper() != 'UTC':
-                            logger.warning(f"Converting non-UTC trades index for {mint} to UTC.")
-                            mint_trades.index = mint_trades.index.tz_convert('UTC')
-
-                    if not mint_rugcheck.empty:
-                        if mint_rugcheck.index.tz is None:
-                            logger.warning(f"Localizing naive rugcheck index for {mint} to UTC.")
-                            mint_rugcheck.index = mint_rugcheck.index.tz_localize('UTC')
-                        elif str(mint_rugcheck.index.tz).upper() != 'UTC':
-                            logger.warning(f"Converting non-UTC rugcheck index for {mint} to UTC.")
-                            mint_rugcheck.index = mint_rugcheck.index.tz_convert('UTC')
-
-                    # Now merge using the standardized indices
-                    combined_df = pd.merge(
-                        mint_trades,
-                        mint_rugcheck,
-                        left_index=True,
-                        right_index=True,
-                        how='outer'
-                    )
-
-                    # Sort by index after merge
-                    combined_df.sort_index(inplace=True)
-
-                    if not isinstance(combined_df.index, pd.DatetimeIndex):
-                         logger.warning(f"Timestamp index lost or invalid for mint {mint} after merge. Skipping.")
-                         continue
-
-                    # Add static token info
-                    mint_info_data = token_info.get(mint)
-                    if mint_info_data:
-                        combined_df['token_creation_time'] = pd.to_datetime(mint_info_data['creation_time'], errors='coerce', utc=True)
-                        combined_df['socials_score'] = mint_info_data['socials_score']
-                    else:
-                        combined_df['token_creation_time'] = pd.NaT
-                        combined_df['socials_score'] = None
-
-                    # Ensure numeric types and fill NaNs
-                    numeric_cols = ['rugcheck_score', 'socials_score', 'market_cap_calculated', 'price', 'volume']
-                    for col in numeric_cols:
-                        if col in combined_df.columns:
-                            combined_df[col] = pd.to_numeric(combined_df[col], errors='coerce')
-
-                    # Forward fill AFTER merging and sorting
-                    fill_cols = ['rugcheck_score', 'socials_score', 'market_cap_calculated', 'price', 'volume']
-                    combined_df[fill_cols] = combined_df[fill_cols].ffill()
-                    combined_df[fill_cols] = combined_df[fill_cols].bfill() # Backfill initial NaNs
-
-                    # Fill remaining NaNs with defaults AFTER ffill/bfill
-                    combined_df['rugcheck_score'] = combined_df['rugcheck_score'].fillna(10000).astype(int)
-                    combined_df['socials_score'] = combined_df['socials_score'].fillna(100).astype(int)
-                    combined_df['market_cap_calculated'] = combined_df['market_cap_calculated'].fillna(0.0).astype(float)
-                    combined_df['price'] = combined_df['price'].fillna(0.0).astype(float)
-                    combined_df['volume'] = combined_df['volume'].fillna(0.0).astype(float)
-
-                    # Filter by date range *after* filling
-                    combined_df = combined_df[(combined_df.index >= start_date) & (combined_df.index < end_date)]
-
-                    if not combined_df.empty:
-                        required_cols = ['price', 'volume', 'market_cap_calculated', 'rugcheck_score', 'socials_score', 'token_creation_time']
-                        for r_col in required_cols:
-                             if r_col not in combined_df.columns:
-                                 if r_col == 'token_creation_time': combined_df[r_col] = pd.NaT
-                                 elif r_col in ['rugcheck_score', 'socials_score']: combined_df[r_col] = 100
-                                 else: combined_df[r_col] = 0.0
-                        results_dict[mint] = combined_df[required_cols].copy()
-                    else:
-                         logger.debug(f"No combined data remained for {mint} after date filtering.")
-
-                logger.info(f"Finished processing data for {len(processed_mints)} mints.")
-
+                    logger.warning(f"No trade timestamps found for mint {mint} to determine lifespan.")
+                    return None
             except Exception as e:
-                logger.exception(f"Error fetching historical data: {e}")
+                logger.error(f"Error fetching token lifespan for {mint}: {e}", exc_info=True)
+                return None
+
+    async def get_historical_data_for_backtesting(
+            self,
+            mints: List[str],
+            start_date: datetime,
+            end_date: datetime
+        ) -> Dict[str, pd.DataFrame]:
+            """
+            Fetches comprehensive historical data for specified tokens within a date range,
+            structured for backtesting. Includes pre-calculated USD market cap and ensures
+            data consistency. Fetches data sequentially on a single connection.
+
+            Args:
+                mints: A list of token mint addresses.
+                start_date: The start datetime (inclusive, UTC).
+                end_date: The end datetime (exclusive, UTC).
+
+            Returns:
+                A dictionary where keys are mint addresses and values are pandas DataFrames.
+                Each DataFrame contains time-series data (price, volume, market_cap_calculated,
+                rugcheck_score, socials_score, token_creation_time, volatility [calculated later])
+                indexed by a timezone-aware UTC DatetimeIndex. Returns empty dict on error or no data.
+            """
+            if not mints:
+                logger.warning("get_historical_data_for_backtesting called with empty mints list.")
+                return {}
+            if not self.pool:
+                logger.error("Database pool not initialized.")
                 return {}
 
-        logger.info(f"Successfully fetched and processed historical data for {len(results_dict)} tokens.")
-        return results_dict
+            # Ensure dates are timezone-aware (UTC)
+            if start_date.tzinfo is None: start_date = start_date.replace(tzinfo=timezone.utc)
+            if end_date.tzinfo is None: end_date = end_date.replace(tzinfo=timezone.utc)
+
+            logger.info(f"Fetching historical data for {len(mints)} tokens from {start_date.isoformat()} to {end_date.isoformat()}...")
+
+            # --- Define Queries (same as before) ---
+            trade_query = """
+                SELECT
+                    mint, timestamp, price, sol_amount AS volume, market_cap_calculated
+                FROM v_trades -- Use view
+                WHERE mint = ANY($1::text[])
+                AND timestamp >= $2 AND timestamp < $3
+                ORDER BY mint, timestamp;
+            """
+            rugcheck_query = """
+                WITH RankedRugcheck AS (
+                    SELECT
+                        mint, last_checked AS timestamp, score AS rugcheck_score,
+                        ROW_NUMBER() OVER (PARTITION BY mint ORDER BY last_checked DESC) as rn
+                    FROM v_rugcheck -- Use view
+                    WHERE mint = ANY($1::text[])
+                    AND last_checked < $3
+                )
+                SELECT mint, timestamp, rugcheck_score
+                FROM RankedRugcheck
+                WHERE rn = 1 OR timestamp >= $2;
+            """
+            token_info_query = """
+                WITH LatestTokenInfo AS (
+                    SELECT
+                        mint,
+                        socials_score,
+                        timestamp AS token_creation_time,
+                        ROW_NUMBER() OVER (PARTITION BY mint ORDER BY timestamp DESC) as rn
+                    FROM v_tokens -- Use view
+                    WHERE mint = ANY($1::text[])
+                    AND timestamp < $2
+                )
+                SELECT mint, token_creation_time, socials_score
+                FROM LatestTokenInfo
+                WHERE rn = 1;
+            """
+
+            results_dict = {}
+            async with self.pool.acquire() as conn: # Acquire single connection
+                try:
+                    # --- Fetch data SEQUENTIALLY ---
+                    logger.debug("Fetching trade data...")
+                    trade_records_raw = await conn.fetch(trade_query, mints, start_date, end_date)
+                    logger.debug(f"Fetched {len(trade_records_raw)} trades.")
+
+                    logger.debug("Fetching rugcheck data...")
+                    rugcheck_records_raw = await conn.fetch(rugcheck_query, mints, start_date, end_date)
+                    logger.debug(f"Fetched {len(rugcheck_records_raw)} rugchecks.")
+
+                    logger.debug("Fetching token info data...")
+                    token_info_records_raw = await conn.fetch(token_info_query, mints, end_date)
+                    logger.debug(f"Fetched {len(token_info_records_raw)} token infos.")
+                    # --- End Sequential Fetch ---
+
+
+                    # --- Process Trade Data (same as before) ---
+                    if not trade_records_raw:
+                        logger.warning("No trade records found for the specified mints and period.")
+                        return {}
+
+                    trades_df = pd.DataFrame(trade_records_raw, columns=['mint', 'timestamp', 'price', 'volume', 'market_cap_calculated'])
+                    trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'], errors='coerce', utc=True)
+                    trades_df.dropna(subset=['timestamp'], inplace=True)
+                    trades_df.set_index('timestamp', inplace=True)
+                    for col in ['price', 'volume', 'market_cap_calculated']:
+                        trades_df[col] = pd.to_numeric(trades_df[col], errors='coerce')
+                    trades_df = trades_df.sort_index()
+
+                    # --- Process RugCheck Data (same as before) ---
+                    if rugcheck_records_raw:
+                        rugcheck_df = pd.DataFrame(rugcheck_records_raw, columns=['mint', 'timestamp', 'rugcheck_score'])
+                        rugcheck_df['timestamp'] = pd.to_datetime(rugcheck_df['timestamp'], errors='coerce', utc=True)
+                        rugcheck_df.dropna(subset=['timestamp'], inplace=True)
+                        rugcheck_df.set_index('timestamp', inplace=True)
+                        rugcheck_df['rugcheck_score'] = pd.to_numeric(rugcheck_df['rugcheck_score'], errors='coerce')
+                        rugcheck_df = rugcheck_df[['mint', 'rugcheck_score']]
+                        rugcheck_df = rugcheck_df.sort_index()
+                    else:
+                        rugcheck_df = pd.DataFrame(columns=['mint', 'rugcheck_score']).set_index(pd.DatetimeIndex([], tz='UTC'))
+
+                    # --- Process Token Info (same as before) ---
+                    token_info = {}
+                    if token_info_records_raw:
+                        for r in token_info_records_raw:
+                            mint = r['mint']
+                            creation_time = pd.to_datetime(r['token_creation_time'], errors='coerce', utc=True)
+                            socials = pd.to_numeric(r['socials_score'], errors='coerce')
+                            if pd.notna(creation_time):
+                                token_info[mint] = {'creation_time': creation_time, 'socials_score': socials}
+
+                    # --- Combine data per mint (same logic using pd.merge_asof) ---
+                    logger.info("Processing and combining data per mint...")
+                    required_final_cols = ['price', 'volume', 'market_cap_calculated', 'rugcheck_score', 'socials_score', 'token_creation_time']
+
+                    grouped_trades = trades_df.groupby('mint') if 'mint' in trades_df.columns else {}
+                    grouped_rugcheck = rugcheck_df.groupby('mint') if 'mint' in rugcheck_df.columns else {}
+
+                    for mint in grouped_trades.groups:
+                        mint_trades = grouped_trades.get_group(mint)[['price', 'volume', 'market_cap_calculated']]
+                        mint_rugcheck = grouped_rugcheck.get_group(mint)[['rugcheck_score']] if mint in grouped_rugcheck.groups else None
+
+                        combined_df = mint_trades.copy()
+                        if mint_rugcheck is not None and not mint_rugcheck.empty:
+                            combined_df = pd.merge_asof(
+                                combined_df.sort_index(),
+                                mint_rugcheck.sort_index(),
+                                left_index=True,
+                                right_index=True,
+                                direction='backward',
+                                tolerance=pd.Timedelta('1d')
+                            )
+                        else:
+                            combined_df['rugcheck_score'] = np.nan
+
+                        mint_info_data = token_info.get(mint)
+                        if mint_info_data:
+                            combined_df['token_creation_time'] = mint_info_data['creation_time']
+                            combined_df['socials_score'] = mint_info_data['socials_score']
+                        else:
+                            logger.warning(f"Missing token info for {mint}. Using defaults.")
+                            combined_df['token_creation_time'] = pd.NaT
+                            combined_df['socials_score'] = 100
+
+                        combined_df['rugcheck_score'] = combined_df['rugcheck_score'].ffill().bfill()
+                        combined_df['socials_score'] = combined_df['socials_score'].ffill().bfill()
+                        numeric_cols = ['price', 'volume', 'market_cap_calculated']
+                        for col in numeric_cols:
+                            combined_df[col] = combined_df[col].fillna(0.0)
+                        combined_df['rugcheck_score'] = combined_df['rugcheck_score'].fillna(10000).astype(int)
+                        combined_df['socials_score'] = combined_df['socials_score'].fillna(100).astype(int)
+
+                        for r_col in required_final_cols:
+                            if r_col not in combined_df.columns:
+                                logger.warning(f"Column '{r_col}' missing for {mint}. Adding default.")
+                                if r_col == 'token_creation_time': combined_df[r_col] = pd.NaT
+                                elif r_col in ['rugcheck_score', 'socials_score']: combined_df[r_col] = 100
+                                else: combined_df[r_col] = 0.0
+
+                        final_df = combined_df[(combined_df.index >= start_date) & (combined_df.index < end_date)]
+
+                        if not final_df.empty and all(col in final_df.columns for col in required_final_cols):
+                            results_dict[mint] = final_df[required_final_cols].copy()
+                        else:
+                            logger.warning(f"No valid data remained for {mint} after processing. Skipping.")
+
+                    logger.info(f"Finished processing data for {len(results_dict)} tokens.")
+
+                # Catch InterfaceError specifically if it happens elsewhere
+                except asyncpg.exceptions.InterfaceError as iface_err:
+                    logger.error(f"InterfaceError during historical data processing: {iface_err}", exc_info=True)
+                    # This indicates a potential issue with connection state management, might need pool reset/reconnect logic
+                    return {} # Return empty on this specific error too
+                except Exception as e:
+                    # Log the original error class name for better debugging
+                    logger.error(f"Error processing historical data ({type(e).__name__}): {e}", exc_info=True)
+                    # Log the traceback from the original exception
+                    # import traceback
+                    # logger.error(traceback.format_exc()) # Optional full traceback
+                    return {} # Return empty dict on error
+
+            logger.info(f"Successfully fetched and processed historical data for {len(results_dict)} tokens.")
+            return results_dict
+
+# Helper function moved outside class for potential reuse (optional)
+async def get_token_lifespan(db_client: DatabaseClient, mint: str) -> Optional[Dict[str, datetime]]:
+    """
+    Fetches the approximate start and end timestamp of a token's activity
+    based on its first and last trade records in the v_trades view.
+
+    Args:
+        db_client: An initialized DatabaseClient instance.
+        mint: The mint address of the token.
+
+    Returns:
+        A dictionary {'start_ts': datetime, 'end_ts': datetime} if trades exist,
+        otherwise None. Timestamps are timezone-aware (UTC).
+    """
+    if not db_client or not db_client.pool:
+        logger.error("Database client not initialized or connected for get_token_lifespan.")
+        return None
+
+    query = """
+        SELECT
+            MIN(timestamp) as first_trade_ts,
+            MAX(timestamp) as last_trade_ts
+        FROM v_trades
+        WHERE mint = $1;
+    """
+    async with db_client.pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(query, mint)
+            if row and row['first_trade_ts'] and row['last_trade_ts']:
+                start_ts = row['first_trade_ts'].replace(tzinfo=timezone.utc) if row['first_trade_ts'].tzinfo is None else row['first_trade_ts'].astimezone(timezone.utc)
+                end_ts = row['last_trade_ts'].replace(tzinfo=timezone.utc) if row['last_trade_ts'].tzinfo is None else row['last_trade_ts'].astimezone(timezone.utc)
+                # Add a small buffer to end time to ensure last trade is included <= end_ts
+                end_ts += timedelta(seconds=1)
+                return {'start_ts': start_ts, 'end_ts': end_ts}
+            else:
+                logger.warning(f"No trade timestamps found for mint {mint} to determine lifespan.")
+                return None
+        except Exception as e:
+            logger.error(f"Error fetching token lifespan for {mint}: {e}", exc_info=True)
+            return None

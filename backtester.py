@@ -1,391 +1,488 @@
-# FILE: backtester.py (Refactored)
+# FILE: backtester.py (Modified for Lifespan & Refinements)
 
 """
 Backtesting Engine Module
 
-Simulates trading strategies on historical data to evaluate performance.
+Simulates trading strategies on historical data, respecting token lifespans,
+to evaluate performance.
 """
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone
+from typing import Dict, List, Optional, Any # Added Optional
+
 from logger import logger
-from utils import calculate_volatility # Assuming this is in utils.py or similar
-# Import necessary components from existing modules (adjust paths if needed)
-# from trading_logic import TradingManager # We might need parts of this logic
-# from state_manager import StateManager # Or simulate state management here
-# from config import ... # We'll use parameters dict instead of direct config import
+from utils import calculate_volatility
 
 # --- Performance Metrics Calculation ---
-def calculate_performance_metrics(trade_history: list, initial_capital: float, final_capital: float) -> dict:
+def calculate_performance_metrics(
+    trade_history: list,
+    initial_capital: float,
+    final_capital: float,
+    start_ts: Optional[datetime] = None, # Optional start/end timestamps for context
+    end_ts: Optional[datetime] = None,
+    simulation_end_reason: str = "Completed" # Reason simulation stopped
+) -> dict:
     """
     Calculates various performance metrics based on simulated trades.
 
     Args:
-        trade_history: A list of dictionaries, each representing a simulated trade (buy/sell).
+        trade_history: List of dictionaries representing simulated trades.
                        Expected keys: 'timestamp', 'type' ('buy'/'sell'), 'price',
                                       'amount_sol', 'amount_tokens', 'pnl' (for sells).
-        initial_capital: The starting capital in SOL.
-        final_capital: The ending capital in SOL (including value of remaining assets).
+        initial_capital: Starting capital in SOL.
+        final_capital: Ending capital in SOL (including value of remaining assets).
+        start_ts: Timestamp of the first data point used in the simulation.
+        end_ts: Timestamp of the last data point used or token death.
+        simulation_end_reason: Why the simulation stopped ('Completed', 'Token Death', 'Max Steps').
+
 
     Returns:
-        A dictionary containing performance metrics like:
-        - total_pnl: Total Profit and Loss in SOL.
-        - total_trades: Total number of trades executed.
-        - win_rate: Percentage of profitable trades.
-        - avg_profit_per_trade: Average SOL profit on winning trades.
-        - avg_loss_per_trade: Average SOL loss on losing trades.
-        - max_drawdown: Maximum peak-to-trough decline in portfolio value (simplified).
-        # - sharpe_ratio: (Requires risk-free rate and return series) - Optional
-        # - sortino_ratio: (Requires risk-free rate and downside deviation) - Optional
+        A dictionary containing performance metrics. Includes added metrics like
+        total_return_pct, duration_minutes, simulation_end_reason.
     """
     metrics = {
         "total_pnl": 0.0,
-        "total_trades": 0,
+        "total_return_pct": 0.0,
+        "total_trades": 0, # Number of completed buy/sell cycles
         "winning_trades": 0,
         "losing_trades": 0,
-        "total_profit": 0.0,
-        "total_loss": 0.0,
+        "total_profit_sells": 0.0, # Sum of PnL from profitable sells
+        "total_loss_sells": 0.0,   # Sum of absolute PnL from losing sells
         "win_rate": 0.0,
-        "avg_profit_per_trade": 0.0,
-        "avg_loss_per_trade": 0.0,
-        "max_drawdown": 0.0, # Placeholder for simplified drawdown
-        # Add more metrics as needed
-    } 
+        "avg_profit_per_win_trade": 0.0,
+        "avg_loss_per_loss_trade": 0.0,
+        "profit_factor": 0.0, # Total profit / Total loss
+        "max_drawdown": 0.0,
+        "simulation_start_ts": start_ts.isoformat() if start_ts else None,
+        "simulation_end_ts": end_ts.isoformat() if end_ts else None,
+        "simulation_duration_minutes": (end_ts - start_ts).total_seconds() / 60.0 if start_ts and end_ts else None,
+        "simulation_end_reason": simulation_end_reason,
+    }
 
-    if not trade_history:
-        metrics["total_pnl"] = final_capital - initial_capital
-        return metrics # Return basic PnL if no trades occurred
+    # Calculate PnL and Return %
+    metrics["total_pnl"] = final_capital - initial_capital
+    if initial_capital > 0:
+        metrics["total_return_pct"] = (metrics["total_pnl"] / initial_capital) * 100.0
 
-    # --- Basic Metrics ---
-    metrics["total_trades"] = len([t for t in trade_history if t['type'] == 'sell']) # Count sell events as completed trades 
+    # Analyze sell trades for win rate, avg profit/loss, profit factor
     sell_trades = [t for t in trade_history if t['type'] == 'sell' and 'pnl' in t]
+    metrics["total_trades"] = len(sell_trades)
 
-    portfolio_value = initial_capital
-    peak_value = initial_capital
-    current_max_drawdown = 0.0
-
-    for trade in trade_history:
-        if trade['type'] == 'buy':
-            portfolio_value -= trade.get('amount_sol', 0) # Decrease value by investment
-        elif trade['type'] == 'sell':
-            portfolio_value += trade.get('amount_sol', 0) # Increase value by net SOL received
+    if metrics["total_trades"] > 0:
+        for trade in sell_trades:
             pnl = trade.get('pnl', 0.0)
             if pnl > 0:
                 metrics["winning_trades"] += 1
-                metrics["total_profit"] += pnl
+                metrics["total_profit_sells"] += pnl
             elif pnl < 0:
                 metrics["losing_trades"] += 1
-                metrics["total_loss"] += abs(pnl) # Loss is positive here 
+                metrics["total_loss_sells"] += abs(pnl) # Loss is positive here
 
-        # Simplified Drawdown Calculation (Equity Curve based on trades)
-        if portfolio_value > peak_value:
-            peak_value = portfolio_value
-        drawdown = (peak_value - portfolio_value) / peak_value if peak_value > 0 else 0
-        if drawdown > current_max_drawdown:
-            current_max_drawdown = drawdown
+        if metrics["total_trades"] > 0:
+             metrics["win_rate"] = (metrics["winning_trades"] / metrics["total_trades"]) * 100.0
 
-    # --- Calculate derived metrics ---
-    if metrics["total_trades"] > 0:
-        metrics["win_rate"] = (metrics["winning_trades"] / metrics["total_trades"]) * 100
-    else:
-         metrics["win_rate"] = 0.0
+        if metrics["winning_trades"] > 0:
+             metrics["avg_profit_per_win_trade"] = metrics["total_profit_sells"] / metrics["winning_trades"]
 
-    if metrics["winning_trades"] > 0:
-        metrics["avg_profit_per_trade"] = metrics["total_profit"] / metrics["winning_trades"]
-    else:
-        metrics["avg_profit_per_trade"] = 0.0
+        if metrics["losing_trades"] > 0:
+             metrics["avg_loss_per_loss_trade"] = metrics["total_loss_sells"] / metrics["losing_trades"]
 
-    if metrics["losing_trades"] > 0:
-        metrics["avg_loss_per_trade"] = metrics["total_loss"] / metrics["losing_trades"] 
-    else:
-         metrics["avg_loss_per_trade"] = 0.0
+        if metrics["total_loss_sells"] > 0:
+             metrics["profit_factor"] = metrics["total_profit_sells"] / metrics["total_loss_sells"]
+        elif metrics["total_profit_sells"] > 0:
+             metrics["profit_factor"] = float('inf') # Profit but no losses
 
-    metrics["total_pnl"] = final_capital - initial_capital # Based on final portfolio value
-    metrics["max_drawdown"] = current_max_drawdown * 100 # Store as percentage
 
-    logger.debug(f"Calculated Metrics: {metrics}")
+    # --- Calculate Max Drawdown ---
+    # Track portfolio value over time based on trades
+    portfolio_values = [initial_capital] # Start with initial capital
+    current_portfolio_value = initial_capital
+    peak_value = initial_capital
+    max_dd = 0.0
+
+    # Create an equity curve based on trade executions
+    equity_curve = pd.Series(index=[], dtype=float)
+    if trade_history:
+        equity_curve.loc[trade_history[0]['timestamp']] = initial_capital # Start point
+
+    for trade in trade_history:
+        trade_ts = trade['timestamp']
+        if trade['type'] == 'buy':
+            # Value decreases by investment cost just before buy
+            equity_curve.loc[trade_ts - pd.Timedelta(nanoseconds=1)] = current_portfolio_value
+            current_portfolio_value -= trade.get('amount_sol', 0)
+            equity_curve.loc[trade_ts] = current_portfolio_value
+        elif trade['type'] == 'sell':
+            # Value increases by net SOL received just before sell
+            equity_curve.loc[trade_ts - pd.Timedelta(nanoseconds=1)] = current_portfolio_value
+            current_portfolio_value += trade.get('amount_sol', 0)
+            equity_curve.loc[trade_ts] = current_portfolio_value
+            # Add final capital point if different from last trade value
+            equity_curve.loc[end_ts] = final_capital
+
+
+    # Ensure chronological order and remove duplicates keeping last value
+    if not equity_curve.empty:
+        equity_curve = equity_curve.sort_index()
+        equity_curve = equity_curve[~equity_curve.index.duplicated(keep='last')]
+
+        # Calculate drawdown from the equity curve
+        roll_max = equity_curve.cummax()
+        drawdown = (roll_max - equity_curve) / roll_max
+        max_dd = drawdown.max()
+
+    metrics["max_drawdown"] = max_dd * 100.0 # Store as percentage
+
+
+    # logger.debug(f"Calculated Metrics: {metrics}") # Optional: Log full metrics
     return metrics
 
-
-# --- Backtesting Core Function with Enhanced Logging ---
-async def run_backtest(parameters: dict, raw_trade_data: pd.DataFrame, initial_capital: float) -> dict:
+# --- Backtesting Core Function ---
+async def run_backtest(
+    parameters: dict,
+    raw_trade_data: pd.DataFrame,
+    initial_capital: float,
+    max_timestamp: Optional[datetime] = None # Token death timestamp
+) -> dict:
     """
-    Simulates real-time trading with 10-second intervals using 5-second candlestick summaries.
-    Includes volatility filtering and full trade logic. Enhanced logging for debugging hangs.
-    """
-    # Try to get mint address for clearer logs, default if not found in params
-    mint_addr = parameters.get("mint", "UNKNOWN_MINT")
-    # --- Log Entry ---
-    logger.debug(f"--- Entering run_backtest for Mint: {mint_addr} ---")
-    # logger.debug(f"Initial Capital: {initial_capital}")
-    # logger.debug(f"Parameters: {parameters}")
-    # logger.debug(f"Raw Trade Data Head:\n{raw_trade_data.head()}")
-    # logger.debug(f"Raw Trade Data Tail:\n{raw_trade_data.tail()}")
-    # logger.debug(f"Raw Trade Data Columns: {raw_trade_data.columns}")
-    # logger.debug(f"Raw Trade Data Index: {raw_trade_data.index}")
-    # logger.debug(f"Raw Trade Data Length: {len(raw_trade_data)}")
-    # logger.debug(f"Raw Trade Data Shape: {raw_trade_data.shape}")
-    # logger.debug(f"Raw Trade Data Info:\n{raw_trade_data.info()}")
-    # logger.debug(f"Raw Trade Data Describe:\n{raw_trade_data.describe()}")
-    # logger.debug(f"Raw Trade Data Types:\n{raw_trade_data.dtypes}")
-    # logger.debug(f"Raw Trade Data Memory Usage: {raw_trade_data.memory_usage(deep=True)}")
+    Simulates trading with 5-second candlestick summaries, respecting token lifespan.
 
+    Args:
+        parameters: Dictionary of trading parameters for this simulation run.
+        raw_trade_data: DataFrame containing historical data for the token.
+                        Index must be a timezone-aware UTC DatetimeIndex.
+        initial_capital: Starting capital in SOL.
+        max_timestamp: Optional UTC timestamp indicating the end of the token's
+                       life. Simulation will stop at or before this time.
+
+    Returns:
+        A dictionary containing performance metrics calculated by
+        `calculate_performance_metrics`.
+    """
+    mint_addr = parameters.get("mint", "UNKNOWN_MINT") # Get mint for logging if passed in params
+    simulation_end_reason = "Completed" # Default end reason
+
+    # --- Log Entry and Initial Checks ---
+    logger.debug(f"--- Entering run_backtest for Mint: {mint_addr} --- Max Timestamp: {max_timestamp}")
     if raw_trade_data.empty:
         logger.warning(f"Historical trade data empty for {mint_addr}.")
-        # --- Log Exit (Early) ---
-        logger.debug(f"--- Exiting run_backtest for Mint: {mint_addr} (No Data) ---")
-        return calculate_performance_metrics([], initial_capital, initial_capital)
+        return calculate_performance_metrics([], initial_capital, initial_capital, simulation_end_reason="No Data")
 
-    # Prepare data
+    if not isinstance(raw_trade_data.index, pd.DatetimeIndex) or raw_trade_data.index.tz is None:
+        logger.error(f"DataFrame index must be timezone-aware UTC DatetimeIndex for {mint_addr}.")
+        # Attempt conversion, but this indicates an upstream issue
+        try:
+             raw_trade_data.index = pd.to_datetime(raw_trade_data.index, utc=True)
+             logger.warning("Attempted to convert index to UTC. Review data loading.")
+        except Exception:
+             return calculate_performance_metrics([], initial_capital, initial_capital, simulation_end_reason="Invalid Index")
+
+
+    # --- Prepare Data ---
     df = raw_trade_data.copy()
-    df.index = pd.to_datetime(df.index)
-    df = df.sort_index()
+    df = df.sort_index() # Ensure chronological order
+
+    # Filter data up to max_timestamp if provided
+    start_ts_data = df.index.min()
+    end_ts_data = df.index.max()
+    if max_timestamp:
+        # Ensure max_timestamp is timezone-aware (should be UTC)
+        if max_timestamp.tzinfo is None:
+             max_timestamp = max_timestamp.replace(tzinfo=timezone.utc)
+        # Filter data strictly before or at max_timestamp
+        df = df[df.index <= max_timestamp]
+        end_ts_data = max_timestamp # The effective end time is the token death time
+        simulation_end_reason = "Token Death" # Update reason if max_timestamp is used
+        if df.empty:
+            logger.warning(f"No data remains for {mint_addr} after filtering up to max_timestamp {max_timestamp}.")
+            return calculate_performance_metrics([], initial_capital, initial_capital, start_ts_data, end_ts_data, simulation_end_reason)
 
     # --- Resample to 5-second candles ---
-    candles = df.resample("5s").agg({
-        "price": "last",
-        "volume": "sum",
-        "market_cap_calculated": "last",
-        "rugcheck_score": "last",
-        "socials_score": "last"
-    }).dropna()
+    try:
+        # Ensure necessary columns exist before resampling
+        required_cols = ['price', 'volume', 'market_cap_calculated', 'rugcheck_score', 'socials_score']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            logger.error(f"Missing required columns for resampling in {mint_addr}: {missing_cols}")
+            return calculate_performance_metrics([], initial_capital, initial_capital, start_ts_data, end_ts_data, "Missing Data Cols")
 
-    candles = candles[candles["price"] != 0]
+        # Convert to numeric, coercing errors
+        for col in ['price', 'volume', 'market_cap_calculated', 'rugcheck_score', 'socials_score']:
+             df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    # --- Calculate volatility ---
-    if 'price' in candles.columns and not candles['price'].empty:
-        prices_series = pd.to_numeric(candles['price'], errors='coerce')
-        candles['volatility'] = calculate_volatility(prices_series, window=120)
-        candles['volatility'] = candles['volatility'].fillna(0.0)
+        # Resample and aggregate. Use fillna(0) *before* resampling aggregations like sum.
+        # Use ffill/bfill for last known values where appropriate.
+        candles = df.resample("5s").agg(
+            price=('price', 'last'),
+            volume=('volume', 'sum'), # Sum volume within the 5s interval
+            market_cap_calculated=('market_cap_calculated', 'last'),
+            rugcheck_score=('rugcheck_score', 'last'),
+            socials_score=('socials_score', 'last')
+        )
+
+        # Forward fill essential 'last' values, backward fill for initial NaNs
+        fill_cols = ['price', 'market_cap_calculated', 'rugcheck_score', 'socials_score']
+        candles[fill_cols] = candles[fill_cols].ffill().bfill()
+
+        # Fill remaining NaNs (like volume sum in empty intervals) with 0
+        candles.fillna({'volume': 0.0}, inplace=True)
+        # Ensure no invalid prices remain after filling
+        candles = candles[candles["price"] > 1e-12] # Use epsilon
+
+    except Exception as e:
+        logger.error(f"Error during data resampling/preparation for {mint_addr}: {e}", exc_info=True)
+        return calculate_performance_metrics([], initial_capital, initial_capital, start_ts_data, end_ts_data, "Resampling Error")
+
+    # --- Calculate Volatility ---
+    if not candles.empty and 'price' in candles.columns:
+        # Ensure prices are numeric before calculating volatility
+        prices_series = pd.to_numeric(candles['price'], errors='coerce').dropna()
+        if len(prices_series) > 1:
+             # Ensure index is DatetimeIndex before passing
+             if not isinstance(prices_series.index, pd.DatetimeIndex):
+                  prices_series.index = pd.to_datetime(prices_series.index, utc=True)
+
+             candles['volatility'] = calculate_volatility(prices_series, window=120).fillna(0.0) # Use 10min window (120*5s)
+        else:
+            candles['volatility'] = 0.0
     else:
-        candles['volatility'] = 0.0
+        candles['volatility'] = 0.0 # Add column even if empty
 
     if candles.empty:
          logger.warning(f"No candle data remained after resampling/filtering for {mint_addr}.")
-         # --- Log Exit (Early) ---
-         logger.debug(f"--- Exiting run_backtest for Mint: {mint_addr} (No Candle Data) ---")
-         return calculate_performance_metrics([], initial_capital, initial_capital)
+         return calculate_performance_metrics([], initial_capital, initial_capital, start_ts_data, end_ts_data, "No Candle Data")
+
 
     # --- Extract Parameters ---
-    sol_to_buy = parameters.get('SOL_TO_BUY', 0.1)
-    initial_stop_loss_percent = parameters.get('INITIAL_STOP_LOSS_PERCENT', 50.0)
-    first_sell_percent = parameters.get('FIRST_SELL_PERCENT', 75.0)
-    trailing_stop_loss_percent = parameters.get('TRAILING_STOP_LOSS_PERCENT', 50.0)
-    second_take_profit_percent = parameters.get('SECOND_TAKE_PROFIT_PERCENT', 300.0)
-    first_sell_profit_margin = parameters.get('FIRST_SELL_PROFIT_MARGIN', 30.0)
-    volume_threshold = parameters.get('DEFAULT_VOLUME_THRESHOLD', 7500)
+    # Use .get() with defaults matching config.py structure (or reasonable fallbacks)
+    sol_to_buy = parameters.get('SOL_TO_BUY', 0.9)
+    initial_stop_loss_percent = parameters.get('INITIAL_STOP_LOSS_PERCENT', 10.0)
+    first_sell_percent = parameters.get('FIRST_SELL_PERCENT', 65.0)
+    trailing_stop_loss_percent = parameters.get('TRAILING_STOP_LOSS_PERCENT', 15.0)
+    second_take_profit_percent = parameters.get('SECOND_TAKE_PROFIT_PERCENT', 550.0)
+    first_sell_profit_margin = parameters.get('FIRST_SELL_PROFIT_MARGIN', 170.0)
+    volume_threshold = parameters.get('DEFAULT_VOLUME_THRESHOLD', 19000)
     marketcap_threshold = parameters.get('DEFAULT_MARKETCAP_THRESHOLD', 10000)
-    rugcheck_threshold = parameters.get('DEFAULT_RUGCHECK_SCORE_THRESHOLD', 600)
-    socials_threshold = parameters.get('DEFAULT_SOCIAL_SCORE_THRESHOLD', 65)
-    min_volatility = parameters.get('MIN_VOLATILITY', 0.2)
+    rugcheck_threshold = parameters.get('DEFAULT_RUGCHECK_SCORE_THRESHOLD', 801)
+    socials_threshold = parameters.get('DEFAULT_SOCIAL_SCORE_THRESHOLD', 50)
+    min_volatility = parameters.get('MIN_VOLATILITY', 0.1)
+    min_market_cap_usd = parameters.get('MIN_MARKET_CAP', 3600) # Emergency sell
+    # Fees (use defaults if not in parameters, should match config.py)
     buy_fee = parameters.get('DEFAULT_BUY_FEE', 0.001)
     buy_tip = parameters.get('DEFAULT_BUY_TIP', 0.001)
     sell_fee = parameters.get('DEFAULT_SELL_FEE', 0.001)
     sell_tip = parameters.get('DEFAULT_SELL_TIP', 0.001)
-    min_market_cap_usd = parameters.get('MIN_MARKET_CAP', 3600)
 
+    # --- Simulation State ---
     current_sol = initial_capital
-    current_tokens = 0.0
     trade_history = []
-    active_position = None
+    active_position = None # Dictionary to store buy details
 
-    # --- Simulate every 10s ---
-    simulation_indices = candles.index[::2] # Simulate every 10s (2 * 5s candles)
+    # --- Simulate Step-by-Step ---
+    # Simulate every 10 seconds (iterate over every other candle index)
+    simulation_indices = candles.index[::2]
     total_steps = len(simulation_indices)
-    log_interval = max(1, total_steps // 10) # Log roughly 10 times during simulation
+    log_interval = max(1, total_steps // 10)
 
-    logger.debug(f"Starting simulation loop for {mint_addr}. Total steps: {total_steps}. Logging every ~{log_interval} steps.")
+    logger.debug(f"Starting simulation loop for {mint_addr}. Total steps: {total_steps}. Max Timestamp: {end_ts_data}")
     step_count = 0
+
     for timestamp in simulation_indices:
         step_count += 1
-        # --- Periodic Loop Log ---
         if step_count % log_interval == 0:
              logger.debug(f"Simulating step {step_count}/{total_steps} for {mint_addr} (Timestamp: {timestamp})")
 
+        # Ensure the timestamp exists in the candles DataFrame index
+        if timestamp not in candles.index:
+             # logger.warning(f"Timestamp {timestamp} not found in candles index for {mint_addr}. Skipping step {step_count}.")
+             continue # Skip step if timestamp is missing after resampling
+
         try:
             row = candles.loc[timestamp]
-        except KeyError as e:
-            # Already logged in the loop attempt block in the previous version, keep it here or remove duplication
-            # logger.error(f"KeyError accessing timestamp: {timestamp} for {mint_addr}")
-            continue # Skip this step if timestamp not found
+            price = float(row["price"])
+            volume = float(row.get("volume", 0.0)) # Get volume, default 0
+            market_cap_sol = float(row.get("market_cap_calculated", 0.0))
+            rugcheck_score = int(row.get("rugcheck_score", 10000)) # Default high risk
+            socials_score = int(row.get("socials_score", 100))     # Default high risk
+            volatility = float(row.get("volatility", 0.0))
 
-        try:
-            # --- Filtering Logic ---
-            if (
-                pd.isna(row["volume"]) or row["volume"] < volume_threshold or
-                pd.isna(row["market_cap_calculated"]) or row["market_cap_calculated"] < marketcap_threshold or
-                pd.isna(row["rugcheck_score"]) or row["rugcheck_score"] >= rugcheck_threshold or
-                pd.isna(row["socials_score"]) or row["socials_score"] >= socials_threshold or
-                pd.isna(row["volatility"]) or row["volatility"] < min_volatility or
-                pd.isna(row["price"]) or row["price"] <= 1e-12 # Also check for valid price here
-            ):
-                # Optional: Log skipped step due to filter criteria
-                # logger.debug(f"Step {step_count}: Skipping {mint_addr} due to filter criteria.")
-                continue
+            # --- Check Buy/Sell Logic ---
 
-            price = row["price"]
-
-            # --- Sell logic ---
+            # --- Sell Logic ---
             if active_position:
-                hp = max(active_position['highest_price'], price)
-                active_position['highest_price'] = hp
+                pos = active_position
+                hp = max(pos['highest_price'], price)
+                pos['highest_price'] = hp # Update highest price seen
 
-                sell_reason = None
-                tokens_to_sell = 0.0
-                sell_all = False
-                sell_partial = False
-                sell_percentage = 0.0
+                # Calculate current sell trigger prices based on active position
+                current_stop_loss_price = pos['stop_loss_price']
+                initial_tp_price = pos['initial_tp_price']
+                second_tp_price = pos['second_tp_price']
+                first_tp_hit = pos['first_tp_hit']
 
-                # --- Calculate Trailing SL Price ---
                 trailing_sl_price = 0.0
-                if active_position['first_tp_hit']:
-                    trailing_sl_price = hp * (1 - trailing_stop_loss_percent / 100.0)
+                if first_tp_hit:
+                    trailing_sl_price = hp * (1.0 - trailing_stop_loss_percent / 100.0)
 
-                # --- Check Sell Conditions ---
-                # (Keep your existing condition checks here - SL, TP1, TP2, Trailing SL, Emergency SL)
-                # Example structure:
-                if price <= active_position['stop_loss_price']:
-                     sell_reason = "Stop Loss" # ... and so on
-                     sell_all = True; sell_percentage = 1.0
-                elif price >= active_position['second_tp_price']:
-                    sell_reason = "Second TP" # ... and so on
-                    sell_all = True; sell_percentage = 1.0
-                elif not active_position['first_tp_hit'] and price >= active_position['initial_tp_price']:
-                    sell_reason = "First TP" # ... and so on
-                    sell_partial = True; sell_percentage = first_sell_percent / 100.0
-                elif active_position['first_tp_hit'] and price <= trailing_sl_price:
-                    sell_reason = "Trailing SL" # ... and so on
-                    sell_all = True; sell_percentage = 1.0
-                # Add Emergency SL check logic if needed
+                # Determine sell reason
+                sell_reason = None
+                sell_all = False; sell_partial = False
+                sell_percentage = 0.0 # Percentage of initial tokens
 
-                # --- Determine tokens to sell ---
-                if sell_partial:
-                     tokens_to_sell = active_position['initial_tokens'] * sell_percentage
-                     tokens_to_sell = min(tokens_to_sell, active_position['remaining_tokens'])
-                elif sell_all:
-                     tokens_to_sell = active_position['remaining_tokens']
-                else:
-                     tokens_to_sell = 0.0
+                if price <= current_stop_loss_price:
+                    sell_reason = "Stop Loss" if not first_tp_hit else "Breakeven SL"; sell_all = True; sell_percentage = 1.0
+                elif price >= second_tp_price:
+                    sell_reason = "Second TP"; sell_all = True; sell_percentage = 1.0
+                elif not first_tp_hit and price >= initial_tp_price:
+                    sell_reason = "First TP"; sell_partial = True; sell_percentage = first_sell_percent / 100.0
+                elif first_tp_hit and price <= trailing_sl_price:
+                    sell_reason = "Trailing SL"; sell_all = True; sell_percentage = 1.0
+                # Emergency SL (requires SOL price - not implemented here for simplicity, assume TradingManager handles this if live)
+                # elif (market_cap_sol * sol_price_live) < min_market_cap_usd:
+                #    sell_reason = "Emergency SL"; sell_all = True; sell_percentage = 1.0
 
-                # --- Execute Sell if triggered ---
-                if sell_reason and tokens_to_sell > 1e-9:
-                    # (Keep your sell financial calculations: gross_sol, net_sol, cost_basis, pnl)
-                    gross_sol_received = tokens_to_sell * price
-                    net_sol_received = gross_sol_received - sell_fee - sell_tip
-                    cost_basis = active_position['total_investment_sol'] * (tokens_to_sell / active_position['initial_tokens']) if active_position['initial_tokens'] > 0 else 0
-                    pnl = net_sol_received - cost_basis
+                # --- Execute Sell ---
+                if sell_reason:
+                    initial_tokens = pos['initial_tokens']
+                    remaining_tokens = pos['remaining_tokens']
+                    total_investment = pos['total_investment_sol']
+                    tokens_to_sell = 0.0
 
-                    current_sol += net_sol_received
-                    current_tokens -= tokens_to_sell
-                    active_position['remaining_tokens'] -= tokens_to_sell
+                    if sell_partial:
+                        tokens_to_sell = initial_tokens * sell_percentage
+                        tokens_to_sell = min(tokens_to_sell, remaining_tokens)
+                    elif sell_all:
+                        tokens_to_sell = remaining_tokens
 
-                    trade_history.append({
-                        'timestamp': timestamp, 'type': 'sell', 'price': price,
-                        'amount_sol': net_sol_received, 'amount_tokens': tokens_to_sell,
-                        # Include other details if needed
-                        'reason': sell_reason, 'pnl': pnl
-                    })
-                    # --- Log Sell Execution ---
-                    logger.debug(f"Executed Sell for {mint_addr}: {tokens_to_sell:.4f} tokens at {price:.9f}. Reason: {sell_reason}. PnL: {pnl:.6f}")
+                    if tokens_to_sell > 1e-9:
+                        gross_sol = tokens_to_sell * price
+                        net_sol = gross_sol - sell_fee - sell_tip
+                        cost_basis = total_investment * (tokens_to_sell / initial_tokens) if initial_tokens > 0 else 0
+                        pnl = net_sol - cost_basis
 
-                    if sell_reason == "First Take Profit":
-                        active_position['first_tp_hit'] = True
-                        active_position['stop_loss_price'] = active_position['buy_price'] # Move SL to breakeven
+                        current_sol += net_sol
+                        pos['remaining_tokens'] -= tokens_to_sell
 
-                    if active_position['remaining_tokens'] < 1e-9:
-                        active_position = None # Close position
+                        trade_history.append({
+                            'timestamp': timestamp, 'type': 'sell', 'price': price,
+                            'amount_sol': net_sol, 'amount_tokens': tokens_to_sell,
+                            'reason': sell_reason, 'pnl': pnl
+                        })
+                        # logger.debug(f"Simulated Sell: {sell_reason} for {mint_addr} @ {price:.9f}, PnL: {pnl:.6f}")
 
-            # --- Buy logic ---
-            if not active_position and current_sol >= (sol_to_buy + buy_fee + buy_tip): # Check available capital
-                # (Keep your buy condition checks - volume, market cap, scores, volatility)
-                # This part is already implicitly checked by the outer filter, but double-checking doesn't hurt
-                # Or, if filters are complex/dynamic, perform them here
-                # meets_buy_criteria = (...) # Check criteria based on 'row'
+                        if sell_partial:
+                            pos['first_tp_hit'] = True
+                            pos['stop_loss_price'] = pos['buy_price'] # Adjust SL to breakeven
 
-                # Assuming criteria met based on outer loop filter
-                meets_buy_criteria = True # Simplified assumption based on loop entry
+                        if pos['remaining_tokens'] < 1e-9:
+                            active_position = None # Close position fully
+
+            # --- Buy Logic ---
+            elif not active_position and current_sol >= (sol_to_buy + buy_fee + buy_tip):
+                # Check buy criteria using current candle data
+                meets_buy_criteria = (
+                    volume >= volume_threshold and
+                    market_cap_sol >= marketcap_threshold and # Check SOL market cap
+                    rugcheck_score < rugcheck_threshold and
+                    socials_score < socials_threshold and
+                    volatility >= min_volatility
+                )
 
                 if meets_buy_criteria:
                     total_investment = sol_to_buy + buy_fee + buy_tip
-                    if current_sol >= total_investment: # Double check balance
-                        sol_for_tokens = sol_to_buy
-                        tokens_bought = sol_for_tokens / price
+                    sol_for_tokens = sol_to_buy
+                    tokens_bought = sol_for_tokens / price # price is already checked > 0
 
-                        # (Keep TP/SL price calculations as before)
-                        # ... TP1, TP2, initial SL calculations ...
-                        initial_tp_price = ... # Calculate TP1
-                        second_tp_price = ... # Calculate TP2
-                        stop_loss_price = ... # Calculate initial SL
+                    # Calculate initial SL/TPs
+                    initial_sl_price = price * (1.0 - initial_stop_loss_percent / 100.0)
 
-                        current_sol -= total_investment
-                        current_tokens += tokens_bought # Note: current_tokens isn't strictly used if tracking via active_position
+                    sell_fee_tp1 = sell_fee # Use configured sell fee for TP1 calc
+                    sell_tip_tp1 = sell_tip # Use configured sell tip for TP1 calc
+                    profit_margin_tp1 = first_sell_profit_margin / 100.0
+                    sell_percent_tp1 = first_sell_percent / 100.0
 
-                        active_position = {
-                            'buy_price': price, 'initial_tokens': tokens_bought,
-                            'remaining_tokens': tokens_bought, 'total_investment_sol': total_investment,
-                            'stop_loss_price': stop_loss_price, 'initial_tp_price': initial_tp_price,
-                            'second_tp_price': second_tp_price, 'highest_price': price,
-                            'first_tp_hit': False
-                        }
+                    total_cost_base_tp1 = total_investment + sell_fee_tp1 + sell_tip_tp1
+                    target_net_sol_return_tp1 = total_cost_base_tp1 * (1 + profit_margin_tp1)
+                    target_gross_sol_return_tp1 = target_net_sol_return_tp1 + sell_fee_tp1 + sell_tip_tp1
+                    tokens_to_sell_tp1 = tokens_bought * sell_percent_tp1
+                    initial_tp_price = (target_gross_sol_return_tp1 / tokens_to_sell_tp1) if tokens_to_sell_tp1 > 1e-9 else float('inf')
 
-                        trade_history.append({
-                            'timestamp': timestamp, 'type': 'buy', 'price': price,
-                            'amount_sol': total_investment, 'amount_tokens': tokens_bought,
-                             # Include other details if needed
-                            'buy_fee': buy_fee, 'buy_tip': buy_tip
-                        })
-                        # --- Log Buy Execution ---
-                        logger.debug(f"Executed Buy for {mint_addr}: {tokens_bought:.4f} tokens at {price:.9f}")
-                    else:
-                        # Optional: Log insufficient balance if needed
-                        # logger.debug(f"Insufficient balance to buy {mint_addr}")
-                        pass
+                    second_tp_price = price * (1.0 + second_take_profit_percent / 100.0)
 
+                    # --- Update State ---
+                    current_sol -= total_investment
+                    active_position = {
+                        'buy_price': price, 'initial_tokens': tokens_bought,
+                        'remaining_tokens': tokens_bought, 'total_investment_sol': total_investment,
+                        'stop_loss_price': initial_sl_price, 'initial_tp_price': initial_tp_price,
+                        'second_tp_price': second_tp_price, 'highest_price': price,
+                        'first_tp_hit': False, 'entry_timestamp': timestamp # Store entry time
+                    }
+
+                    trade_history.append({
+                        'timestamp': timestamp, 'type': 'buy', 'price': price,
+                        'amount_sol': total_investment, 'amount_tokens': tokens_bought,
+                        'buy_fee': buy_fee, 'buy_tip': buy_tip
+                    })
+                    # logger.debug(f"Simulated Buy: {mint_addr} @ {price:.9f}, Tokens: {tokens_bought:.4f}")
+
+        except KeyError as ke:
+            logger.error(f"KeyError accessing data at step {step_count} for {mint_addr} (Timestamp: {timestamp}): Missing key {ke}", exc_info=False)
+            # Potentially skip step or end simulation depending on severity
+            continue # Skip this step
+        except ValueError as ve:
+             logger.error(f"ValueError at step {step_count} for {mint_addr} (Timestamp: {timestamp}): {ve}", exc_info=False)
+             continue # Skip this step
         except Exception as loop_err:
-             # --- Log Error within Loop ---
              logger.error(f"Error during simulation step {step_count} for {mint_addr} (Timestamp: {timestamp}): {loop_err}", exc_info=True)
-             # Decide whether to continue or break the loop on error
-             continue # Continue to next step by default
+             # Decide whether to continue or break; continue is safer for GA/RL fitness eval
+             continue
+
+    # --- Simulation End ---
+    logger.debug(f"Simulation loop finished for {mint_addr} at step {step_count}.")
 
     # --- Final Value Calculation ---
-    logger.debug(f"Calculating final portfolio value for {mint_addr}")
     final_value = current_sol
-    if active_position and not candles.empty:
-        # Use the price from the *last available candle*, not necessarily the last step processed
-        last_available_timestamp = candles.index[-1]
-        last_price = candles.loc[last_available_timestamp]["price"]
+    if active_position:
+        # Use the price from the *last available candle* in the original filtered df
+        if not df.empty:
+            last_valid_index = df.index[-1] # Get the timestamp of the last valid row
+            last_price = float(df.loc[last_valid_index]["price"]) # Get price from the unfiltered data at that time
 
-        remaining_tokens = active_position['remaining_tokens']
-        gross_sol_received_final = remaining_tokens * last_price
-        net_sol_received_final = gross_sol_received_final - sell_fee - sell_tip
-        final_value += net_sol_received_final
-        logger.debug(f"Added value of remaining {remaining_tokens:.4f} tokens for {mint_addr} at price {last_price:.9f}")
+            remaining_tokens = active_position['remaining_tokens']
+            # Simulate final sale using configured fees/tips
+            gross_sol_final = remaining_tokens * last_price
+            net_sol_final = gross_sol_final - sell_fee - sell_tip
+            final_value += max(0, net_sol_final) # Add net value, floor at 0
+            logger.debug(f"Added value of remaining {remaining_tokens:.4f} tokens for {mint_addr} at price {last_price:.9f} (Net: {net_sol_final:.6f})")
+        else:
+             logger.warning(f"No data available to value remaining position for {mint_addr}. Using current SOL only.")
 
 
     # --- Calculate Metrics ---
     logger.debug(f"Calculating final performance metrics for {mint_addr}")
-    metrics = calculate_performance_metrics(trade_history, initial_capital, final_value)
-    metrics.update({
-        "parameters": parameters, # Add parameters used
-        "initial_capital": initial_capital,
-        "final_portfolio_value": final_value
-    })
+    metrics = calculate_performance_metrics(
+        trade_history,
+        initial_capital,
+        final_value,
+        start_ts=start_ts_data,
+        end_ts=end_ts_data, # Use the actual end timestamp of the simulation
+        simulation_end_reason=simulation_end_reason
+    )
+    # Add parameters used to the results for analysis
+    metrics["parameters"] = parameters
+    metrics["initial_capital"] = initial_capital
+    metrics["final_portfolio_value"] = final_value
 
-    # --- Log Exit ---
-    logger.debug(f"--- Exiting run_backtest for Mint: {mint_addr} ---")
+    logger.debug(f"--- Exiting run_backtest for Mint: {mint_addr} --- Final Value: {final_value:.4f}")
     return metrics
+
 
 # --- Example Usage (for testing) ---
 async def main_test():
-    # This is a placeholder for testing the backtester module directly.
-    # You would need to:
-    # 1. Connect to DB (or load data from file)
-    # 2. Get historical data for a test token and date range using the updated DB handler
-    # 3. Define test parameters
-    # 4. Run the backtest
-    # 5. Print the results 
-
-    from database_handler import DatabaseClient # Assuming relative import works
+    # This requires DB connection and data fetching setup similar to ga_optimizer
+    from database_handler import DatabaseClient, get_token_lifespan # Import lifespan func
     from ga_config import OPTIMIZABLE_PARAMETERS, BACKTEST_INITIAL_CAPITAL, HISTORICAL_DATA_START_TS, HISTORICAL_DATA_END_TS
     import random
     from logger import setup_logging
@@ -394,13 +491,10 @@ async def main_test():
     db_client = DatabaseClient()
     await db_client.connect()
 
-    # --- Get Real Data (Example for one token) ---
-    # Replace 'YOUR_TEST_MINT' with an actual mint address that has data in your DB
-    test_mint = "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm" # Example SOL faucet token, replace!
+    test_mint = "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm" # Replace with a valid mint from your DB
     start_dt = HISTORICAL_DATA_START_TS
     end_dt = HISTORICAL_DATA_END_TS
 
-    logger.info(f"⏱ Backtest time window: {start_dt.isoformat()} to {end_dt.isoformat()}")
     logger.info(f"Fetching test data for mint {test_mint} from {start_dt} to {end_dt}")
     hist_data_dict = await db_client.get_historical_data_for_backtesting([test_mint], start_dt, end_dt)
 
@@ -410,24 +504,32 @@ async def main_test():
         return
 
     test_historical_data = hist_data_dict[test_mint]
-    # logger.info(f"Fetched {len(test_historical_data)} data points for {test_mint}.")
-    # logger.debug(f"Test Data Head:\n{test_historical_data.head()}")
-    # logger.debug(f"Test Data Tail:\n{test_historical_data.tail()}")
-    # logger.debug(f"Test Data Columns: {test_historical_data.columns}")
-    # --- End Real Data Fetch ---
+    logger.info(f"Fetched {len(test_historical_data)} data points for {test_mint}.")
 
+    # --- Get Token Lifespan ---
+    lifespan = await get_token_lifespan(db_client, test_mint)
+    max_ts = lifespan['end_ts'] if lifespan else None
+    logger.info(f"Token Lifespan: Start={lifespan['start_ts']}, End={lifespan['end_ts']}")
 
     # --- Test Parameters ---
-    test_params = {p['name']: random.uniform(p['low'], p['high']) if p['type'] == float else random.randint(p['low'], p['high'])
-                   for p in OPTIMIZABLE_PARAMETERS}
-    test_params['SOL_TO_BUY'] = 0.5 # Override for testing 
-    test_params['DEFAULT_MARKETCAP_THRESHOLD'] = 5000 # Example override for USD market cap
+    test_params = {}
+    for p in OPTIMIZABLE_PARAMETERS:
+        if 'values' in p:
+            test_params[p['name']] = random.choice(p['values'])
+        elif 'low' in p and 'high' in p:
+             # For continuous (if you switch), generate random within range
+             if p['type'] == float: test_params[p['name']] = random.uniform(p['low'], p['high'])
+             else: test_params[p['name']] = random.randint(p['low'], p['high'])
+
+    test_params['SOL_TO_BUY'] = 0.5 # Example override
+    test_params['mint'] = test_mint # Add mint to params for logging inside backtest
 
     logger.info("--- Running Backtester Test ---")
     logger.info(f"Test Parameters: {test_params}")
     logger.info(f"Initial Capital: {BACKTEST_INITIAL_CAPITAL}")
+    logger.info(f"Max Timestamp (Token Death): {max_ts}")
 
-    results = await run_backtest(test_params, test_historical_data, BACKTEST_INITIAL_CAPITAL)
+    results = await run_backtest(test_params, test_historical_data, BACKTEST_INITIAL_CAPITAL, max_ts) # Pass max_ts
 
     logger.info("--- Backtester Test Results ---")
     import pprint
@@ -437,7 +539,6 @@ async def main_test():
 
 if __name__ == "__main__":
     import asyncio
-    # Configure logger for direct script execution
     from logger import setup_logging
     setup_logging()
     asyncio.run(main_test())
