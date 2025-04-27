@@ -381,7 +381,7 @@ async def evaluate_solution(
 async def main_async_logic():
     """Main asynchronous function to set up and run the GA optimization."""
     global historical_data_sets_shared, token_lifespans_shared, pool_ref # Access globals
-    setup_logging()
+    setup_logging(logger_name="ga_optimizer") # Initialize logging
     db_client = None # Initialize db_client
 
     # --- Database Connection ---

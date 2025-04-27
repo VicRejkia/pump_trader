@@ -8,11 +8,11 @@ from rich.logging import RichHandler
 from rich.console import Console
 from config import LOGGER_NAME, LOG_LEVEL_CONSOLE, LOG_LEVEL_FILE, LOG_STORAGE_PATH
 
-logger = logging.getLogger(LOGGER_NAME)
+logger = logging.getLogger(name=LOGGER_NAME)
 log_queue = queue.Queue()
 console = Console()
 
-def setup_logging():
+def setup_logging(logger_name=LOGGER_NAME):
     """
     Setup logging with both file and console handlers using config-defined levels.
     """
@@ -25,7 +25,7 @@ def setup_logging():
     # File Handler
     try:
         file_handler = logging.FileHandler(
-            f"{LOG_STORAGE_PATH}/{LOGGER_NAME}.log", encoding="utf-8"
+            f"{LOG_STORAGE_PATH}/{logger_name}.log", encoding="utf-8"
         )
         file_level = logging.getLevelName(LOG_LEVEL_FILE)
         file_handler.setLevel(file_level)
@@ -64,7 +64,7 @@ def setup_logging():
     logger.addHandler(log_handler)
 
 
-def rotate_log_file():
+def rotate_log_file(logger_name=LOGGER_NAME):
     """Rotate current log file with timestamp and create new log"""
     try:
         handlers = logger.handlers.copy()
@@ -74,7 +74,7 @@ def rotate_log_file():
                 handler.close()
                 logger.removeHandler(handler)
 
-        log_path = f"{LOG_STORAGE_PATH}/{LOGGER_NAME}.log"
+        log_path = f"{LOG_STORAGE_PATH}/{logger_name}.log"
         if os.path.exists(log_path):
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             new_name = f"{LOG_STORAGE_PATH}/{LOGGER_NAME}.{timestamp}.log"
