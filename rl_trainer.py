@@ -124,7 +124,7 @@ def make_env_func(
 async def train_rl_agent():
     """Sets up the RL environment, agent, callbacks, and starts training."""
     global db_client_global
-    setup_logging()
+    setup_logging(logger_name="rl_trainer") # Initialize logger for this module
     logger.info("--- Starting RL Agent Training ---")
 
     if not RL_AVAILABLE:
