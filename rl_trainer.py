@@ -1,4 +1,11 @@
-# FILE: rl_trainer.py (Modifications)
+# FILE: rl_trainer.py (Updated Env Initialization)
+
+"""
+Reinforcement Learning Agent Training Script.
+
+Orchestrates the training process for an RL agent using Stable Baselines3
+to learn optimal trading parameters for the custom TradingEnv environment.
+"""
 
 import os
 import asyncio
@@ -7,224 +14,381 @@ import json
 import numpy as np
 import pandas as pd
 from datetime import datetime
+from typing import Dict, Optional, Union, Tuple
+import warnings
 
+# --- Stable Baselines3 Imports ---
 try:
-    # ... (SB3 imports remain the same) ...
     import stable_baselines3
     from stable_baselines3 import PPO, SAC, TD3
     from stable_baselines3.common.env_util import make_vec_env
-    from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
-    from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback, StopTrainingOnRewardThreshold
+    # Import VecEnv types explicitly
+    from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecEnv, VecNormalize
+    from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback, BaseCallback
     from stable_baselines3.common.monitor import Monitor
     from stable_baselines3.common.env_checker import check_env
+    from stable_baselines3.common.logger import configure as sb3_configure_logger
+    RL_AVAILABLE = True
 except ImportError:
-    print("Stable Baselines3 not found. Please install it: pip install stable-baselines3[extra]>=2.0.0a5")
-    exit()
+    print("Stable Baselines3 library not found or has issues. RL training is unavailable.")
+    print("Please install it: pip install stable-baselines3[extra]>=2.0.0a5")
+    RL_AVAILABLE = False
+    class DummyAlgorithm: pass
+    PPO = SAC = TD3 = DummyAlgorithm
+    class BaseCallback: pass
+    class VecEnv: pass # Dummy VecEnv base class
+    class DummyVecEnv(VecEnv): pass
+    class SubprocVecEnv(VecEnv): pass
+    class VecNormalize(VecEnv): pass
 
-import rl_config # RL specific configs
+# --- Project Modules ---
+import rl_config
 from logger import logger, setup_logging
 from database_handler import DatabaseClient
-from rl_environment import TradingEnv # The custom environment
-# --- Import the new data loading function ---
-from utils import load_and_split_data, ensure_datetime
+from rl_environment import TradingEnv # Ensure TradingEnv takes lifespan info
+from utils import load_and_split_data, calculate_volatility, NpEncoder # Import NpEncoder for saving
 
-# Global variable for database client (can be removed if passed explicitly)
-db_client = None
+# --- Global Variables ---
+db_client_global: Optional[DatabaseClient] = None
 
+
+# --- Custom Callback ---
+class TensorboardCallback(BaseCallback):
+    """Logs additional custom values to TensorBoard."""
+    def __init__(self, verbose=0):
+        super().__init__(verbose)
+
+    def _on_step(self) -> bool:
+        # Log average final portfolio value from completed episodes
+        final_values = [ep_info.get('final_portfolio_value') for ep_info in self.model.ep_info_buffer if 'final_portfolio_value' in ep_info]
+        if final_values:
+            avg_final_value = np.mean(final_values)
+            self.logger.record('rollout/ep_final_value_mean', avg_final_value)
+
+        # Log average SOL balance at episode end
+        sol_balances = [ep_info.get('sol_balance') for ep_info in self.model.ep_info_buffer if 'sol_balance' in ep_info and ep_info.get('terminated', False) or ep_info.get('truncated', False)]
+        if sol_balances:
+             avg_sol_balance = np.mean(sol_balances)
+             self.logger.record('rollout/ep_sol_balance_mean', avg_sol_balance)
+        return True
+
+# --- Environment Creation Helper ---
+def make_env_func(
+    data_dict: Dict[str, pd.DataFrame],
+    lifespan_dict: Dict[str, Dict[str, datetime]], # Add lifespans
+    initial_capital: float,
+    max_steps: int,
+    rank: int = 0,
+    seed: int = 0
+):
+    """
+    Utility function for creating and wrapping the environment for VecEnv.
+
+    Args:
+        data_dict: Historical data for this environment instance.
+        lifespan_dict: Token lifespan data for this environment instance.
+        initial_capital: Starting capital.
+        max_steps: Max steps per episode.
+        rank: Unique identifier for the environment instance.
+        seed: Base random seed.
+
+    Returns:
+        A function that initializes and returns the wrapped environment.
+    """
+    def _init():
+        # Filter data to only include mints present in lifespan_dict
+        valid_data = {
+            k: v for k, v in data_dict.items()
+            if isinstance(v, pd.DataFrame) and not v.empty and k in lifespan_dict
+        }
+        valid_lifespans = {k: v for k, v in lifespan_dict.items() if k in valid_data}
+
+        if not valid_data or not valid_lifespans:
+            logger.error(f"make_env_func (rank {rank}) received empty/invalid data or missing lifespans!")
+            raise ValueError(f"Cannot create environment for rank {rank} with empty data or missing lifespans.")
+
+        env = TradingEnv(
+            historical_data_dict=valid_data,
+            token_lifespans=valid_lifespans, # Pass lifespans
+            initial_capital=initial_capital,
+            max_steps=max_steps
+        )
+        env.reset(seed=seed + rank) # Seed the environment
+        log_dir_monitor = os.path.join(rl_config.MODEL_SAVE_DIR, f"monitor_logs_{rank}")
+        os.makedirs(log_dir_monitor, exist_ok=True)
+        env = Monitor(env, filename=log_dir_monitor)
+        return env
+    return _init
+
+# --- Main Training Function ---
 async def train_rl_agent():
-    """Main function to set up and train the RL agent."""
-    global db_client # Declare usage of global
+    """Sets up the RL environment, agent, callbacks, and starts training."""
+    global db_client_global
     setup_logging()
     logger.info("--- Starting RL Agent Training ---")
 
-    # --- Database Connection & Data Loading ---
-    if not db_client: # Initialize if not passed (e.g., from GA run)
-        db_client = DatabaseClient()
+    if not RL_AVAILABLE:
+        logger.critical("Stable Baselines3 is not available. Cannot start RL training.")
+        return
+
+    # --- Database Connection ---
+    # (Connect DB - same as before)
+    if not db_client_global:
+        db_client_global = DatabaseClient()
         try:
-            await db_client.connect()
+            await db_client_global.connect()
             logger.info("DB Client connected for RL Trainer.")
         except Exception as e:
             logger.critical(f"Failed to connect database for RL Trainer: {e}")
             return
 
-    # --- Load Data using the outsourced function ---
-    # Get dates and split config from rl_config
+    # --- Load and Prepare Data (Receives data AND lifespans) ---
     start_date = rl_config.RL_HISTORICAL_DATA_START_TS
     end_date = rl_config.RL_HISTORICAL_DATA_END_TS
-    data_split_config = rl_config.DATA_SPLIT_RL # Use RL specific split
+    data_split_config = rl_config.DATA_SPLIT_RL
 
-    logger.info("Loading and splitting data using function from utils...")
-    loaded_data_sets = await load_and_split_data(db_client, start_date, end_date, data_split_config)
+    logger.info(f"Loading and splitting data from {start_date.isoformat()} to {end_date.isoformat()}...")
+    loaded_results: Optional[Tuple[Dict, Dict]] = await load_and_split_data(db_client_global, start_date, end_date, data_split_config)
 
-    if loaded_data_sets is None:
-        logger.critical("Failed to load or split data via utils function. Exiting.")
-        await db_client.close()
+    if loaded_results is None:
+        logger.critical("Failed to load or split data. Exiting.")
+        if db_client_global: await db_client_global.close()
         return
+
+    loaded_data_sets, token_lifespans = loaded_results # Unpack
+    # --- End Load Data ---
 
     training_data = loaded_data_sets.get(rl_config.DATA_SET_KEY_TRAIN)
     eval_data = loaded_data_sets.get(rl_config.DATA_SET_KEY_EVAL)
+    # Filter lifespans to match the data splits
+    train_lifespans = {k: v for k, v in token_lifespans.items() if k in training_data} if training_data else {}
+    eval_lifespans = {k: v for k, v in token_lifespans.items() if k in eval_data} if eval_data else {}
 
-    if not training_data:
-        logger.critical("No training data available after loading/splitting. Exiting.")
-        await db_client.close()
+
+    if not training_data or not train_lifespans:
+        logger.critical("No training data or corresponding lifespans available after loading/splitting. Exiting.")
+        if db_client_global: await db_client_global.close()
         return
 
-    logger.info(f"Training data loaded for {len(training_data)} tokens.")
-    if eval_data:
-        logger.info(f"Evaluation data loaded for {len(eval_data)} tokens.")
+    logger.info(f"Training data loaded for {len(training_data)} tokens with lifespan info.")
+    if eval_data and eval_lifespans:
+        logger.info(f"Evaluation data loaded for {len(eval_data)} tokens with lifespan info.")
     else:
-        logger.warning("No evaluation data found. Evaluation callback will not function correctly.")
+        logger.warning("No evaluation data/lifespans found. Evaluation callback will not function correctly.")
+        eval_data = None # Ensure eval_data is None if lifespans are missing
+        eval_lifespans = {}
 
-    # --- Environment Setup ---
-    logger.info("Creating RL Environments...")
+    # --- Create Vectorized Environments ---
+    logger.info("Creating RL Vectorized Environments...")
+    train_env_raw: Optional[VecEnv] = None
+    eval_env_raw: Optional[VecEnv] = None
+    train_env: Optional[VecNormalize] = None
+    eval_env: Optional[VecNormalize] = None
 
-    # Create a function to instantiate the environment (needed for VecEnv)
-    # Pass the loaded data directly
-    def make_env(data_dict, initial_capital, max_steps):
-        def _init():
-            # Ensure data_dict is not empty for this instance
-            valid_data = {k: v for k, v in data_dict.items() if not v.empty}
-            if not valid_data:
-                 # This should ideally not happen if data loading filters correctly,
-                 # but handle defensively. Return a dummy/simplified env? Or raise?
-                 # For now, log and raise to prevent silent failures in VecEnv.
-                 logger.error("make_env called with empty or invalid data_dict!")
-                 raise ValueError("Cannot create environment with empty data.")
 
-            env = TradingEnv(historical_data_dict=valid_data, initial_capital=initial_capital, max_steps=max_steps)
-            env = Monitor(env) # Wrap with Monitor
-            return env
-        return _init
-
-    # Create Vectorized Environments for Training
-    VecEnvClass = DummyVecEnv if rl_config.N_ENVS == 1 else SubprocVecEnv
-    train_env = None
-    eval_env = None
     try:
-        # Pass training_data to make_env for the training environments
-        train_env = make_vec_env(
-            make_env(training_data, rl_config.RL_INITIAL_CAPITAL, rl_config.MAX_STEPS_PER_EPISODE),
-            n_envs=rl_config.N_ENVS,
-            vec_env_cls=VecEnvClass
-        )
-        logger.info(f"Created Training VecEnv with {rl_config.N_ENVS} environments.")
+        VecEnvClass = SubprocVecEnv if rl_config.N_ENVS > 1 else DummyVecEnv
 
-        # Create evaluation environment if eval_data exists
-        if eval_data:
-            # Pass eval_data to make_env for the evaluation environment
-            eval_env = DummyVecEnv([make_env(eval_data, rl_config.RL_INITIAL_CAPITAL, rl_config.MAX_STEPS_PER_EPISODE)])
-            logger.info("Created Evaluation VecEnv.")
-            # Optional: Check environment compatibility
-            # try:
-            #     check_env(eval_env.envs[0], warn=True)
-            #     logger.info("Environment check passed.")
-            # except Exception as check_err:
-            #      logger.warning(f"Environment check failed: {check_err}", exc_info=True)
+        # Create training environments, passing lifespans
+        env_fns = [make_env_func(training_data, train_lifespans, rl_config.RL_INITIAL_CAPITAL, rl_config.MAX_STEPS_PER_EPISODE, rank=i)
+                   for i in range(rl_config.N_ENVS)]
+        train_env_raw = VecEnvClass(env_fns)
+        logger.info(f"Created Training VecEnv ({VecEnvClass.__name__}) with {rl_config.N_ENVS} environments.")
+
+        # --- Environment Checker ---
+        # try:
+        #     logger.info("Running environment checker...")
+        #     # Pass lifespans to the check env func too
+        #     sample_env_fn = make_env_func(training_data, train_lifespans, rl_config.RL_INITIAL_CAPITAL, rl_config.MAX_STEPS_PER_EPISODE, rank=99)
+        #     check_env(sample_env_fn(), warn=True) # Create and check one instance
+        #     logger.info("Environment check passed.")
+        # except Exception as check_err:
+        #     logger.error(f"Environment check failed: {check_err}", exc_info=True)
+        #     # return # Exit if check fails
+
+        # Create evaluation environment
+        if eval_data and eval_lifespans:
+            eval_env_fn = make_env_func(eval_data, eval_lifespans, rl_config.RL_INITIAL_CAPITAL, rl_config.MAX_STEPS_PER_EPISODE, rank=100)
+            eval_env_raw = DummyVecEnv([eval_env_fn])
+            logger.info("Created Evaluation VecEnv (DummyVecEnv).")
+        else:
+             eval_env_raw = None
+
+        # --- Apply VecNormalize ---
+        normalize_kwargs = {'norm_obs': True, 'norm_reward': False, 'gamma': 0.99}
+        train_env = VecNormalize(train_env_raw, **normalize_kwargs)
+        logger.info("Applied VecNormalize to training environment.")
+        if eval_env_raw:
+            eval_env = VecNormalize(eval_env_raw, training=False, **normalize_kwargs)
+            # Load the SAME stats as the training env for consistent evaluation
+            eval_env.obs_rms = train_env.obs_rms
+            eval_env.ret_rms = train_env.ret_rms # If normalizing rewards (norm_reward=True)
+            eval_env.clip_obs = train_env.clip_obs
+            eval_env.clip_reward = train_env.clip_reward
+            logger.info("Applied VecNormalize to evaluation environment using training stats.")
+        else:
+            eval_env = None
 
     except Exception as e:
         logger.exception(f"Error creating vectorized environments: {e}")
-        if db_client: await db_client.close() # Ensure DB connection is closed
+        # Clean up any created envs
+        if train_env: train_env.close()
+        elif train_env_raw: train_env_raw.close() # Close raw if wrapper failed
+        if eval_env: eval_env.close()
+        elif eval_env_raw: eval_env_raw.close()
+        if db_client_global: await db_client_global.close()
         return
 
-    # --- Agent Setup ---
-    # ... (Agent setup logic remains the same using AgentClass, rl_config, etc.) ...
+    # --- Configure Agent ---
+    # (Agent selection, path setup, SB3 logger setup - same as before)
     logger.info(f"Setting up RL Agent: {rl_config.RL_ALGORITHM}")
-    AgentClass = globals().get(rl_config.RL_ALGORITHM)
+    algo_map = {"PPO": PPO, "SAC": SAC, "TD3": TD3}
+    AgentClass = algo_map.get(rl_config.RL_ALGORITHM)
+
     if AgentClass is None:
-        logger.critical(f"RL Algorithm '{rl_config.RL_ALGORITHM}' not found.")
+        logger.critical(f"RL Algorithm '{rl_config.RL_ALGORITHM}' not supported.")
+        # Cleanup envs before exiting
         if train_env: train_env.close()
         if eval_env: eval_env.close()
-        if db_client: await db_client.close()
+        if db_client_global: await db_client_global.close()
         return
 
     os.makedirs(rl_config.TENSORBOARD_LOG_DIR, exist_ok=True)
     os.makedirs(rl_config.MODEL_SAVE_DIR, exist_ok=True)
     run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     model_prefix = f"{rl_config.RL_ALGORITHM}_{run_timestamp}"
+    log_path_tb = os.path.join(rl_config.TENSORBOARD_LOG_DIR, model_prefix)
+    save_path_model = os.path.join(rl_config.MODEL_SAVE_DIR, f"{model_prefix}_final.zip")
+    save_path_vecnormalize = os.path.join(rl_config.MODEL_SAVE_DIR, f"{model_prefix}_vecnormalize.pkl")
+    best_model_save_dir = os.path.join(rl_config.MODEL_SAVE_DIR, f"{model_prefix}_best")
 
-    model = AgentClass(
-        "MlpPolicy",
-        train_env,
+    # Configure SB3 logger to output to tensorboard, csv, and stdout
+    sb3_file_logger = sb3_configure_logger(log_path_tb, ["stdout", "csv", "tensorboard"])
+
+    device = "auto"
+    logger.info(f"Using device: {device}")
+
+    # Define agent parameters
+    agent_params = dict(
+        policy="MlpPolicy",
+        env=train_env, # Use the normalized env
         policy_kwargs=rl_config.POLICY_KWARGS,
         verbose=1,
-        tensorboard_log=rl_config.TENSORBOARD_LOG_DIR,
-        n_steps=2048,
-        batch_size=64,
-        n_epochs=10,
-        gamma=0.99,
-        gae_lambda=0.95,
-        clip_range=0.2,
-        ent_coef=0.0,
-        vf_coef=0.5,
-        # seed=42
+        # tensorboard_log=rl_config.TENSORBOARD_LOG_DIR, # Handled by logger now
+        device=device,
+        seed=42
     )
+    # Algorithm-specific hyperparameters
+    if rl_config.RL_ALGORITHM == "PPO":
+        agent_params.update(dict(
+            n_steps=2048, batch_size=64, n_epochs=10, gamma=0.99,
+            gae_lambda=0.95, clip_range=0.2, ent_coef=0.0, vf_coef=0.5,
+            learning_rate=3e-4
+        ))
+    # Add SAC/TD3 params if needed
 
-    # --- Callbacks ---
-    # ... (Callback setup logic remains the same, using eval_env if available) ...
+    model = AgentClass(**agent_params)
+    model.set_logger(sb3_file_logger) # Assign the configured logger
+
+    # --- Setup Callbacks ---
     logger.info("Setting up Callbacks...")
     callbacks = []
+    # Checkpoint callback
     checkpoint_callback = CheckpointCallback(
-        save_freq=max(rl_config.EVAL_FREQ // rl_config.N_ENVS, 1),
+        save_freq=max(rl_config.CHECKPOINT_FREQ // rl_config.N_ENVS, 1), # Adjust freq by n_envs
         save_path=os.path.join(rl_config.MODEL_SAVE_DIR, f"{model_prefix}_checkpoints"),
-        name_prefix="rl_model"
+        name_prefix="rl_model",
+        save_replay_buffer=True if rl_config.RL_ALGORITHM in ["SAC", "TD3"] else False,
+        save_vecnormalize=True # IMPORTANT: Save VecNormalize stats with checkpoints
     )
     callbacks.append(checkpoint_callback)
 
-    if eval_env:
+    # Evaluation callback
+    if eval_env: # Only add if eval_env exists
         eval_callback = EvalCallback(
-            eval_env,
-            best_model_save_path=os.path.join(rl_config.MODEL_SAVE_DIR, f"{model_prefix}_best"),
-            log_path=os.path.join(rl_config.MODEL_SAVE_DIR, f"{model_prefix}_best"),
-            eval_freq=max(rl_config.EVAL_FREQ // rl_config.N_ENVS, 1),
+            eval_env, # Use the normalized eval env
+            best_model_save_path=best_model_save_dir,
+            log_path=best_model_save_dir,
+            eval_freq=max(rl_config.EVAL_FREQ // rl_config.N_ENVS, 1), # Adjust freq by n_envs
             n_eval_episodes=rl_config.N_EVAL_EPISODES,
             deterministic=True,
             render=False,
-            verbose=1
+            verbose=1,
+            # Callback needs to save VecNormalize stats when saving best model
+            callback_on_new_best=lambda _locals, _globals: _locals['self'].model.get_vec_normalize_env().save(os.path.join(best_model_save_dir, "best_vecnormalize.pkl"))
         )
         callbacks.append(eval_callback)
     else:
-        logger.warning("EvalCallback disabled as evaluation environment could not be created.")
+        logger.warning("EvalCallback disabled as evaluation environment is not available.")
 
+    # Custom TensorBoard callback
+    callbacks.append(TensorboardCallback())
 
-    # --- Training ---
-    # ... (Training loop and saving logic remains the same) ...
-    logger.info(f"Starting training for {rl_config.TOTAL_TIMESTEPS} timesteps...")
+    # --- Start Training ---
+    logger.info(f"--- Starting RL Training ({rl_config.RL_ALGORITHM}) for {rl_config.TOTAL_TIMESTEPS} timesteps ---")
     start_train_time = time.time()
+    training_successful = False
     try:
         model.learn(
             total_timesteps=rl_config.TOTAL_TIMESTEPS,
             callback=callbacks,
-            tb_log_name=model_prefix,
-            reset_num_timesteps=False
+            log_interval=10, # Log stats every 10 updates (can adjust)
+            reset_num_timesteps=True
         )
+        training_successful = True
+    except KeyboardInterrupt:
+         logger.warning("Training interrupted by user (KeyboardInterrupt). Saving current model.")
     except Exception as learn_err:
         logger.exception(f"Error during model.learn(): {learn_err}")
     finally:
+        # --- Save Final Model and Environment Statistics ---
         end_train_time = time.time()
-        logger.info(f"Training loop finished after {end_train_time - start_train_time:.2f} seconds.")
-        final_model_path = os.path.join(rl_config.MODEL_SAVE_DIR, f"{model_prefix}_final.zip")
+        logger.info(f"--- Training loop finished. Duration: {end_train_time - start_train_time:.2f} seconds ---")
+
         try:
-            model.save(final_model_path)
-            logger.info(f"Final trained model saved to: {final_model_path}")
+            # Save the final agent model
+            model.save(save_path_model)
+            logger.info(f"Final trained model saved to: {save_path_model}")
+
+            # Save the VecNormalize statistics from the training environment
+            if isinstance(train_env, VecNormalize):
+                train_env.save(save_path_vecnormalize)
+                logger.info(f"Final VecNormalize statistics saved to: {save_path_vecnormalize}")
+
+            # Check if a best model was saved and report
+            best_model_path = os.path.join(best_model_save_dir, "best_model.zip")
+            best_vecnorm_path = os.path.join(best_model_save_dir, "best_vecnormalize.pkl")
+            if eval_env and os.path.exists(best_model_path) and training_successful:
+                logger.info(f"Best model saved during evaluation: {best_model_path}")
+                if os.path.exists(best_vecnorm_path):
+                    logger.info(f"Corresponding VecNormalize stats saved: {best_vecnorm_path}")
+                else:
+                    logger.warning(f"Best model saved, but VecNormalize stats file missing: {best_vecnorm_path}")
+
         except Exception as save_err:
-             logger.error(f"Failed to save final model: {save_err}")
+             logger.error(f"Failed to save final model or VecNormalize stats: {save_err}")
 
-    # --- Cleanup ---
-    logger.info("Closing environments...")
-    try:
-        if train_env: train_env.close()
-        if eval_env: eval_env.close()
-    except Exception as close_err:
-        logger.error(f"Error closing environments: {close_err}")
+        # --- Cleanup ---
+        logger.info("Closing environments...")
+        try:
+            # Close VecNormalize wrappers first, then underlying VecEnvs
+            if train_env: train_env.close()
+            if eval_env: eval_env.close()
+            # No need to explicitly close train_env_raw/eval_env_raw if wrappers were created
+        except Exception as close_err:
+            logger.error(f"Error closing environments: {close_err}")
 
-    if db_client: await db_client.close()
-    logger.info("--- RL Agent Training Finished ---")
+        if db_client_global: await db_client_global.close()
+        logger.info("--- RL Agent Training Finished ---")
 
 
+# --- Entry Point Guard ---
 if __name__ == "__main__":
-    # Important: If using SubprocVecEnv (N_ENVS > 1), ensure this guard is present
-    # Use asyncio.run() to execute the async main training function
-    # Ensure the loop policy is compatible if using SubprocVecEnv on Windows
-    # if os.name == 'nt':
-    #     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-    asyncio.run(train_rl_agent())
+    if os.name == 'nt':
+         from multiprocessing import freeze_support
+         freeze_support()
+
+    try:
+        asyncio.run(train_rl_agent())
+    except Exception as main_err:
+         logger.critical(f"Critical error in RL trainer entry point: {main_err}", exc_info=True)
