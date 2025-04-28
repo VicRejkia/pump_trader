@@ -91,7 +91,7 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
 
 # --- GA Settings ---
 POPULATION_SIZE: int = 60 # Slightly larger population
-NUM_GENERATIONS: int = 30 # More generations for convergence
+NUM_GENERATIONS: int = 100 # More generations for convergence
 
 CROSSOVER_PROBABILITY: float = 0.8
 MUTATION_PROBABILITY: float = 0.2 # Slightly higher mutation for exploration
@@ -122,8 +122,8 @@ DATA_SPLIT: Dict[str, float] = {
 
 # Overall date range for historical data fetch
 # NOTE: THESE DATES ARE EXAMPLES - ADJUST TO YOUR ACTUAL DATA RANGE
-HISTORICAL_DATA_START_TS: datetime = datetime(2025, 4, 19, 15, 0, 0, tzinfo=timezone.utc)
-HISTORICAL_DATA_END_TS: datetime = datetime(2025, 4, 21, 20, 0, 0, tzinfo=timezone.utc) # Extended range example
+HISTORICAL_DATA_START_TS: datetime = datetime(2025, 4, 19, 13, 0, 0, tzinfo=timezone.utc)
+HISTORICAL_DATA_END_TS: datetime = datetime(2025, 4, 21, 15, 0, 0, tzinfo=timezone.utc) # Extended range example
 
 # --- Backtester Settings ---
 BACKTEST_INITIAL_CAPITAL: float = 10.0 # In SOL
