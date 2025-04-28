@@ -69,6 +69,7 @@ def run_backtest_sync_worker(task_data: Tuple[int, Dict[str, Any], str, pd.DataF
     """
     solution_idx, parameters, mint, df_data, max_timestamp, initial_capital, fitness_metric = task_data
     # logger.debug(f"[Worker {os.getpid()}] Starting sync backtest for Sol {solution_idx}, Mint {mint}, End: {max_timestamp}") # Optional detailed log
+    parameters['mint'] = mint # Include mint in parameters for backtest
 
     # Ensure DataFrame index is DatetimeIndex for resampling in backtester
     if not isinstance(df_data.index, pd.DatetimeIndex):
@@ -293,6 +294,8 @@ async def evaluate_solution(
             # Get max_timestamp for this token
             lifespan = token_lifespans.get(mint)
             max_timestamp = lifespan['end_ts'] if lifespan else None
+
+            parameters['mint'] = mint # Include mint in parameters for backtest
 
             tasks.append(asyncio.create_task(
                 run_backtest(parameters, df_data, initial_capital, max_timestamp), # Pass max_timestamp
