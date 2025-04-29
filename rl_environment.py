@@ -298,18 +298,24 @@ class TradingEnv(gym.Env):
             first_sell_perc = agent_params.get('FIRST_SELL_PERCENT', 75.0) / 100.0
             trailing_sl_percent = agent_params.get('TRAILING_STOP_LOSS_PERCENT', 50.0)
             first_profit_margin = agent_params.get('FIRST_SELL_PROFIT_MARGIN', 100.0) / 100.0
+            volume_thresh = agent_params.get('DEFAULT_VOLUME_THRESHOLD', 5000)
+            mcap_thresh_buy = agent_params.get('DEFAULT_MARKETCAP_THRESHOLD', 10000)
+            rug_thresh = agent_params.get('DEFAULT_RUGCHECK_SCORE_THRESHOLD', 1000)
+            social_thresh = agent_params.get('DEFAULT_SOCIAL_SCORE_THRESHOLD', 100)
+            volatility_thresh = agent_params.get('MIN_VOLATILITY', 0.0)
+            buy_amount_sol = agent_params.get('SOL_TO_BUY', 0.1)
 
             # Fixed simulation parameters
             buy_fee = rl_config.DEFAULT_BUY_FEE
             buy_tip = rl_config.DEFAULT_BUY_TIP
             sell_fee = rl_config.DEFAULT_SELL_FEE
             sell_tip = rl_config.DEFAULT_SELL_TIP
-            buy_amount_sol = rl_config.DEFAULT_BUY_SOL_AMOUNT
-            volume_thresh = rl_config.DEFAULT_VOLUME_THRESHOLD
-            mcap_thresh_buy = rl_config.DEFAULT_MARKETCAP_THRESHOLD
-            rug_thresh = rl_config.DEFAULT_RUGCHECK_SCORE_THRESHOLD
-            social_thresh = rl_config.DEFAULT_SOCIAL_SCORE_THRESHOLD
-            volatility_thresh = rl_config.MIN_VOLATILITY
+            # buy_amount_sol = rl_config.DEFAULT_BUY_SOL_AMOUNT
+            # volume_thresh = rl_config.DEFAULT_VOLUME_THRESHOLD
+            # mcap_thresh_buy = rl_config.DEFAULT_MARKETCAP_THRESHOLD
+            # rug_thresh = rl_config.DEFAULT_RUGCHECK_SCORE_THRESHOLD
+            # social_thresh = rl_config.DEFAULT_SOCIAL_SCORE_THRESHOLD
+            # volatility_thresh = rl_config.MIN_VOLATILITY
             min_mcap_sell_usd = rl_config.MIN_MARKET_CAP
 
         except (KeyError, ValueError, TypeError) as e:
