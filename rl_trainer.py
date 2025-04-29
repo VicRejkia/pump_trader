@@ -44,6 +44,10 @@ except ImportError:
     class SubprocVecEnv(VecEnv): pass
     class VecNormalize(VecEnv): pass
 
+import shap
+from sklearn.inspection import permutation_importance
+import matplotlib.pyplot as plt
+
 # --- Project Modules ---
 import rl_config
 from logger import logger, setup_logging
@@ -87,6 +91,55 @@ class SaveVecNormalizeCallback(BaseCallback):
         if vec_normalize is not None:
             vec_normalize.save(self.save_path)
         return True
+
+def analyze_feature_importance(model, env, num_samples=1000):
+    """Analyzes feature importance using SHAP with proper output handling."""
+    # Generate properly structured samples
+    samples = np.array([env.observation_space.sample() for _ in range(num_samples)])
+    
+    # Create wrapper function that returns proper numpy array
+    def model_predict_wrapper(x):
+        # Stable Baselines3 returns (action, state) tuple
+        return np.array([model.predict(sample)[0] for sample in x])
+
+    # SHAP Analysis
+    explainer = shap.Explainer(
+        model_predict_wrapper, 
+        samples,
+        feature_names=rl_config.OBSERVATION_FEATURES
+    )
+    
+    # Calculate SHAP values in batches to manage memory
+    shap_values = explainer(samples[:100])  # Use smaller subset for demonstration
+    
+    # Plot summary
+    plt.figure()
+    shap.summary_plot(shap_values, samples[:100], show=False)
+    plt.savefig(os.path.join(rl_config.MODEL_SAVE_DIR, "feature_importance_shap.png"))
+    plt.close()
+
+    # Permutation Importance
+    def score_fn(X):
+        return np.array([model.predict(x)[0] for x in X])
+
+    result = permutation_importance(
+        score_fn, 
+        samples[:100], 
+        n_repeats=5, 
+        random_state=42,
+        n_jobs=-1
+    )
+    
+    # Save results
+    importance_df = pd.DataFrame({
+        'feature': rl_config.OBSERVATION_FEATURES,
+        'importance_mean': result.importances_mean(axis=1),
+        'importance_std': result.importances_std(axis=1)
+    }).sort_values('importance_mean', ascending=False)
+    
+    importance_df.to_csv(os.path.join(rl_config.MODEL_SAVE_DIR, "feature_importance_permutation.csv"), index=False)
+    
+    logger.info("Feature importance analysis completed")
 
 # --- Environment Creation Helper ---
 def make_env_func(
@@ -404,6 +457,10 @@ async def train_rl_agent():
 
         except Exception as save_err:
              logger.error(f"Failed to save final model or VecNormalize stats: {save_err}")
+
+        if training_successful:
+            logger.info("Performing post-training feature importance analysis...")
+            analyze_feature_importance(model, train_env)
 
         # --- Cleanup ---
         logger.info("Closing environments...")

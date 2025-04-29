@@ -12,7 +12,6 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any # Added Optional
 
 from logger import logger
-from utils import calculate_volatility
 
 # --- Performance Metrics Calculation ---
 def calculate_performance_metrics(
