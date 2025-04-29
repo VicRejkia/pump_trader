@@ -26,48 +26,48 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
     },
     {
         "name": "INITIAL_STOP_LOSS_PERCENT",
-        "values": list(range(10, 71, 5)), # 10% to 70% SL in steps of 5%
+        "values": list(range(55, 66, 1)), # 10% to 70% SL in steps of 5%
         "type": float
     },
     {
         "name": "FIRST_SELL_PERCENT",
-        "values": list(range(20, 101, 10)), # 20% to 100% of initial tokens in steps of 10%
+        "values": list(range(15, 36, 1)), # 20% to 100% of initial tokens in steps of 10%
         "type": float
     },
     {
         "name": "TRAILING_STOP_LOSS_PERCENT",
-        "values": list(range(5, 51, 5)), # 5% to 50% trailing SL in steps of 5% (tighter range)
+        "values": list(range(40, 51, 1)), # 5% to 50% trailing SL in steps of 5% (tighter range)
         "type": float
     },
     {
         "name": "SECOND_TAKE_PROFIT_PERCENT",
-        "values": list(range(100, 1001, 50)), # 100% to 1000% TP2 in steps of 50%
+        "values": list(range(850, 1101, 50)), # 100% to 1000% TP2 in steps of 50%
         "type": float
     },
     {
         "name": "FIRST_SELL_PROFIT_MARGIN",
-        "values": list(range(20, 201, 20)), # 20% to 200% margin in steps of 20%
+        "values": list(range(10, 101, 10)), # 20% to 200% margin in steps of 20%
         "type": float
     },
     {
         "name": "DEFAULT_VOLUME_THRESHOLD",
-        "values": list(range(5000, 50001, 2500)), # 5k to 50k USD volume in steps of 2.5k
+        "values": list(range(20000, 70001, 2500)), # 5k to 50k USD volume in steps of 2.5k
         "type": int
     },
     {
         "name": "DEFAULT_MARKETCAP_THRESHOLD",
-        "values": list(range(5000, 50001, 2500)), # 5k to 50k USD market cap in steps of 2.5k
+        "values": list(range(10000, 30001, 2000)), # 5k to 50k USD market cap in steps of 2.5k
         "type": int
     },
     {
         "name": "MIN_VOLATILITY",
         # Volatility as % change (e.g., 0.1 means 0.1%)
-        "values": [round(x * 0.05, 2) for x in range(1, 11)], # 0.05% to 0.5% in steps of 0.05%
+        "values": [round(x * 0.02, 2) for x in range(1, 11)], # 0.05% to 0.5% in steps of 0.05%
         "type": float
     },
     {
         "name": "DEFAULT_RUGCHECK_SCORE_THRESHOLD",
-        "values": list(range(1, 1002, 100)), # 1 to 1001 score in steps of 100
+        "values": list(range(1, 501, 100)), # 1 to 1001 score in steps of 100
         "type": int
     },
     {
