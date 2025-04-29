@@ -381,6 +381,13 @@ async def run_backtest(
                     socials_score < socials_threshold and
                     volatility >= min_volatility
                 )
+                # logger.debug(f"Buy criteria for {mint_addr} at {timestamp}: \n")
+                # logger.debug(f"Volume={volume_threshold} - {volume}")
+                # logger.debug(f"MarketCap={marketcap_threshold} - {market_cap_sol}")
+                # logger.debug(f"Volatility={min_volatility} - {volatility}")
+                # logger.debug(f"RugCheck={rugcheck_threshold} - {rugcheck_score}")
+                # logger.debug(f"Socials={socials_threshold} - {socials_score}")
+
 
                 if meets_buy_criteria:
                     total_investment = sol_to_buy + buy_fee + buy_tip
