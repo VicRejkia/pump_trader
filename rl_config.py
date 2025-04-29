@@ -67,7 +67,14 @@ RL_TUNABLE_PARAMETERS: List[Tuple[str, float, float, type]] = [
     ('FIRST_SELL_PERCENT', 20.0, 100.0, float),         # 20% to 100% partial sell
     ('TRAILING_STOP_LOSS_PERCENT', 5.0, 50.0, float),   # 5% to 50% TSL
     ('FIRST_SELL_PROFIT_MARGIN', 10.0, 200.0, float),   # 10% to 200% margin for TP1
-    # ('SOL_TO_BUY', 0.1, 1.0, float), # Add buy amount later if needed
+    ('SECOND_TAKE_PROFIT_PERCENT', 100.0, 1000.0, float), # 100% to 1000% TP2
+    ('FIRST_SELL_PROFIT_MARGIN', 10.0, 200.0, float),   # 10% to 200% margin for TP1
+    ('DEFAULT_VOLUME_THRESHOLD', 5000, 50000, int),     # 5k to 50k USD volume threshold
+    ('DEFAULT_MARKETCAP_THRESHOLD', 10000, 100000, int), # 10k to 100k USD market cap threshold
+    ('MIN_VOLATILITY', 0.1, 1.0, float),                # 0.1% to 1% volatility threshold
+    ('DEFAULT_RUGCHECK_SCORE_THRESHOLD', 1, 1000, int), # 1 to 1000 score threshold
+    ('DEFAULT_SOCIAL_SCORE_THRESHOLD', 1, 100, int),  # 1 to 100 score threshold
+    ('SOL_TO_BUY', 0.1, 1.0, float), # Add buy amount later if needed
 ]
 ACTION_SPACE_DIM: int = len(RL_TUNABLE_PARAMETERS)
 
@@ -100,11 +107,11 @@ DEFAULT_BUY_SOL_AMOUNT: float = 0.5 # Fixed buy amount for RL env simulation
 SECOND_TAKE_PROFIT_PERCENT: float = 550.0 # Fixed second TP target
 
 # Fixed thresholds for the *simulated* buy decision (agent learns parameters, not timing)
-DEFAULT_VOLUME_THRESHOLD: int = 19000
-DEFAULT_MARKETCAP_THRESHOLD: int = 10000
-DEFAULT_RUGCHECK_SCORE_THRESHOLD: int = 801
-DEFAULT_SOCIAL_SCORE_THRESHOLD: int = 50
-MIN_VOLATILITY: float = 0.1
+# DEFAULT_VOLUME_THRESHOLD: int = 19000
+# DEFAULT_MARKETCAP_THRESHOLD: int = 10000
+# DEFAULT_RUGCHECK_SCORE_THRESHOLD: int = 801
+# DEFAULT_SOCIAL_SCORE_THRESHOLD: int = 50
+# MIN_VOLATILITY: float = 0.1
 MIN_MARKET_CAP: int = 3600 # Emergency sell market cap threshold (USD)
 
 VOLATILITY_WINDOW: int = 120 # Window size (steps) for volatility calculation in env
@@ -129,7 +136,7 @@ MODEL_SAVE_DIR: str = "./rl_trained_models/"
 EVAL_FREQ: int = 50000 # Evaluate every 50k total steps
 
 # Number of episodes for each evaluation run.
-N_EVAL_EPISODES: int = 10 # More episodes for better evaluation stability
+N_EVAL_EPISODES: int = 20 # More episodes for better evaluation stability
 
 # Checkpoint saving frequency (in total agent steps).
 CHECKPOINT_FREQ: int = 100000 # Save every 100k total steps

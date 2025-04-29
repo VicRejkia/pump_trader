@@ -5,6 +5,9 @@ Reinforcement Learning Agent Training Script.
 
 Orchestrates the training process for an RL agent using Stable Baselines3
 to learn optimal trading parameters for the custom TradingEnv environment.
+
+to see training details use:
+tensorboard --logdir ./rl_tensorboard_logs/ --port 6006      
 """
 
 import os
@@ -171,11 +174,11 @@ async def train_rl_agent():
     loaded_data_sets, token_lifespans = loaded_results # Unpack
 
     # Create an output directory for the datasets
-    output_dir = os.path.join("data", "exported_datasets", datetime.now().strftime("%Y%m%d_%H%M%S"))
+    # output_dir = os.path.join("data", "exported_datasets", datetime.now().strftime("%Y%m%d_%H%M%S"))
 
-    # Export the datasets and token lifespans
-    export_to_csv(loaded_data_sets, output_dir, token_lifespans)
-    logger.info(f"Exported datasets and token lifespans to {output_dir}")
+    # # Export the datasets and token lifespans
+    # export_to_csv(loaded_data_sets, output_dir, token_lifespans)
+    # logger.info(f"Exported datasets and token lifespans to {output_dir}")
 
     training_data = loaded_data_sets.get(rl_config.DATA_SET_KEY_TRAIN)
     eval_data = loaded_data_sets.get(rl_config.DATA_SET_KEY_EVAL)

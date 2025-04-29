@@ -244,8 +244,8 @@ async def run_backtest(
          logger.warning(f"No candle data remained after filtering/validation for {mint_addr}.")
          return calculate_performance_metrics([], initial_capital, initial_capital, start_ts_data, end_ts_data, "No Candle Data")
     
-    logger.debug(f"Data head:\n{df.head()}")
-    logger.debug(f"Data tail:\n{df.tail()}")
+    # logger.debug(f"Data head:\n{df.head()}")
+    # logger.debug(f"Data tail:\n{df.tail()}")
 
     # --- Extract Parameters (Same as before) ---
     sol_to_buy = parameters.get('SOL_TO_BUY', 0.9)
