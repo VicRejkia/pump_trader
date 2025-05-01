@@ -9,6 +9,8 @@ import json         # For reading the price file
 import requests     # For synchronous API fallback
 import time         # For checking file age
 import os           # For file path operations
+from datetime import datetime, timezone
+import numpy as np
 
 # Add project root to the Python path to allow importing modules from the parent directory
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -18,6 +20,7 @@ if project_root not in sys.path:
 try:
     from database_handler import DatabaseClient
     from trading_bot import TradingBot
+    from state_manager import GlobalState
     # Only import log_queue, not the logger instance or setup function from logger.py
     from logger import log_queue
     import config  # Import the API URL
@@ -35,10 +38,23 @@ app = Flask(__name__)
 # Removed redirection of Flask logger to keep logs separate
 # Flask logs will go to console by default
 
+db_client = DatabaseClient()
+
 # Define paths for communication files relative to project root
 COMMAND_FILE = os.path.join(project_root, 'data', 'bot_command.txt')
 STATUS_FILE = os.path.join(project_root, 'data', 'bot_status.txt')
 LOG_FILE = os.path.join(project_root, config.LOG_STORAGE_PATH, f"{config.LOGGER_NAME}.log")
+
+async def get_db():
+    """Helper function to get a database connection."""
+    if not db_client.pool:
+        try:
+            await db_client.connect()
+            app.logger.info("Database connection established.")
+        except Exception as e:
+            app.logger.error(f"Failed to connect to database: {e}")
+            raise # Re-raise to handle in the route
+    return db_client
 
 # --- Helper Functions for File Flags ---
 def write_command(command):
@@ -69,30 +85,12 @@ def read_status():
         app.logger.error(f"Error reading status file {STATUS_FILE}: {e}")
         return "ERROR" # Indicate an error reading the status
 
+def convert_datetime(o):
+    """Helper to serialize datetime objects."""
+    if isinstance(o, datetime):
+        return o.isoformat()
+    raise TypeError(f"Type {type(o)} not serializable")
 # --- End Helper Functions ---
-
-@app.route('/logs')
-def logs():
-    """Reads the last N lines from the TradingBot log file."""
-    MAX_LOG_LINES = 100 # Adjust as needed
-    try:
-        if not os.path.exists(LOG_FILE):
-            return jsonify([]) # Return empty list if log file doesn't exist yet
-
-        # Explicitly specify UTF-8 encoding and ignore errors
-        with open(LOG_FILE, 'r', encoding='utf-8', errors='ignore') as f:
-            # Read all lines and take the last N
-            lines = f.readlines()
-            log_content = lines[-MAX_LOG_LINES:]
-        # Strip newline characters for cleaner JSON output
-        log_content = [line.strip() for line in log_content]
-        return jsonify(log_content)
-    except IOError as e:
-        app.logger.error(f"Error reading log file {LOG_FILE}: {e}")
-        return jsonify({"error": f"Could not read log file: {e}"}), 500
-    except Exception as e:
-        app.logger.error(f"Unexpected error reading log file {LOG_FILE}: {e}")
-        return jsonify({"error": f"Unexpected error reading log file: {e}"}), 500
 
 # Removed redundant /log_file endpoint. /logs now reads from the file.
 # --- SOL Price Fetching Logic ---
@@ -148,7 +146,6 @@ def get_current_sol_price():
 # Helper function to manage DB connection per request
 async def execute_db_query(query_func, *args):
     """Creates a connection, executes a query function, and closes."""
-    db_client = DatabaseClient()
     try:
         await db_client.connect()
         app.logger.debug("DB connection established for request.") # Use app.logger
@@ -170,6 +167,32 @@ async def fetch_trade_history_query(db_client, mints):
 async def fetch_portfolio_transactions_query(db_client, mints):
     return await db_client.get_portfolio_transactions(mints)
 # Routes for the dashboard pages
+
+
+
+@app.route('/logs')
+def logs():
+    """Reads the last N lines from the TradingBot log file."""
+    MAX_LOG_LINES = 100 # Adjust as needed
+    try:
+        if not os.path.exists(LOG_FILE):
+            return jsonify([]) # Return empty list if log file doesn't exist yet
+
+        # Explicitly specify UTF-8 encoding and ignore errors
+        with open(LOG_FILE, 'r', encoding='utf-8', errors='ignore') as f:
+            # Read all lines and take the last N
+            lines = f.readlines()
+            log_content = lines[-MAX_LOG_LINES:]
+        # Strip newline characters for cleaner JSON output
+        log_content = [line.strip() for line in log_content]
+        return jsonify(log_content)
+    except IOError as e:
+        app.logger.error(f"Error reading log file {LOG_FILE}: {e}")
+        return jsonify({"error": f"Could not read log file: {e}"}), 500
+    except Exception as e:
+        app.logger.error(f"Unexpected error reading log file {LOG_FILE}: {e}")
+        return jsonify({"error": f"Unexpected error reading log file: {e}"}), 500
+    
 @app.route('/')
 @app.route('/charts')
 async def index():
@@ -185,6 +208,27 @@ async def configuration():
 @app.route('/portfolio')
 async def portfolio():
     """Renders the portfolio page."""
+
+    # Fetch all tracked tokens
+    async def fetch_tracked_tokens_query(db_client, bc): # Added po
+        return await db_client.get_total_tracked_tokens(backedup=bc) # Pass po
+
+    try:
+        # Execute the query using the helper
+        fetched_tokens = await execute_db_query(
+            fetch_tracked_tokens_query,
+            False
+        )
+        app.logger.info(f"Returning {len(fetched_tokens)} tokens matching filters.") # Use app.logger
+        print(fetched_tokens) # Debug print to check the data structure
+
+        total_tracked_tokens = fetched_tokens
+    
+    except Exception as e:
+        # Error already logged by execute_db_query
+        app.logger.error(f"Failed to fetch filtered tokens for API request.") # Use app.logger
+        return jsonify({"error": "Failed to fetch filtered tokens"}), 500
+    
     return render_template('portfolio.html')
 
 @app.route('/analytics')
@@ -204,7 +248,6 @@ async def get_filtered_tokens_api():
     # Get portfolio_only flag, converting 'true'/'false' string to boolean
     portfolio_only = request.args.get('portfolio_only', default=False, type=lambda v: v.lower() == 'true')
     # Get volume aggregation type, default to 'avg'
-    volume_aggregation = request.args.get('volume_aggregation', default='avg', type=str)
 
     current_sol_price = get_current_sol_price()
     if current_sol_price is None:
@@ -217,8 +260,8 @@ async def get_filtered_tokens_api():
     app.logger.info(f"Received request for filtered tokens: socials<={max_socials}, rug<={max_rugcheck}, vol>={min_volume_sol} (last {time_window_minutes} min), portfolio_only={portfolio_only}") # Use app.logger
 
     # Wrapper for the specific query needed by this route
-    async def fetch_filtered_tokens_query(db_client, ms, mr, mv, tw, po, va): # Added po
-        return await db_client.get_filtered_tokens(max_socials=ms, max_rugcheck=mr, min_volume_sol=mv, time_window_minutes=tw, portfolio_only=po, volume_aggregation=va) # Pass po
+    async def fetch_filtered_tokens_query(db_client, ms, mr, mv, tw, po): # Added po
+        return await db_client.get_filtered_tokens(max_socials=ms, max_rugcheck=mr, min_volume_sol=mv, time_window_minutes=tw, portfolio_only=po) # Pass po
 
     try:
         # Execute the query using the helper
@@ -228,8 +271,7 @@ async def get_filtered_tokens_api():
             max_rugcheck,
             min_volume_sol,
             time_window_minutes,
-            portfolio_only, # Pass portfolio_only
-            volume_aggregation
+            portfolio_only
         )
         app.logger.info(f"Returning {len(filtered_tokens)} tokens matching filters.") # Use app.logger
         return jsonify(filtered_tokens)
@@ -380,10 +422,148 @@ def bot_status():
     app.logger.debug(f"Reporting bot status as: {status}")
     return jsonify({"status": status}), 200
 
+@app.route('/trading_view') # Corrected route name
+async def trading_view_page():
+    """Renders the TradingView chart page."""
+    db = None
+    tokens_sorted = []
+    try:
+        db = await get_db()
+        # Fetch all unique tokens for the dropdown menu
+        tokens = await db.get_all_unique_mints_with_names()
+        # Sort tokens alphabetically by name for the dropdown
+        tokens_sorted = sorted(tokens, key=lambda x: x.get('name', '').lower())
+        app.logger.info(f"Fetched {len(tokens_sorted)} tokens for TradingView dropdown.")
+    except Exception as e:
+        app.logger.error(f"Error fetching token list for TradingView page: {e}")
+        tokens_sorted = [] # Ensure it's always a list
+    finally:
+        if db and db.pool:
+             # Consider if you want to close the pool here or keep it open
+             # await db.close() # Uncomment if you want to close after each request
+             pass
+    # Pass the sorted list to the template
+    return render_template('trading_view.html', tokens=tokens_sorted) # Ensure template name matches
+
+# Add/Update the API endpoint for TradingView chart data
+@app.route('/api/trading_view/<string:mint>') # Corrected route name
+async def get_trading_view_data(mint):
+    """Provides OHLCV and portfolio data for the TradingView chart."""
+    db = None
+    # Define the time window (e.g., last 24 hours, adjust as needed)
+    end_date = datetime.now(timezone.utc)
+    # Fetch a reasonable duration, e.g., 7 days, or make it configurable
+    start_date = end_date - pd.Timedelta(days=7)
+    app.logger.info(f"Fetching TradingView data for mint: {mint} from {start_date} to {end_date}")
+
+    try:
+        db = await get_db()
+
+        # 1. Fetch OHLCV data using the backtesting data function
+        # This function already calculates OHLCV at 5s intervals
+        ohlcv_data_dict = await db.get_historical_data_for_backtesting(
+            mints=[mint],
+            start_date=start_date,
+            end_date=end_date
+        )
+
+        if not ohlcv_data_dict or mint not in ohlcv_data_dict:
+            app.logger.warning(f"No OHLCV data found for mint {mint} in the time range.")
+            return jsonify({"error": "No OHLCV data found for this token in the time range."}), 404
+
+        ohlcv_df = ohlcv_data_dict[mint]
+        app.logger.debug(f"Fetched {len(ohlcv_df)} OHLCV data points for {mint}.")
+
+        # Convert DataFrame to list of dictionaries suitable for Lightweight Charts
+        # Ensure timestamp is in seconds (epoch time)
+        ohlcv_formatted = []
+        volume_formatted = []
+        for timestamp, row in ohlcv_df.iterrows():
+            # Ensure timestamp is timezone-aware before converting
+            ts_aware = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
+            epoch_time = int(ts_aware.timestamp())
+
+            # Check for NaN or None values before appending
+            open_val = row.get('Open')
+            high_val = row.get('High')
+            low_val = row.get('Low')
+            close_val = row.get('Close')
+            volume_val = row.get('Volume') # Fetch Volume
+
+            if all(v is not None and not np.isnan(v) for v in [open_val, high_val, low_val, close_val]):
+                 ohlcv_formatted.append({
+                     "time": epoch_time,
+                     "open": open_val,
+                     "high": high_val,
+                     "low": low_val,
+                     "close": close_val,
+                 })
+
+            # Add volume data separately
+            if volume_val is not None and not np.isnan(volume_val):
+                 # Determine volume bar color based on price change
+                 color = 'rgba(239, 83, 80, 0.5)' if close_val < open_val else 'rgba(38, 166, 154, 0.5)' # Red down, Green up
+                 volume_formatted.append({
+                    "time": epoch_time,
+                    "value": volume_val,
+                    "color": color
+                 })
+
+
+        app.logger.debug(f"Formatted {len(ohlcv_formatted)} valid OHLCV points and {len(volume_formatted)} volume points.")
+
+        # 2. Fetch portfolio transactions (buy/sell markers)
+        portfolio_data = await db.get_portfolio_transactions(mints=[mint])
+        portfolio_markers = []
+        if mint in portfolio_data:
+            buy_markers = portfolio_data[mint].get('buys', [])
+            sell_markers = portfolio_data[mint].get('sells', [])
+            app.logger.debug(f"Fetched {len(buy_markers)} buys and {len(sell_markers)} sells for {mint}.")
+
+            for buy in buy_markers:
+                ts_aware = buy['timestamp'] if buy['timestamp'].tzinfo else buy['timestamp'].replace(tzinfo=timezone.utc)
+                portfolio_markers.append({
+                    "time": int(ts_aware.timestamp()),
+                    "position": 'belowBar',
+                    "color": '#26a69a', # Green for buy
+                    "shape": 'arrowUp',
+                    "text": f'Buy @ {buy["price"]:.6f}'
+                })
+            for sell in sell_markers:
+                ts_aware = sell['timestamp'] if sell['timestamp'].tzinfo else sell['timestamp'].replace(tzinfo=timezone.utc)
+                portfolio_markers.append({
+                    "time": int(ts_aware.timestamp()),
+                    "position": 'aboveBar',
+                    "color": '#ef5350', # Red for sell
+                    "shape": 'arrowDown',
+                    "text": f'Sell @ {sell["price"]:.6f}'
+                })
+        else:
+            app.logger.debug(f"No portfolio transactions found for {mint}.")
+
+
+        # Combine data
+        chart_data = {
+            "ohlcv": ohlcv_formatted,
+            "volume": volume_formatted, # Add volume data
+            "markers": portfolio_markers
+        }
+        return jsonify(chart_data)
+
+    except Exception as e:
+        app.logger.error(f"Error fetching TradingView data for mint {mint}: {e}", exc_info=True)
+        import traceback
+        traceback.print_exc() # Print full traceback for debugging
+        return jsonify({"error": "Failed to fetch chart data."}), 500
+    finally:
+        if db and db.pool:
+             # await db.close() # Uncomment if you want to close after each request
+             pass
+    
 if __name__ == '__main__':
     # Port can be changed here or via environment variable if needed
     # Keeping port 89 as manually set by the user previously.
     port = int(os.environ.get("FLASK_PORT", 89))
     # Use Flask's logger for Flask-specific messages
     app.logger.info(f"Starting Flask development server on http://127.0.0.1:{port}...")
-    app.run(debug=True, port=port)
+    app.run(debug=True, port=port, use_reloader=False)

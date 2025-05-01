@@ -637,125 +637,91 @@ class DatabaseClient:
                 logger.error(f"Error fetching unique mints with names: {e}", exc_info=True)
                 return []
 
-    async def get_filtered_tokens(self, max_socials=100, max_rugcheck=10000, min_volume_sol=0, time_window_minutes=60, portfolio_only=False, volume_aggregation='avg'): # Added portfolio_only
+    async def get_filtered_tokens(self, max_socials=100, max_rugcheck=10000, min_volume_sol=0, time_window_minutes=60, portfolio_only=False):
         """
-        Fetches tokens filtered by socials score, latest rugcheck score, recent trade volume,
-        and optionally only tokens currently in the active portfolio.
+        Fetches tokens filtered by:
+        - socials score <= max_socials
+        - latest rugcheck score <= max_rugcheck (or NULL)
+        - trade volume in the last time_window_minutes relative to the token's latest trade >= min_volume_sol
+        - optionally filters to tokens in the active portfolio
         """
-        # Ensure numeric types for parameters
+
         try:
             max_socials = int(max_socials)
             max_rugcheck = int(max_rugcheck)
             min_volume_sol = float(min_volume_sol)
-            time_window_minutes = int(time_window_minutes)
-            # portfolio_only is already boolean from Flask request parsing or default
+            time_window_minutes = str(time_window_minutes)
         except (ValueError, TypeError):
             logger.error("Invalid filter parameter types received.")
-            return [] # Return empty on invalid input types
+            return []
 
-        # Construct the interval string safely
-        interval_str = timedelta(minutes=time_window_minutes)
+        params = [max_socials, max_rugcheck, min_volume_sol, time_window_minutes]
 
-        # Base query parts
-        select_clause = """
-            SELECT DISTINCT -- Use DISTINCT to avoid duplicates if a token has multiple active portfolio entries (shouldn't happen with good logic)
-                vt.mint,
-                COALESCE(vt.name, vt.mint) AS name,
-                vt.socials_score,
-                lr.score AS rugcheck_score,
-                COALESCE(rv.volume_sol, 0) as recent_volume_sol
+        query = """
+        WITH LatestRugcheck AS (
+            SELECT
+                mint,
+                score,
+                ROW_NUMBER() OVER(PARTITION BY mint ORDER BY last_checked DESC) AS rn
+            FROM v_rugcheck
+        ),
+        LastTrades AS (
+            SELECT
+                mint,
+                MAX(timestamp) AS last_trade_time
+            FROM v_trades
+            GROUP BY mint
+        ),
+        FilteredTrades AS (
+            SELECT
+                t.mint,
+                SUM(t.sol_amount) AS volume_sol
+            FROM v_trades t
+            JOIN LastTrades lt ON t.mint = lt.mint
+            WHERE t.timestamp BETWEEN (lt.last_trade_time - ($4 || ' minutes')::INTERVAL) AND lt.last_trade_time
+            GROUP BY t.mint
+        )
+        SELECT DISTINCT
+            vt.mint,
+            COALESCE(vt.name, vt.mint) AS name,
+            vt.socials_score,
+            lr.score AS rugcheck_score,
+            COALESCE(ft.volume_sol, 0) AS recent_volume_sol
+        FROM v_tokens vt
+        LEFT JOIN LatestRugcheck lr ON vt.mint = lr.mint AND lr.rn = 1
+        LEFT JOIN FilteredTrades ft ON vt.mint = ft.mint
         """
-        from_clause = """
-            FROM v_tokens vt
-            LEFT JOIN LatestRugcheck lr ON vt.mint = lr.mint AND lr.rn = 1
-            LEFT JOIN RecentVolume rv ON vt.mint = rv.mint
-        """
-        where_clause = """
-            WHERE
-                vt.socials_score IS NOT NULL AND vt.socials_score <= $1
-                AND (lr.score IS NULL OR lr.score <= $2)
-        """
-        order_by_clause = "ORDER BY name, vt.mint;"
-        params = [max_socials, max_rugcheck, min_volume_sol, interval_str, volume_aggregation]
 
-        # Add portfolio filter if requested
         if portfolio_only:
-            # Join with portfolio table to filter for active positions
-            from_clause += """
+            query += """
             INNER JOIN portfolio p ON vt.mint = p.mint
             """
-            # where_clause += """
-            # AND p.status = 'active' AND p.tx_type = 'buy' -- Ensure we link based on the active buy record
-            # """
-            logger.info("Filtering tokens to include only those in the active portfolio.")
 
-
-        # Combine query parts
-        query = f"""
-            WITH LatestRugcheck AS (
-                SELECT
-                    mint,
-                    score,
-                    ROW_NUMBER() OVER(PARTITION BY mint ORDER BY last_checked DESC) as rn
-                FROM v_rugcheck
-            ), RecentVolume AS (
-                SELECT
-                    mint,
-                    COALESCE(
-                        CASE
-                            WHEN $5 = 'avg' THEN AVG(sol_amount)
-                            WHEN $5 = 'max' THEN MAX(sol_amount)
-                            ELSE SUM(sol_amount) -- Default to SUM if invalid aggregation type
-                        END, 0) as volume_sol
-                FROM v_trades
-                WHERE timestamp >= (NOW() - $4::INTERVAL)
-                GROUP BY mint
-        ),
-        Params AS (
-            SELECT
-                $1 AS max_socials,
-                $2 AS max_rugcheck,
-                $3 AS min_volume_sol,
-                $4 AS time_window,
-                $5 AS volume_aggregation
-        )
-        {select_clause}
-        {from_clause}
-        {where_clause}
-        AND CASE
-            WHEN Params.volume_aggregation = 'avg' THEN COALESCE(rv.volume_sol, 0) >= Params.min_volume_sol
-            WHEN Params.volume_aggregation = 'max' THEN COALESCE(rv.volume_sol, 0) >= Params.min_volume_sol
-            ELSE COALESCE(rv.volume_sol, 0) >= Params.min_volume_sol -- Default to SUM if invalid aggregation type
-        END
-        {order_by_clause}
+        query += """
+        WHERE
+            vt.socials_score IS NOT NULL AND vt.socials_score <= $1
+            AND (lr.score IS NULL OR lr.score <= $2)
+            AND COALESCE(ft.volume_sol, 0) >= $3
+        ORDER BY name, vt.mint;
         """
-
+        print(f"Query: {query}")
+        print(f"params: {params}")
         async with self.pool.acquire() as conn:
             try:
-                logger.debug(f"Fetching filtered tokens with params: max_socials={max_socials}, max_rugcheck={max_rugcheck}, min_volume_sol={min_volume_sol}, interval_str={interval_str}, portfolio_only={portfolio_only}, volume_aggregation={volume_aggregation}")
-                # Cast parameters to appropriate types to avoid type mismatch
-                query = """
-                    SELECT * FROM tokens
-                    WHERE
-                        COALESCE(CAST(max_rugcheck AS INTEGER), 0) >= $1::INTEGER AND
-                        COALESCE(CAST(max_socials AS INTEGER), 0) >= $2::INTEGER AND
-                        COALESCE(CAST(volume AS FLOAT), 0) >= $3::FLOAT AND
-                        created_at >= NOW() - INTERVAL '1 day'
-                """
-                results = await conn.fetch(query, max_rugcheck, max_socials, min_volume_sol)
-                # Return list of dictionaries including the scores and volume
+                results = await conn.fetch(query, *params)
                 return [
                     {
                         'mint': row['mint'],
                         'name': row['name'],
                         'socials': row['socials_score'],
-                        'rugcheck': row['rugcheck_score'], # Might be None
-                        'volume': round(row['recent_volume_sol'], 4) # Format volume
+                        'rugcheck': row['rugcheck_score'],
+                        'volume': round(row['recent_volume_sol'], 4)
                     } for row in results
                 ]
             except Exception as e:
                 logger.error(f"Error fetching filtered tokens: {e}", exc_info=True)
                 return []
+
 
     async def get_portfolio_transactions(self, mints: list[str]):
         """Fetches buy/sell transaction timestamps and prices for given mints from the portfolio."""
@@ -889,6 +855,20 @@ class DatabaseClient:
             except Exception as e:
                 logger.exception("Error loading backup data: %s", e)
                 raise
+
+    async def get_total_tracked_tokens(self, backedup=False):
+        """Fetches the total number of tracked tokens from the database."""
+        query = "SELECT COUNT(*) FROM tokens"
+        if backedup:
+            query = "SELECT COUNT(*) FROM v_tokens"
+        
+        async with self.pool.acquire() as conn:
+            try:
+                result = await conn.fetchval(query)
+                return result if result is not None else 0
+            except Exception as e:
+                logger.error(f"Error fetching total tracked tokens: {e}", exc_info=True)
+                return 0
 
     async def cleanup_db(self, cleanup_flag: bool):
         """Drop all application tables if cleanup_flag is True."""

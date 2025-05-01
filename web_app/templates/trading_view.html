@@ -1,0 +1,249 @@
+{% extends 'base.html' %} {% block title %}TradingView Chart - Pump Trader{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4"> <h1 class="mb-4">Token Trading Chart (Lightweight Charts)</h1>
+
+    <div class="row mb-3">
+        <div class="col-md-6">
+            <label for="tokenSelector" class="form-label">Select Token:</label>
+            <select class="form-select" id="tokenSelector">
+                <option selected disabled value="">Choose a token...</option>
+                {% for token in tokens %}
+                    {# Use Jinja's escape filter `|e` for security #}
+                    <option value="{{ token.mint }}">{{ token.name | e }} ({{ token.symbol | e }})</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="col-md-6">
+            <label for="mintInput" class="form-label">Or Enter Mint Address:</label>
+            <div class="input-group">
+                <input type="text" class="form-control" id="mintInput" placeholder="Enter mint address...">
+                <button class="btn btn-outline-secondary" type="button" id="loadMintButton">Load Chart</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="loading-indicator" class="alert alert-info" style="display: none;">
+        <div class="spinner-border spinner-border-sm" role="status">
+            <span class="visually-hidden">Loading...</span>
+        </div>
+        Loading chart data...
+    </div>
+
+    <div id="chart-error" class="alert alert-danger" style="display: none;">
+        </div>
+
+    <div id="chart-container" style="width: 100%; height: 650px; border: 1px solid #dee2e6; position: relative;">
+        </div>
+</div>
+
+<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+        const chartContainer = document.getElementById('chart-container');
+        const tokenSelector = document.getElementById('tokenSelector');
+        const mintInput = document.getElementById('mintInput');
+        const loadMintButton = document.getElementById('loadMintButton');
+        const loadingIndicator = document.getElementById('loading-indicator');
+        const chartError = document.getElementById('chart-error');
+
+        let chart = null;
+        let candlestickSeries = null;
+        let volumeSeries = null;
+        let currentMint = null;
+
+        function cleanupChart() {
+            if (chart) {
+                console.log("Cleaning up previous chart instance.");
+                chart.remove();
+                chart = null;
+                candlestickSeries = null;
+                volumeSeries = null;
+            }
+        }
+
+        function showError(message) {
+            console.error("Chart Error:", message);
+            chartError.textContent = message;
+            chartError.style.display = 'block';
+            loadingIndicator.style.display = 'none';
+            chartContainer.style.display = 'none';
+            cleanupChart();
+        }
+
+        async function createOrUpdateChart(mint) {
+            mint = mint ? mint.trim() : null;
+            if (!mint) {
+                showError("No token selected or mint address provided.");
+                return;
+            }
+            if (mint === currentMint) {
+                console.log(`Mint ${mint} is already loaded.`);
+                return;
+            }
+             if (!chartContainer) {
+                 console.error("Chart container element not found!");
+                 return;
+            }
+
+            console.log(`Requesting chart for mint: ${mint}`);
+            currentMint = mint;
+            loadingIndicator.style.display = 'block';
+            chartError.style.display = 'none';
+            chartContainer.style.display = 'none';
+
+            cleanupChart();
+
+            try {
+                // --- Chart Initialization ---
+                 if (typeof LightweightCharts === 'undefined') {
+                    throw new Error("LightweightCharts library not loaded.");
+                 }
+
+                chart = LightweightCharts.createChart(chartContainer, {
+                    /* Your chart options */
+                    width: chartContainer.clientWidth, // Ensure container is visible and has width
+                    height: 650,
+                    layout: { background: { type: 'solid', color: '#ffffff' }, textColor: '#333' },
+                    grid: { vertLines: { color: '#e1e1e1' }, horzLines: { color: '#e1e1e1' } },
+                    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+                    rightPriceScale: { borderColor: '#cccccc' },
+                    timeScale: { borderColor: '#cccccc', timeVisible: true, secondsVisible: true },
+                    localization: { /* priceFormatter: price => price.toFixed(8), */ },
+                });
+
+                // --- Detailed Inspection & Modified Check ---
+                console.log("Chart object created:", chart);
+                console.dir(chart); // <<< Inspect the object structure in the console
+                console.log("typeof addCandlestickSeries:", typeof chart.addCandlestickSeries); // <<< See what typeof returns
+
+                // Modify the check: Simply ensure 'chart' is a truthy object.
+                // If createChart failed, it should return null/undefined.
+                if (!chart) {
+                     throw new Error("Failed to initialize Lightweight Chart object (createChart returned invalid value).");
+                }
+                // --- End Inspection & Modified Check ---
+
+
+                // --- Add Series ---
+                 candlestickSeries = chart.addCandlestickSeries({
+                     /* Your candlestick options */
+                    upColor: '#26a69a', downColor: '#ef5350', borderDownColor: '#ef5350',
+                    borderUpColor: '#26a69a', wickDownColor: '#ef5350', wickUpColor: '#26a69a',
+                    priceFormat: { type: 'price', precision: 8, minMove: 0.00000001 },
+                 });
+                 console.log("Candlestick series added:", candlestickSeries); // Log series object
+
+                 volumeSeries = chart.addHistogramSeries({
+                     /* Your volume options */
+                    priceFormat: { type: 'volume' }, priceScaleId: 'volume_scale',
+                    lastValueVisible: false, priceLineVisible: false,
+                 });
+                 console.log("Volume series added:", volumeSeries); // Log series object
+
+                 chart.priceScale('volume_scale').applyOptions({
+                     scaleMargins: { top: 0.8, bottom: 0 },
+                 });
+
+                 // --- Check if series were added successfully ---
+                 if (!candlestickSeries || !volumeSeries) {
+                    throw new Error("Failed to add required series to the chart.");
+                 }
+                 // --- End Series Check ---
+
+
+                // --- Fetch Data ---
+                const response = await fetch(`/api/trading_view/${mint}`);
+                if (!response.ok) {
+                    let errorMsg = `API error! Status: ${response.status}`;
+                    try { const errData = await response.json(); errorMsg = errData.error || errorMsg; } catch (e) {}
+                    throw new Error(errorMsg);
+                }
+                const data = await response.json();
+                if (data.error) throw new Error(data.error);
+
+                console.log(`Received data for ${mint}:`, data);
+                const ohlcvData = (data.ohlcv || []).sort((a, b) => a.time - b.time);
+                const volumeData = (data.volume || []).sort((a, b) => a.time - b.time);
+                const markerData = (data.markers || []).sort((a, b) => a.time - b.time);
+
+                if (ohlcvData.length === 0 && volumeData.length === 0 && markerData.length === 0) {
+                    throw new Error(`No chart data (OHLCV, Volume, or Markers) found for mint ${mint}.`);
+                }
+
+                // --- Set Data ---
+                // No need for extra checks here now, as we checked series creation above
+                if (ohlcvData.length > 0) candlestickSeries.setData(ohlcvData);
+                if (markerData.length > 0) candlestickSeries.setMarkers(markerData);
+                if (volumeData.length > 0) volumeSeries.setData(volumeData);
+                console.log(`Set ${ohlcvData.length} OHLCV, ${volumeData.length} Volume, ${markerData.length} Markers.`);
+
+                // --- Finalize Chart Display ---
+                chart.timeScale().fitContent();
+                chartContainer.style.display = 'block';
+                loadingIndicator.style.display = 'none';
+                window.location.hash = mint;
+
+            } catch (error) {
+                showError(error.message || `An unknown error occurred loading chart for ${mint}.`);
+                currentMint = null; // Reset current mint on error
+                window.location.hash = ''; // Clear hash on error
+            }
+        }
+
+        // --- Event Listeners ---
+        tokenSelector.addEventListener('change', function() {
+            const selectedMint = this.value;
+            if (selectedMint) {
+                mintInput.value = '';
+                createOrUpdateChart(selectedMint);
+            }
+        });
+
+        loadMintButton.addEventListener('click', () => {
+            const inputMint = mintInput.value.trim();
+            if (inputMint) {
+                tokenSelector.value = "";
+                createOrUpdateChart(inputMint);
+            } else {
+                 showError("Please enter a mint address.");
+            }
+        });
+
+        mintInput.addEventListener('keypress', (event) => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                loadMintButton.click();
+            }
+        });
+
+         // --- Handle Window Resize ---
+         let resizeTimeout;
+         function handleResize() {
+             if (chart) {
+                 try { chart.applyOptions({ width: chartContainer.clientWidth }); }
+                 catch (e) { console.warn("Could not apply resize options, chart might have been removed.", e); }
+             }
+         }
+         window.addEventListener('resize', () => {
+             clearTimeout(resizeTimeout);
+             resizeTimeout = setTimeout(handleResize, 200);
+         });
+
+
+        // --- Load chart based on URL hash on initial load ---
+        function loadChartFromHash() {
+             const hashMint = window.location.hash.substring(1);
+             if (hashMint) {
+                 const optionExists = Array.from(tokenSelector.options).some(opt => opt.value === hashMint);
+                 if (optionExists) { tokenSelector.value = hashMint; mintInput.value = ''; }
+                 else { tokenSelector.value = ""; mintInput.value = hashMint; }
+                 setTimeout(() => createOrUpdateChart(hashMint), 0);
+             }
+         }
+         loadChartFromHash();
+
+    });
+</script>
+{% endblock %}
