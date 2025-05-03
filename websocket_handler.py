@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 import asyncpg
 import websockets
 
-from config import PUMPPORTAL_WS, INACTIVITY_PERIOD, MIN_MARKET_CAP
+#from config import PUMPPORTAL_WS, INACTIVITY_PERIOD, MIN_MARKET_CAP
 from database_handler import DatabaseClient
 from logger import logger
 # from trading import has_active_position
@@ -20,8 +20,9 @@ from state_manager import GlobalState
 UNSUBSCRIBE_BATCH_COUNT = 15
 
 class WebSocketHandler:
-    def __init__(self, db_client: DatabaseClient):
-        self.state = GlobalState.get_instance()  # Get the singleton instance of GlobalState 
+    def __init__(self, db_client: DatabaseClient, state_manager: GlobalState, config_dict: dict):
+        self.state = state_manager
+        self.config = config_dict  # Store the configuration dictionary
         self.db_client = db_client  # Store reference to the database client
         self.websocket = None
         self.tasks = []
@@ -30,7 +31,7 @@ class WebSocketHandler:
 
     async def connect(self):
         """Establishes a WebSocket connection and subscribes to new token events."""
-        self.websocket = await websockets.connect(PUMPPORTAL_WS)
+        self.websocket = await websockets.connect(self.config['PUMPPORTAL_WS'])
         logger.info("Connected to PumpPortal WebSocket")
         await self.websocket.send(json.dumps({"method": "subscribeNewToken"}))
         await self.state.set_new_token_subscription(True)
@@ -98,52 +99,53 @@ class WebSocketHandler:
                 sol_price = await self.state.get_sol_price()
                 if sol_price is None or sol_price <= 0:
                     logger.warning(f"⚠ Invalid SOL_PRICE ({sol_price}); skipping connection to PumpPortal WebSocket.")
-                else:
-                    try:
-                        data = json.loads(message)
-                        
-                        # Handle messages
-                        if 'message' in data:
-                            logger.debug(f"📡 WebSocket confirmation: {data['message']}")
-                            continue
+                    sol_price = None
 
-                        # Handle new token events
-                        if data.get('txType') == "create": # Use .get() for safety
-                            mint = data.get('mint', 'N/A') # Get mint for logging
-                            logger.debug(f"➕ Received 'new token': {mint}") # Log reception immediately
-                            try:
-                                token_stored = await self.db_client.insert_token(data)
-                                if not token_stored:
-                                    #logger.warning(f"⚠️ Token {mint} not stored (business rule violation in insert_token). Skipping subscription.")
-                                    creator = data.get('traderPublicKey')
-                                    if await self.db_client.is_suspicious_creator(creator):
-                                        await self.unsubscribe_tokens_from_creator(creator)
-                                        # logger.info(f"Unsubscribed from all tokens from suspicious creator {creator}.")
-                                    continue # Skip if DB insert logic rejects it
-                            except Exception as e:
-                                logger.error(f"❌ DB Error storing new token {mint}: {e}", exc_info=True)
-                                continue # Skip on DB error
+                try:
+                    data = json.loads(message)
+                    
+                    # Handle messages
+                    if 'message' in data:
+                        logger.debug(f"📡 WebSocket confirmation: {data['message']}")
+                        continue
 
-                            await self.websocket.send(json.dumps({
-                                "method": "subscribeTokenTrade",
-                                "keys": [data['mint']]
-                            }))
-                            await self.state.add_token_subscription(data['mint'])
-                            active_subs = list(await self.state.get_token_subscriptions())
-                            logger.debug(f"✅ Subscribed to {data['mint']} --> {len(active_subs)} active subscriptions")
+                    # Handle new token events
+                    if data.get('txType') == "create": # Use .get() for safety
+                        mint = data.get('mint', 'N/A') # Get mint for logging
+                        logger.debug(f"➕ Received 'new token': {mint}") # Log reception immediately
+                        try:
+                            token_stored = await self.db_client.insert_token(data)
+                            if not token_stored:
+                                #logger.warning(f"⚠️ Token {mint} not stored (business rule violation in insert_token). Skipping subscription.")
+                                creator = data.get('traderPublicKey')
+                                if await self.db_client.is_suspicious_creator(creator):
+                                    await self.unsubscribe_tokens_from_creator(creator)
+                                    # logger.info(f"Unsubscribed from all tokens from suspicious creator {creator}.")
+                                continue # Skip if DB insert logic rejects it
+                        except Exception as e:
+                            logger.error(f"❌ DB Error storing new token {mint}: {e}", exc_info=True)
+                            continue # Skip on DB error
 
-                        elif data["txType"] == "migrate":                        
-                            await self.db_client.insert_migration(data)
+                        await self.websocket.send(json.dumps({
+                            "method": "subscribeTokenTrade",
+                            "keys": [data['mint']]
+                        }))
+                        await self.state.add_token_subscription(data['mint'])
+                        active_subs = list(await self.state.get_token_subscriptions())
+                        logger.debug(f"✅ Subscribed to {data['mint']} --> {len(active_subs)} active subscriptions")
 
-                        elif data["txType"] == "buy" or data["txType"] == "sell": 
-                            #logger.debug(f"📡 WebSocket trade received: {data}")
-                            self.last_update_times[data['mint']] = datetime.now(timezone.utc)
-                            await self.trade_queue.put(data) 
-                        else:
-                            logger.warning(f"❔ WEBSOCKET - Unknown message type: {data}")                        
+                    elif data["txType"] == "migrate":                        
+                        await self.db_client.insert_migration(data)
 
-                    except Exception as e:
-                        logger.error(f"Message processing error: {e}" , exc_info=True)
+                    elif data["txType"] == "buy" or data["txType"] == "sell": 
+                        #logger.debug(f"📡 WebSocket trade received: {data}")
+                        self.last_update_times[data['mint']] = datetime.now(timezone.utc)
+                        await self.trade_queue.put(data) 
+                    else:
+                        logger.warning(f"❔ WEBSOCKET - Unknown message type: {data}")                        
+
+                except Exception as e:
+                    logger.error(f"Message processing error: {e}" , exc_info=True)
         except websockets.exceptions.ConnectionClosed:
             logger.error("WebSocket connection closed, reconnecting...")
             await self.reconnect()
@@ -184,7 +186,7 @@ class WebSocketHandler:
                 continue
                 
             try:
-                rows = await self.db_client.get_tokens_to_unsubscribe(sol_price, MIN_MARKET_CAP)
+                rows = await self.db_client.get_tokens_to_unsubscribe(sol_price,self.config['MIN_MARKET_CAP'])
 
                 # Identify candidate mints from DB
                 candidate_mints = [row['mint'] for row in rows]
@@ -271,13 +273,13 @@ class WebSocketHandler:
                 # Safely access shared state
                 async with self.state.lock:  # Assuming state has a lock for thread safety
                     for mint, last_update in self.last_update_times.items():
-                        if current_time - last_update > INACTIVITY_PERIOD:
+                        if current_time - last_update > self.config['INACTIVITY_PERIOD']:
                             inactive_tokens.append(mint)
                 
                 # Unsubscribe from inactive tokens
                 for mint in inactive_tokens:
-                    logger.info(f"💀 Token {mint} inactive for over {INACTIVITY_PERIOD}. Unsubscribing...")
                     try:
+                        logger.info(f"💀 Token {mint} inactive for over {self.config['INACTIVITY_PERIOD']}. Unsubscribing...")
                         await self.websocket.send(json.dumps({
                             "method": "unsubscribeTokenTrade",
                             "keys": [mint]
@@ -295,6 +297,42 @@ class WebSocketHandler:
                 logger.error(f"Error in check_inactive_tokens: {e}" , exc_info=True)
                 await self.state.wait_or_interrupt(timeout=5)  # Brief pause on error
     
+    async def unsubscribe_new_tokens(self):
+        """Sends a request to unsubscribe from the newToken stream."""
+        current_state = await self.state.get_new_token_subscription()
+        if not current_state:
+            logger.info("Already unsubscribed from newToken stream. No action needed.")
+            return
+
+        if self.websocket and self.websocket.open:
+            try:
+                payload = json.dumps({"method": "unsubscribeNewToken"})
+                await asyncio.wait_for(self.websocket.send(payload), timeout=10.0)
+                # Assuming successful send means unsubscription on the server side
+                await self.state.set_new_token_subscription(False)
+                logger.info("✅ Successfully sent unsubscribe request for newToken stream.")
+                # Reset the flag in config.py directly (if still needed elsewhere, though state manager is better)
+                # Be cautious modifying config directly, state manager is preferred.
+                # config.NEW_TOKEN_SUBSCRIPTION = False
+
+            except websockets.exceptions.ConnectionClosed:
+                logger.error("❌ Cannot unsubscribe from newToken: WebSocket connection is closed.")
+                # Optionally update state anyway, as we can't be subscribed if disconnected
+                await self.state.set_new_token_subscription(False)
+                # config.NEW_TOKEN_SUBSCRIPTION = False
+            except asyncio.TimeoutError:
+                logger.error("⏳ Timeout sending unsubscribe request for newToken stream.")
+                # State remains true, maybe retry later? Or set false optimistically?
+                # For now, let's keep state as true, indicating we *think* we are still subscribed.
+            except Exception as e:
+                logger.error(f"❌ Error sending unsubscribe request for newToken: {e}", exc_info=True)
+                # State remains true
+        else:
+            logger.warning("⚠️ Cannot unsubscribe from newToken: WebSocket is not connected or not initialized.")
+            # If not connected, we are effectively unsubscribed, so update state
+            await self.state.set_new_token_subscription(False)
+            # config.NEW_TOKEN_SUBSCRIPTION = False
+
     async def shutdown(self):
         """Gracefully shutdown the WebSocket connection, unsubscribing from new token events and token trade subscriptions with retries."""
         try:

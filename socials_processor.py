@@ -22,41 +22,41 @@ MAX_FETCH_ATTEMPTS = 4 # Allow 2 attempts (initial + 1 retry)
 DEPRIORITIZED_PRIORITY = float('inf') # Very low priority for requeueing after max attempts
 
 class SocialsProcessor:
-    def __init__(self, state: GlobalState, db_client: DatabaseClient, config: dict):
+    def __init__(self, state: GlobalState, db_client: DatabaseClient, config_dict: dict):
         self.state = state
         self.db_client = db_client
-        self.config = config # Store config
+        self.config = config_dict # Store config
         self.queue = self.state.get_socialscheck_queue()
         self.fetch_attempts = {}
 
         # Load scoring values from config
-        self.penalty_no_website = config.get('SOCIALS_PENALTY_NO_WEBSITE', 40)
-        self.penalty_invalid_website_type = config.get('SOCIALS_PENALTY_INVALID_WEBSITE_TYPE', 35)
-        self.penalty_website_verify_skipped = config.get('SOCIALS_PENALTY_WEBSITE_VERIFY_SKIPPED', 35)
-        self.penalty_website_invalid_url = config.get('SOCIALS_PENALTY_WEBSITE_INVALID_URL', 35)
-        self.penalty_website_timeout = config.get('SOCIALS_PENALTY_WEBSITE_TIMEOUT', 35)
-        self.penalty_website_http_error = config.get('SOCIALS_PENALTY_WEBSITE_HTTP_ERROR', 35)
-        self.penalty_website_other_error = config.get('SOCIALS_PENALTY_WEBSITE_OTHER_ERROR', 35)
-        self.penalty_no_https = config.get('SOCIALS_PENALTY_NO_HTTPS', 10)
-        self.penalty_website_no_mention = config.get('SOCIALS_PENALTY_WEBSITE_NO_MENTION', 15)
-        self.penalty_common_platform_website = config.get('SOCIALS_PENALTY_COMMON_PLATFORM_WEBSITE', 10)
-        self.penalty_no_telegram = config.get('SOCIALS_PENALTY_NO_TELEGRAM', 20)
-        self.penalty_invalid_telegram_type = config.get('SOCIALS_PENALTY_INVALID_TELEGRAM_TYPE', 20)
-        self.penalty_invalid_telegram_url = config.get('SOCIALS_PENALTY_INVALID_TELEGRAM_URL', 10)
-        self.penalty_no_twitter = config.get('SOCIALS_PENALTY_NO_TWITTER', 30)
-        self.penalty_invalid_twitter_type = config.get('SOCIALS_PENALTY_INVALID_TWITTER_TYPE', 20)
-        self.penalty_invalid_twitter_url = config.get('SOCIALS_PENALTY_INVALID_TWITTER_URL', 20)
-        self.penalty_action_trigger_url = config.get('SOCIALS_PENALTY_ACTION_TRIGGER_URL', 25) # New penalty
-        self.penalty_duplicate_links = config.get('SOCIALS_PENALTY_DUPLICATE_LINKS', 15)
+        self.penalty_no_website = self.config['SOCIALS_PENALTY_NO_WEBSITE']
+        self.penalty_invalid_website_type = self.config['SOCIALS_PENALTY_INVALID_WEBSITE_TYPE']
+        self.penalty_website_verify_skipped = self.config['SOCIALS_PENALTY_WEBSITE_VERIFY_SKIPPED']
+        self.penalty_website_invalid_url = self.config['SOCIALS_PENALTY_WEBSITE_INVALID_URL']
+        self.penalty_website_timeout = self.config['SOCIALS_PENALTY_WEBSITE_TIMEOUT']
+        self.penalty_website_http_error = self.config['SOCIALS_PENALTY_WEBSITE_HTTP_ERROR']
+        self.penalty_website_other_error = self.config['SOCIALS_PENALTY_WEBSITE_OTHER_ERROR']
+        self.penalty_no_https = self.config['SOCIALS_PENALTY_NO_HTTPS']
+        self.penalty_website_no_mention = self.config['SOCIALS_PENALTY_WEBSITE_NO_MENTION']
+        self.penalty_common_platform_website = self.config['SOCIALS_PENALTY_COMMON_PLATFORM_WEBSITE']
+        self.penalty_no_telegram = self.config['SOCIALS_PENALTY_NO_TELEGRAM']
+        self.penalty_invalid_telegram_type = self.config['SOCIALS_PENALTY_INVALID_TELEGRAM_TYPE']
+        self.penalty_invalid_telegram_url = self.config['SOCIALS_PENALTY_INVALID_TELEGRAM_URL']
+        self.penalty_no_twitter = self.config['SOCIALS_PENALTY_NO_TWITTER']
+        self.penalty_invalid_twitter_type = self.config['SOCIALS_PENALTY_INVALID_TWITTER_TYPE']
+        self.penalty_invalid_twitter_url = self.config['SOCIALS_PENALTY_INVALID_TWITTER_URL']
+        self.penalty_action_trigger_url = self.config['SOCIALS_PENALTY_ACTION_TRIGGER_URL'] # New penalty
+        self.penalty_duplicate_links = self.config['SOCIALS_PENALTY_DUPLICATE_LINKS']
 
-        self.bonus_domain_match = config.get('SOCIALS_BONUS_DOMAIN_MATCH', -10)
-        # self.bonus_news_gov_website = config.get('SOCIALS_BONUS_NEWS_GOV_WEBSITE', 0) # Currently 0 in config
+        self.bonus_domain_match = self.config['SOCIALS_BONUS_DOMAIN_MATCH']
+        # self.bonus_news_gov_website = self.config['SOCIALS_BONUS_NEWS_GOV_WEBSITE'] # Currently 0 in config
 
-        self.score_failed_metadata = config.get('SOCIALS_SCORE_FAILED_METADATA', 90)
+        self.score_failed_metadata = self.config['SOCIALS_SCORE_FAILED_METADATA']
 
         # Load domain sets from config
-        self.disallowed_domains = config.get('SOCIALS_DISALLOWED_WEBSITE_DOMAINS', set())
-        self.allowed_news_domains = config.get('SOCIALS_ALLOWED_NEWS_DOMAINS', set())
+        self.disallowed_domains = self.config['SOCIALS_DISALLOWED_WEBSITE_DOMAINS']
+        self.allowed_news_domains = self.config['SOCIALS_ALLOWED_NEWS_DOMAINS']
 
         # Shared HTTP client for website verification
         self._verify_client = httpx.AsyncClient(timeout=10.0, follow_redirects=True, limits=httpx.Limits(max_connections=5))
