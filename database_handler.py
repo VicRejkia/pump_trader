@@ -13,7 +13,7 @@ import json
 import pandas as pd
 from dotenv import load_dotenv
 from logger import logger
-import config
+#import config
 from state_manager import GlobalState
 import pandas as pd
 import numpy as np
@@ -34,7 +34,8 @@ DB_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}/{DB_DATABASE}?options=
 class DatabaseClient:
     """Client to manage database connections and operations."""
     
-    def __init__(self):
+    def __init__(self, config_dict: dict = None):
+        self.config = config_dict
         self.pool = None
         self.state = GlobalState.get_instance()
 
@@ -282,7 +283,7 @@ class DatabaseClient:
         """
         async with self.pool.acquire() as conn:
             result = await conn.fetchrow(query, mint)
-            return result['total_supply'] if result else config.TOTAL_SUPPLY
+            return result['total_supply'] if result else self.config['TOTAL_SUPPLY']
 
 
     async def find_trading_opportunities(self, sol_price: float, volume_threshold: float, marketcap_threshold: float, rugcheck_threshold: int, social_score_threshold: int, time_interval_minutes: int, min_volatility: float):
@@ -1126,7 +1127,7 @@ class DatabaseClient:
                     # --- Calculate SQL-like Rolling Volume & Volatility per Mint ---
                     logger.info("Calculating rolling volume and volatility per mint...")
                     all_processed_trades = []
-                    time_interval_minutes = config.DEFAULT_TIME_INTERVALL # Get from config
+                    time_interval_minutes = self.config['DEFAULT_TIME_INTERVALL'] # Get from config
                     window_duration = f"{time_interval_minutes}min"
                     logger.debug(f"Using rolling window duration: {window_duration}")
 
