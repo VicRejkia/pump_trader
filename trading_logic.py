@@ -21,9 +21,9 @@ from utils import (
 # Config dictionary is passed in __init__
 
 class TradingManager:
-    def __init__(self, db_client: DatabaseClient, config, state):
+    def __init__(self, db_client: DatabaseClient, config_dict: dict, state: GlobalState):
         self.db = db_client # Expecting a DatabaseClient instance
-        self.config = config
+        self.config = config_dict
         self.state = state # Set state during initialization
         
     async def check_trading_opportunities(self):

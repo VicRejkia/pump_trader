@@ -2,7 +2,7 @@
 import asyncio
 import httpx
 import json
-from config import SOL_PRICE_API_URL
+from config import _SOL_PRICE_API_URL
 from logger import logger
 from database_handler import DatabaseClient
 
@@ -20,7 +20,7 @@ async def update_sol_price(state, db_client: DatabaseClient):
             try:
                 # Fetch the SOL price from an external API
                 async with httpx.AsyncClient() as client:
-                    response = await client.get(SOL_PRICE_API_URL)
+                    response = await client.get(_SOL_PRICE_API_URL)
                     if response.status_code == 200:
                         data = response.json()
                         new_price = data.get("solana", {}).get("usd")

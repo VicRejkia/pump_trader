@@ -16,7 +16,7 @@ from decimal import Decimal
 from solders.keypair import Keypair # type: ignore
 
 from config import (
-    RUGCHECK_AUTH_API, RUGCHECK_RATE_LIMIT, RUGCHECK_API, RUGCHECK_INTERVAL,
+    _RUGCHECK_AUTH_API, _RUGCHECK_RATE_LIMIT, _RUGCHECK_API, _RUGCHECK_INTERVAL,
     RUGCHECK_SCORE_THRESHOLD # Import the threshold
 )
 from database_handler import DatabaseClient
@@ -32,11 +32,12 @@ RUGCHECK_REQUEST_TIMEOUT = 20.0 # Increased timeout for RugCheck API calls
 
 class Rugcheck:
     # Accept SocialsProcessor instance during initialization
-    def __init__(self, state: GlobalState, db_client: DatabaseClient, websocket_handler: WebSocketHandler, socials_processor: SocialsProcessor):
+    def __init__(self, state: GlobalState, db_client: DatabaseClient, websocket_handler: WebSocketHandler, socials_processor: SocialsProcessor, config_dict: dict):
         self.state = state
         self.db_client = db_client
         self.websocket_handler = websocket_handler
-        self.limiter = AsyncLimiter(max_rate=RUGCHECK_RATE_LIMIT, time_period=RUGCHECK_INTERVAL)
+        self.config = config_dict
+        self.limiter = AsyncLimiter(max_rate=_RUGCHECK_RATE_LIMIT, time_period=_RUGCHECK_INTERVAL)
         self.queue = self.state.get_rugcheck_queue()
         #self.socials_processor = socials_processor
         self.fetch_attempts = {}
@@ -100,7 +101,7 @@ class Rugcheck:
                 "wallet": str(self.wallet.pubkey()),
                 "message": message_data,
             }
-            login_url = RUGCHECK_AUTH_API
+            login_url = _RUGCHECK_AUTH_API
             logger.debug(f"🔑 Signing message for RugCheck login: {message_json}")
 
             async with httpx.AsyncClient(timeout=RUGCHECK_REQUEST_TIMEOUT) as client:
@@ -202,7 +203,7 @@ class Rugcheck:
             - 'TIMEOUT': If the API request times out.
             - None: On other errors (invalid JSON, DB error, other HTTP errors, etc.).
         """
-        url = f"{RUGCHECK_API}/{mint}/report"
+        url = f"{_RUGCHECK_API}/{mint}/report"
         response = None # Define response outside try block
         headers = {}
         if self.jwt_token:
@@ -371,8 +372,8 @@ class Rugcheck:
         # --- Score Check and Deactivation (only if data was fetched successfully) ---
         fetched_data = fetch_result # We know it's a dict here
         score = fetched_data.get("score")
-        if score is not None and score > RUGCHECK_SCORE_THRESHOLD:
-            logger.debug(f"🚨 High RugCheck score ({score} > {RUGCHECK_SCORE_THRESHOLD}) for {mint}. Deactivating and unsubscribing.")
+        if score is not None and score > self.config['RUGCHECK_SCORE_THRESHOLD']:
+            logger.debug(f"🚨 High RugCheck score ({score} > {self.config['RUGCHECK_SCORE_THRESHOLD']}) for {mint}. Deactivating and unsubscribing.")
             try:
                 # 1. Deactivate in DB
                 async with self.db_client.pool.acquire() as conn:

@@ -33,7 +33,7 @@ class GlobalState:
         self.request_timestamps = deque(maxlen=10)  # API request tracker
 
         # PnL Tracking
-        self.current_sol_balance = float(config.INITIAL_SOL_BALANCE) # Initialize from config
+        self.current_sol_balance = float(config._INITIAL_SOL_BALANCE) # Initialize from config
 
         # Queues
         self.rugcheck_queue = asyncio.PriorityQueue()  # RugCheck processing queue
