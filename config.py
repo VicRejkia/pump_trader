@@ -2,13 +2,9 @@
 Configuration constants and settings for the trading bot.
 """
 
-from datetime import timedelta
-
-""" Configuration constants and settings for the trading bot. """
-
 # Trading configuration
 SOL_TO_BUY = 0.9                            # Amount of SOL to spend on each buy
-INITIAL_SOL_BALANCE = 100.0                  # Starting SOL balance for PnL tracking
+_INITIAL_SOL_BALANCE = 100.0                  # Starting SOL balance for PnL tracking
 PLAY_BUY_SOUND = True                      # Play the buy sound when a buy is made
 PLAY_SELL_SOUND = True                     # Play the sell sound when a sell is made
 
@@ -38,35 +34,35 @@ MAX_DRAWDOWN_SOL = 10                       # Maximum allowed 24h loss in SOL (n
 DRAWDOWN_CHECK_INTERVAL = 3600              # Drawdown check interval (seconds) (not integrated)
 
 # UNSUBSCRIBING CONDITIONS
-INACTIVITY_PERIOD = timedelta(minutes=10)
-MIN_MARKET_CAP = 3600                       # Minimum market cap (in USD)
+INACTIVITY_PERIOD = 10                      # Inactivity period in minutes before unsubscribing
+MIN_MARKET_CAP = 3600                       # Minimum market cap (in USD) - for unsubscription & backup
 
 # Subscription tracking
-ACTIVE_SUBSCRIPTIONS = set()                # leave it alone
-NEW_TOKEN_SUBSCRIPTION = False              # leave it alone
+ACTIVE_SUBSCRIPTIONS = set()                # leave it alone ... can be deleted?
+NEW_TOKEN_SUBSCRIPTION = False              # leave it alone ... can be deleted?
 
 # PumpPortal
-WS_HOST: str = "wss://pumpportal.fun/api/data"
-MAX_SUBSCRIPTION_BATCH: int = 100           # For batch unsubscription
+_WS_HOST: str = "wss://pumpportal.fun/api/data" # can be deleted?
+_MAX_SUBSCRIPTION_BATCH: int = 100           # For batch unsubscription ... can be deleted?
 
 # Token and API configurations
-TOTAL_SUPPLY = 1000000000                   # Assumed total supply if not provided
-PUMPPORTAL_WS = "wss://pumpportal.fun/api/data"
+_TOTAL_SUPPLY = 1000000000                   # Assumed total supply if not provided
+_PUMPPORTAL_WS = "wss://pumpportal.fun/api/data"
 
-RUGCHECK_AUTH_API = "https://api.rugcheck.xyz/auth/login/solana"
-RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens"
-RUGCHECK_RATE_LIMIT = 10                    # 10 requests per minute
-RUGCHECK_INTERVAL = 60                      # 60 seconds interval for RugCheck checks
+_RUGCHECK_AUTH_API = "https://api.rugcheck.xyz/auth/login/solana"
+_RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens"
+_RUGCHECK_RATE_LIMIT = 10                    # 10 requests per minute
+_RUGCHECK_INTERVAL = 60                      # 60 seconds interval for RugCheck checks
 RUGCHECK_SCORE_THRESHOLD = 1002             # Score above which a token is considered high risk and deactivated
 
 # SOL price configuration
-SOL_PRICE_API_URL = "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd"
+_SOL_PRICE_API_URL = "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd"
 
 # Logging
-LOGGER_NAME = "TradingBot"
-LOG_LEVEL_CONSOLE: str = "DEBUG"
-LOG_LEVEL_FILE: str = "DEBUG"
-LOG_STORAGE_PATH = "log"
+_LOGGER_NAME = "TradingBot"
+_LOG_LEVEL_CONSOLE: str = "DEBUG"
+_LOG_LEVEL_FILE: str = "DEBUG"
+_LOG_STORAGE_PATH: str = "log"
 
 # --- Socials Processor Configuration ---
 SOCIALS_CHECK_REFRESH_INTERVAL = 60                  # Timeout for requeing socials check in minutes

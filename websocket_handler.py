@@ -6,11 +6,11 @@ Handles incoming messages, token subscriptions, and graceful shutdown.
 import asyncio
 from asyncio import Queue
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import asyncpg
 import websockets
 
-from config import PUMPPORTAL_WS, INACTIVITY_PERIOD, MIN_MARKET_CAP
+from config import _PUMPPORTAL_WS
 from database_handler import DatabaseClient
 from logger import logger
 # from trading import has_active_position
@@ -20,9 +20,10 @@ from state_manager import GlobalState
 UNSUBSCRIBE_BATCH_COUNT = 15
 
 class WebSocketHandler:
-    def __init__(self, db_client: DatabaseClient):
-        self.state = GlobalState.get_instance()  # Get the singleton instance of GlobalState 
+    def __init__(self, db_client: DatabaseClient, config_dict: dict, state_manager: GlobalState):
+        self.state = state_manager  # Get the singleton instance of GlobalState 
         self.db_client = db_client  # Store reference to the database client
+        self.config = config_dict
         self.websocket = None
         self.tasks = []
         self.last_update_times = {}
@@ -30,7 +31,7 @@ class WebSocketHandler:
 
     async def connect(self):
         """Establishes a WebSocket connection and subscribes to new token events."""
-        self.websocket = await websockets.connect(PUMPPORTAL_WS)
+        self.websocket = await websockets.connect(_PUMPPORTAL_WS)
         logger.info("Connected to PumpPortal WebSocket")
         await self.websocket.send(json.dumps({"method": "subscribeNewToken"}))
         await self.state.set_new_token_subscription(True)
@@ -150,6 +151,42 @@ class WebSocketHandler:
         except Exception as e:
             logger.error(f"Unexpected error in message_handler: {e}", exc_info=True)
 
+    async def unsubscribe_new_tokens(self):
+            """Sends a request to unsubscribe from the newToken stream."""
+            current_state = await self.state.get_new_token_subscription()
+            if not current_state:
+                logger.info("Already unsubscribed from newToken stream. No action needed.")
+                return
+
+            if self.websocket and self.websocket.open:
+                try:
+                    payload = json.dumps({"method": "unsubscribeNewToken"})
+                    await asyncio.wait_for(self.websocket.send(payload), timeout=10.0)
+                    # Assuming successful send means unsubscription on the server side
+                    await self.state.set_new_token_subscription(False)
+                    logger.info("✅ Successfully sent unsubscribe request for newToken stream.")
+                    # Reset the flag in config.py directly (if still needed elsewhere, though state manager is better)
+                    # Be cautious modifying config directly, state manager is preferred.
+                    # config.NEW_TOKEN_SUBSCRIPTION = False
+
+                except websockets.exceptions.ConnectionClosed:
+                    logger.error("❌ Cannot unsubscribe from newToken: WebSocket connection is closed.")
+                    # Optionally update state anyway, as we can't be subscribed if disconnected
+                    await self.state.set_new_token_subscription(False)
+                    # config.NEW_TOKEN_SUBSCRIPTION = False
+                except asyncio.TimeoutError:
+                    logger.error("⏳ Timeout sending unsubscribe request for newToken stream.")
+                    # State remains true, maybe retry later? Or set false optimistically?
+                    # For now, let's keep state as true, indicating we *think* we are still subscribed.
+                except Exception as e:
+                    logger.error(f"❌ Error sending unsubscribe request for newToken: {e}", exc_info=True)
+                    # State remains true
+            else:
+                logger.warning("⚠️ Cannot unsubscribe from newToken: WebSocket is not connected or not initialized.")
+                # If not connected, we are effectively unsubscribed, so update state
+                await self.state.set_new_token_subscription(False)
+                # config.NEW_TOKEN_SUBSCRIPTION = False
+
     async def resume_subscriptions(self):
         """Resubscribes to all active tokens from the database (one-time operation)."""
         if not self.websocket or self.websocket.closed:
@@ -184,7 +221,7 @@ class WebSocketHandler:
                 continue
                 
             try:
-                rows = await self.db_client.get_tokens_to_unsubscribe(sol_price, MIN_MARKET_CAP)
+                rows = await self.db_client.get_tokens_to_unsubscribe(sol_price, self.config['MIN_MARKET_CAP'])
 
                 # Identify candidate mints from DB
                 candidate_mints = [row['mint'] for row in rows]
@@ -267,16 +304,17 @@ class WebSocketHandler:
         while not self.state.shutdown_event.is_set():  # Assuming state has a shutdown flag
             try:
                 current_time = datetime.now(timezone.utc)
+                inactivity_period = timedelta(minutes=self.config['INACTIVITY_PERIOD'])
                 inactive_tokens = []
                 # Safely access shared state
                 async with self.state.lock:  # Assuming state has a lock for thread safety
                     for mint, last_update in self.last_update_times.items():
-                        if current_time - last_update > INACTIVITY_PERIOD:
+                        if current_time - last_update > inactivity_period:
                             inactive_tokens.append(mint)
                 
                 # Unsubscribe from inactive tokens
                 for mint in inactive_tokens:
-                    logger.info(f"💀 Token {mint} inactive for over {INACTIVITY_PERIOD}. Unsubscribing...")
+                    logger.info(f"💀 Token {mint} inactive for over {self.config['INACTIVITY_PERIOD']}. Unsubscribing...")
                     try:
                         await self.websocket.send(json.dumps({
                             "method": "unsubscribeTokenTrade",

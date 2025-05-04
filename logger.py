@@ -6,13 +6,14 @@ import logging
 from functools import wraps
 from rich.logging import RichHandler
 from rich.console import Console
-from config import LOGGER_NAME, LOG_LEVEL_CONSOLE, LOG_LEVEL_FILE, LOG_STORAGE_PATH
+from config import _LOGGER_NAME, _LOG_LEVEL_CONSOLE, _LOG_LEVEL_FILE, _LOG_STORAGE_PATH
+import os
 
-logger = logging.getLogger(name=LOGGER_NAME)
+logger = logging.getLogger(name=_LOGGER_NAME)
 log_queue = queue.Queue()
 console = Console()
 
-def setup_logging(logger_name=LOGGER_NAME):
+def setup_logging(logger_name=_LOGGER_NAME):
     """
     Setup logging with both file and console handlers using config-defined levels.
     """
@@ -20,14 +21,14 @@ def setup_logging(logger_name=LOGGER_NAME):
     if logger.hasHandlers():
         logger.handlers.clear()
 
-    os.makedirs(LOG_STORAGE_PATH, exist_ok=True)
+    os.makedirs(_LOG_STORAGE_PATH, exist_ok=True)
 
     # File Handler
     try:
         file_handler = logging.FileHandler(
-            f"{LOG_STORAGE_PATH}/{logger_name}.log", encoding="utf-8"
+            f"{_LOG_STORAGE_PATH}/{logger_name}.log", encoding="utf-8"
         )
-        file_level = logging.getLevelName(LOG_LEVEL_FILE)
+        file_level = logging.getLevelName(_LOG_LEVEL_FILE)
         file_handler.setLevel(file_level)
 
         file_formatter = logging.Formatter(
@@ -46,7 +47,7 @@ def setup_logging(logger_name=LOGGER_NAME):
         markup=True,
         rich_tracebacks=True,
     )
-    console_level = logging.getLevelName(LOG_LEVEL_CONSOLE)
+    console_level = logging.getLevelName(_LOG_LEVEL_CONSOLE)
     console_handler.setLevel(console_level)
 
     if file_handler:
@@ -64,7 +65,7 @@ def setup_logging(logger_name=LOGGER_NAME):
     logger.addHandler(log_handler)
 
 
-def rotate_log_file(logger_name=LOGGER_NAME):
+def rotate_log_file(logger_name=_LOGGER_NAME):
     """Rotate current log file with timestamp and create new log"""
     try:
         handlers = logger.handlers.copy()
@@ -74,10 +75,10 @@ def rotate_log_file(logger_name=LOGGER_NAME):
                 handler.close()
                 logger.removeHandler(handler)
 
-        log_path = f"{LOG_STORAGE_PATH}/{logger_name}.log"
+        log_path = f"{_LOG_STORAGE_PATH}/{logger_name}.log"
         if os.path.exists(log_path):
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            new_name = f"{LOG_STORAGE_PATH}/{LOGGER_NAME}.{timestamp}.log"
+            new_name = f"{_LOG_STORAGE_PATH}/{_LOGGER_NAME}.{timestamp}.log"
             os.rename(log_path, new_name)
             logger.info(f"Log rotated to: {new_name}")
 

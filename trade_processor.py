@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from logger import logger
 from state_manager import GlobalState
 from utils import calculate_market_cap 
-from config import TOTAL_SUPPLY # Import TOTAL_SUPPLY from config
+from config import _TOTAL_SUPPLY # Import TOTAL_SUPPLY from config
 
 async def trade_worker():
     """Processes trade messages from queue and writes them in batches to the database."""
@@ -85,7 +85,7 @@ async def trade_worker():
                     v_tokens = Decimal(str(data.get('vTokensInBondingCurve', 0)))
                     v_sol = Decimal(str(data.get('vSolInBondingCurve', 0)))
                     market_cap_sol = Decimal(str(data.get('marketCapSol', 0)))
-                    t_supply = Decimal(str(data.get('totalSupply', TOTAL_SUPPLY))) # Use TOTAL_SUPPLY from config
+                    t_supply = Decimal(str(data.get('totalSupply', _TOTAL_SUPPLY))) # Use TOTAL_SUPPLY from config
 
                     # Calculate price safely
                     price = (sol_amount / token_amount) if token_amount else Decimal(0)
