@@ -304,6 +304,7 @@ class TradingEnv(gym.Env):
             social_thresh = agent_params.get('DEFAULT_SOCIAL_SCORE_THRESHOLD', 100)
             volatility_thresh = agent_params.get('MIN_VOLATILITY', 0.0)
             buy_amount_sol = agent_params.get('SOL_TO_BUY', 0.1)
+            second_tp_margin = agent_params.get('SECOND_TAKE_PROFIT_PERCENT', 550.0) / 100.0
 
             # Fixed simulation parameters
             buy_fee = rl_config.DEFAULT_BUY_FEE
@@ -409,6 +410,10 @@ class TradingEnv(gym.Env):
                 volatility >= volatility_thresh
             )
 
+            # logger.debug(f"Buy criteria: Volume {volume} >= {volume_thresh}, Market Cap {market_cap_sol} >= {mcap_thresh_buy}, "
+            #              f"RugCheck {rugcheck_score} < {rug_thresh}, Socials {socials_score} < {social_thresh}, "
+            #              f"Volatility {volatility} >= {volatility_thresh}")
+
             if meets_buy_criteria:
                 total_investment = buy_amount_sol + buy_fee + buy_tip
                 tokens_bought = buy_amount_sol / price if price > 0 else 0
@@ -425,7 +430,7 @@ class TradingEnv(gym.Env):
                     target_gross_sol_return_tp1 = target_net_sol_return_tp1 + sell_fee_tp1 + sell_tip_tp1
                     tokens_to_sell_tp1 = tokens_bought * first_sell_perc
                     initial_tp_price = (target_gross_sol_return_tp1 / tokens_to_sell_tp1) if tokens_to_sell_tp1 > 1e-9 else float('inf')
-                    second_tp_price = price * (1.0 + rl_config.SECOND_TAKE_PROFIT_PERCENT / 100.0)
+                    second_tp_price = price * (1.0 + second_tp_margin)
 
                     self.active_position = {
                         'buy_price': price, 'initial_tokens': tokens_bought,

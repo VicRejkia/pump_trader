@@ -15,14 +15,14 @@ from typing import List, Dict, Any, Tuple, Union
 # --- General Configuration ---
 # NOTE: THESE DATES ARE EXAMPLES - ADJUST TO YOUR ACTUAL DATA RANGE
 # Use the same extended range as GA for consistency?
-RL_HISTORICAL_DATA_START_TS: datetime = datetime(2025, 4, 19, 15, 0, 0, tzinfo=timezone.utc)
-RL_HISTORICAL_DATA_END_TS: datetime = datetime(2025, 4, 21, 20, 0, 0, tzinfo=timezone.utc)
+RL_HISTORICAL_DATA_START_TS: datetime = datetime(2025, 5, 1, 15, 0, 0, tzinfo=timezone.utc)
+RL_HISTORICAL_DATA_END_TS: datetime = datetime(2025, 5, 3, 23, 59, 0, tzinfo=timezone.utc)
 
 # --- Environment Configuration ---
 DATA_SET_KEY_TRAIN: str = 'train'       # Data used for agent training episodes.
 DATA_SET_KEY_EVAL: str = 'validation'   # Data used for periodic evaluation during training.
 
-RL_INITIAL_CAPITAL: float = 10.0 # In SOL
+RL_INITIAL_CAPITAL: float = 100.0 # In SOL
 
 # Max steps based on typical token lifespan (e.g., 4 hours * 12 steps/min * 60 min/hr = 2880 steps if 5s candles)
 # Let's set a reasonable upper bound, actual episodes will be truncated by data end.
@@ -69,12 +69,13 @@ RL_TUNABLE_PARAMETERS: List[Tuple[str, float, float, type]] = [
     ('FIRST_SELL_PROFIT_MARGIN', 10.0, 200.0, float),   # 10% to 200% margin for TP1
     ('SECOND_TAKE_PROFIT_PERCENT', 100.0, 1000.0, float), # 100% to 1000% TP2
     ('FIRST_SELL_PROFIT_MARGIN', 10.0, 200.0, float),   # 10% to 200% margin for TP1
-    ('DEFAULT_VOLUME_THRESHOLD', 5000, 50000, int),     # 5k to 50k USD volume threshold
-    ('DEFAULT_MARKETCAP_THRESHOLD', 10000, 100000, int), # 10k to 100k USD market cap threshold
+    ('DEFAULT_VOLUME_THRESHOLD', 10000, 50000, int),     # 5k to 50k USD volume threshold
+    ('DEFAULT_MARKETCAP_THRESHOLD', 6000, 100000, int), # 10k to 100k USD market cap threshold
     ('MIN_VOLATILITY', 0.1, 1.0, float),                # 0.1% to 1% volatility threshold
-    ('DEFAULT_RUGCHECK_SCORE_THRESHOLD', 1, 1000, int), # 1 to 1000 score threshold
-    ('DEFAULT_SOCIAL_SCORE_THRESHOLD', 1, 100, int),  # 1 to 100 score threshold
-    ('SOL_TO_BUY', 0.1, 1.0, float), # Add buy amount later if needed
+    ('DEFAULT_RUGCHECK_SCORE_THRESHOLD', 500, 1002, int), # 1 to 1000 score threshold
+    ('DEFAULT_SOCIAL_SCORE_THRESHOLD', 40, 80, int),  # 1 to 100 score threshold
+    # ('DEFAULT_TIME_INTERVALL', 1, 60, int),
+    ('SOL_TO_BUY', 0.1, 0.5, float), # Add buy amount later if needed
 ]
 ACTION_SPACE_DIM: int = len(RL_TUNABLE_PARAMETERS)
 
@@ -93,7 +94,7 @@ REWARD_DEATH_PENALTY: float = -RL_INITIAL_CAPITAL * 0.5 # Example: Penalize half
 
 # Reward Shaping (Optional): Intermediate rewards/penalties.
 REWARD_SL_HIT_PENALTY: float = -0.5 # Penalty for hitting initial or trailing stop loss
-REWARD_TP_HIT_BONUS: float = 0.2  # Bonus for hitting first or second take profit
+REWARD_TP_HIT_BONUS: float = 0.5  # Bonus for hitting first or second take profit (0.2)
 REWARD_HOLDING_PENALTY: float = -0.001 # Small penalty per step while holding (discourages inaction)
 # REWARD_UNREALIZED_PNL_CHANGE: float = 0.05 # Small bonus for increasing unrealized PnL (optional, can be noisy)
 
@@ -103,8 +104,8 @@ DEFAULT_BUY_FEE: float = 0.001
 DEFAULT_BUY_TIP: float = 0.001
 DEFAULT_SELL_FEE: float = 0.001
 DEFAULT_SELL_TIP: float = 0.001
-DEFAULT_BUY_SOL_AMOUNT: float = 0.5 # Fixed buy amount for RL env simulation
-SECOND_TAKE_PROFIT_PERCENT: float = 550.0 # Fixed second TP target
+# DEFAULT_BUY_SOL_AMOUNT: float = 0.5 # Fixed buy amount for RL env simulation
+# SECOND_TAKE_PROFIT_PERCENT: float = 550.0 # Fixed second TP target
 
 # Fixed thresholds for the *simulated* buy decision (agent learns parameters, not timing)
 # DEFAULT_VOLUME_THRESHOLD: int = 19000
@@ -136,7 +137,7 @@ MODEL_SAVE_DIR: str = "./rl_trained_models/"
 EVAL_FREQ: int = 50000 # Evaluate every 50k total steps
 
 # Number of episodes for each evaluation run.
-N_EVAL_EPISODES: int = 20 # More episodes for better evaluation stability
+N_EVAL_EPISODES: int = 40 # More episodes for better evaluation stability
 
 # Checkpoint saving frequency (in total agent steps).
 CHECKPOINT_FREQ: int = 100000 # Save every 100k total steps

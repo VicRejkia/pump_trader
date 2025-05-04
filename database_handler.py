@@ -14,12 +14,14 @@ import pandas as pd
 from dotenv import load_dotenv
 from logger import logger
 from config import _TOTAL_SUPPLY
+import config as base_config_module
 from state_manager import GlobalState
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional, List, Tuple # Added List, Tuple
 from utils import calculate_volatility
+import inspect 
 
 # Load environment variables from .env file
 load_dotenv()
@@ -31,13 +33,45 @@ DB_HOST = os.getenv("DB_HOST")
 DB_DATABASE = os.getenv("DB_DATABASE")
 DB_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}/{DB_DATABASE}?options=-c%20timezone%3Dutc"
 
+# --- Helper Function to Convert Module to Dict ---
+# (Place this helper function outside the class, near the imports)
+def _config_module_to_dict(module) -> dict:
+    """Converts public, uppercase attributes of a module into a dictionary."""
+    config_dict = {}
+    for key in dir(module):
+        # Load only uppercase variables that are not modules/classes/functions/private
+        if key.isupper() and not key.startswith('_'):
+            value = getattr(module, key)
+            # Check type to exclude modules etc.
+            if not inspect.ismodule(value) and \
+               not inspect.isclass(value) and \
+               not inspect.isfunction(value):
+                config_dict[key] = value
+    logger.debug(f"Converted config module to dict: {list(config_dict.keys())}")
+    return config_dict
+
 class DatabaseClient:
     """Client to manage database connections and operations."""
+
+    _DEFAULT_CONFIG = _config_module_to_dict(base_config_module)
     
-    def __init__(self, config_dict: dict):
+    def __init__(self, config_dict: Optional[dict] = None):
         self.pool = None
-        self.config = config_dict
         self.state = GlobalState.get_instance()
+
+        # Use the provided config_dict if available, otherwise use the class default
+        if config_dict is not None:
+            self.config = config_dict
+            logger.debug("DatabaseClient initialized with provided config_dict.")
+        else:
+            # Use a copy of the default to prevent modifications affecting others
+            self.config = self._DEFAULT_CONFIG.copy()
+            logger.debug("DatabaseClient initialized with default config from config.py.")
+
+        # Ensure self.config is always a dictionary
+        if not isinstance(self.config, dict):
+             logger.error(f"DatabaseClient self.config is not a dict! Type: {type(self.config)}. Falling back to default.")
+             self.config = self._DEFAULT_CONFIG.copy() # Fallback just in case
 
     async def connect(self):
         """Establish a connection pool to the PostgreSQL database."""
@@ -1224,8 +1258,26 @@ class DatabaseClient:
                         max_ts = group_df.index.max()
                         full_range = pd.date_range(start=min_ts, end=max_ts, freq='5s', tz='UTC')
 
+                        # ---> FIX: Call infer_objects() before interpolating <---
+                        # group_resampled = group_df.reindex(full_range).interpolate(method='time')
+                        # Reindex first, creating the DataFrame that might have object dtypes due to NaNs
+                        group_reindexed = group_df.reindex(full_range)
+
+                        try:
+                            # Attempt to convert columns to more specific dtypes (e.g., float, int)
+                            # copy=False modifies inplace if possible, potentially saving memory
+                            group_reindexed = group_reindexed.infer_objects(copy=False)
+                        except Exception as e:
+                            # Log if infer_objects fails, but proceed cautiously
+                            logger.warning(f"Failed to infer objects for {mint_name} before interpolation: {e}")
+
                         # Reindex and interpolate within the group's actual range
-                        group_resampled = group_df.reindex(full_range).interpolate(method='time')
+                        # Now interpolate. This should operate on more appropriate dtypes.
+                        group_resampled = group_reindexed.interpolate(method='time')
+                        # ---> END FIX <---
+                        
+                       
+                       
                         # Add the mint column back after reindexing
                         group_resampled['mint'] = mint_name
                         resampled_ohlcv_list.append(group_resampled)
