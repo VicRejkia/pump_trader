@@ -533,6 +533,7 @@ async def main_test():
         'DEFAULT_RUGCHECK_SCORE_THRESHOLD': 801, 
         'DEFAULT_SOCIAL_SCORE_THRESHOLD': 50, 
         'MIN_MARKET_CAP': 3000, 
+        'DEFAULT_TIME_INTERVAL': 30, 
         'mint': 'X1dpwrtFkMwbFFr6ydAVv1t7ysuXXNCqDcoVpyMpump'
     }  
     # "{""buy_fee_config"": 0.001, ""buy_tip_config"": 0.001, ""sol_to_buy_config"": 0.9, ""first_sell_percent_config"": 65.0, ""calculated_second_tp_price"": 0.000014365116894174576, ""calculated_initial_sl_price"": 0.000001989016185347249, ""calculated_initial_tp_price"": 0.000009228430650648165,

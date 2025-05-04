@@ -119,25 +119,25 @@ def analyze_feature_importance(model, env, num_samples=1000):
     plt.close()
 
     # Permutation Importance
-    def score_fn(X):
-        return np.array([model.predict(x)[0] for x in X])
+    # def score_fn(X):
+    #     return np.array([model.predict(x)[0] for x in X])
 
-    result = permutation_importance(
-        score_fn, 
-        samples[:100], 
-        n_repeats=5, 
-        random_state=42,
-        n_jobs=-1
-    )
+    # result = permutation_importance(
+    #     score_fn, 
+    #     samples[:100], 
+    #     n_repeats=5, 
+    #     random_state=42,
+    #     n_jobs=-1
+    # )
     
-    # Save results
-    importance_df = pd.DataFrame({
-        'feature': rl_config.OBSERVATION_FEATURES,
-        'importance_mean': result.importances_mean(axis=1),
-        'importance_std': result.importances_std(axis=1)
-    }).sort_values('importance_mean', ascending=False)
+    # # Save results
+    # importance_df = pd.DataFrame({
+    #     'feature': rl_config.OBSERVATION_FEATURES,
+    #     'importance_mean': result.importances_mean(axis=1),
+    #     'importance_std': result.importances_std(axis=1)
+    # }).sort_values('importance_mean', ascending=False)
     
-    importance_df.to_csv(os.path.join(rl_config.MODEL_SAVE_DIR, "feature_importance_permutation.csv"), index=False)
+    # importance_df.to_csv(os.path.join(rl_config.MODEL_SAVE_DIR, "feature_importance_permutation.csv"), index=False)
     
     logger.info("Feature importance analysis completed")
 
@@ -340,7 +340,7 @@ async def train_rl_agent():
     # Configure SB3 logger to output to tensorboard, csv, and stdout
     sb3_file_logger = sb3_configure_logger(log_path_tb, ["stdout", "csv", "tensorboard"])
 
-    device = "auto"
+    device = 'cpu' #"auto"
     logger.info(f"Using device: {device}")
 
     # Define agent parameters
@@ -366,7 +366,7 @@ async def train_rl_agent():
             gamma=0.99,
             gae_lambda=0.95,
             clip_range=0.2,
-            ent_coef=0.01,  # Slightly increased for better exploration
+            ent_coef=0.1,  # Slightly increased for better exploration
             vf_coef=0.5,
             learning_rate=3e-4,
             max_grad_norm=0.5,  # Added to prevent explosive gradients
