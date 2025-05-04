@@ -22,6 +22,7 @@ from utils import (
 
 class TradingManager:
     def __init__(self, db_client: DatabaseClient, config_dict: dict, state: GlobalState):
+    def __init__(self, db_client: DatabaseClient, config_dict: dict, state: GlobalState):
         self.db = db_client # Expecting a DatabaseClient instance
         self.config = config_dict
         self.state = state # Set state during initialization

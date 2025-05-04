@@ -55,7 +55,8 @@ class DatabaseClient:
 
     _DEFAULT_CONFIG = _config_module_to_dict(base_config_module)
     
-    def __init__(self, config_dict: Optional[dict] = None):
+    def __init__(self, config_dict: Optional[dict] = None, config_dict: dict = None):
+        self.config = config_dict
         self.pool = None
         self.state = GlobalState.get_instance()
 
@@ -1161,6 +1162,7 @@ class DatabaseClient:
                     # --- Calculate SQL-like Rolling Volume & Volatility per Mint ---
                     logger.info("Calculating rolling volume and volatility per mint...")
                     all_processed_trades = []
+                    time_interval_minutes = self.config['DEFAULT_TIME_INTERVALL'] # Get from config
                     time_interval_minutes = self.config['DEFAULT_TIME_INTERVALL'] # Get from config
                     window_duration = f"{time_interval_minutes}min"
                     logger.debug(f"Using rolling window duration: {window_duration}")
