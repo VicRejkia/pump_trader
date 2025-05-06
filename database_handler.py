@@ -55,7 +55,7 @@ class DatabaseClient:
 
     _DEFAULT_CONFIG = _config_module_to_dict(base_config_module)
     
-    def __init__(self, config_dict: Optional[dict] = None, config_dict: dict = None):
+    def __init__(self, config_dict: Optional[dict] = None):
         self.config = config_dict
         self.pool = None
         self.state = GlobalState.get_instance()
