@@ -3,18 +3,18 @@ Configuration constants and settings for the trading bot.
 """
 
 # Trading configuration
-SOL_TO_BUY = 0.9                            # Amount of SOL to spend on each buy
+SOL_TO_BUY = 0.5                            # Amount of SOL to spend on each buy
 _INITIAL_SOL_BALANCE = 100.0                  # Starting SOL balance for PnL tracking
-PLAY_BUY_SOUND = True                      # Play the buy sound when a buy is made
-PLAY_SELL_SOUND = True                     # Play the sell sound when a sell is made
+PLAY_BUY_SOUND = False                      # Play the buy sound when a buy is made
+PLAY_SELL_SOUND = False                     # Play the sell sound when a sell is made
 
 # --- New Multi-Stage Sell Logic Configuration ---
-INITIAL_STOP_LOSS_PERCENT = 10.0            # Initial SL as % below buy price (e.g., 25.0 for -25%)
+INITIAL_STOP_LOSS_PERCENT = 40.0            # Initial SL as % below buy price (e.g., 25.0 for -25%)
 # INITIAL_TAKE_PROFIT_PERCENT is removed as TP1 price is now calculated based on investment, costs, and margin.
-FIRST_SELL_PERCENT = 65.0                   # % of *initial* tokens to sell at First TP (e.g., 50.0 for 50%)
-TRAILING_STOP_LOSS_PERCENT = 15.0           # Trailing SL % drop from highest price *after* First TP (e.g., 15.0 for -15%)
-SECOND_TAKE_PROFIT_PERCENT = 550.0          # Second TP as % above buy price (e.g., 200.0 for +200%)
-FIRST_SELL_PROFIT_MARGIN = 170.0             # Desired profit margin % on the *total initial investment* for the first TP sell
+FIRST_SELL_PERCENT = 35.0                   # % of *initial* tokens to sell at First TP (e.g., 50.0 for 50%)
+TRAILING_STOP_LOSS_PERCENT = 50.0           # Trailing SL % drop from highest price *after* First TP (e.g., 15.0 for -15%)
+SECOND_TAKE_PROFIT_PERCENT = 800.0          # Second TP as % above buy price (e.g., 200.0 for +200%)
+FIRST_SELL_PROFIT_MARGIN = 70.0             # Desired profit margin % on the *total initial investment* for the first TP sell
 
 # --- Fees and Tips ---
 DEFAULT_BUY_FEE = 0.001                     # Fee for buying in SOL
@@ -23,18 +23,18 @@ DEFAULT_SELL_FEE = 0.001                    # Fee for selling in SOL
 DEFAULT_SELL_TIP = 0.001                    # Tip for selling in SOL
 
 # Trading thresholds
-DEFAULT_RUGCHECK_SCORE_THRESHOLD = 801      # No trading if Rugcheck score is equal or above this threshold
-DEFAULT_SOCIAL_SCORE_THRESHOLD = 50         # No trading if Social score is equal or above this threshold
-DEFAULT_VOLUME_THRESHOLD = 19000            # Minimum volume threshold in USD
-MIN_MARKETCAP_THRESHOLD = 6000              # Minimum market cap threshold in USD to make emergency sell
-DEFAULT_MARKETCAP_THRESHOLD = 10000         # Minimum market cap threshold in USD to search for buy opportunities
-MIN_VOLATILITY = 0.1                        # Minimum volatility threshold in % to search for buy opportunities
+DEFAULT_RUGCHECK_SCORE_THRESHOLD = 401      # No trading if Rugcheck score is equal or above this threshold
+DEFAULT_SOCIAL_SCORE_THRESHOLD = 100        # No trading if Social score is equal or above this threshold
+DEFAULT_VOLUME_THRESHOLD = 40000            # Minimum volume threshold in USD
+MIN_MARKETCAP_THRESHOLD = 3600              # Minimum market cap threshold in USD to make emergency sell
+DEFAULT_MARKETCAP_THRESHOLD = 45000         # Minimum market cap threshold in USD to search for buy opportunities
+MIN_VOLATILITY = 0.18                       # Minimum volatility threshold in % to search for buy opportunities
 DEFAULT_TIME_INTERVALL = 30                 # Time interval for checking volatility, volume and marketcap in minutes
 MAX_DRAWDOWN_SOL = 10                       # Maximum allowed 24h loss in SOL (not integrated)
 DRAWDOWN_CHECK_INTERVAL = 3600              # Drawdown check interval (seconds) (not integrated)
 
 # UNSUBSCRIBING CONDITIONS
-INACTIVITY_PERIOD = 10                      # Inactivity period in minutes before unsubscribing
+INACTIVITY_PERIOD = 20                      # Inactivity period in minutes before unsubscribing & backup
 MIN_MARKET_CAP = 3600                       # Minimum market cap (in USD) - for unsubscription & backup
 
 # Subscription tracking
@@ -42,10 +42,7 @@ ACTIVE_SUBSCRIPTIONS = set()                # leave it alone ... can be deleted?
 NEW_TOKEN_SUBSCRIPTION = False              # leave it alone ... can be deleted?
 
 # PumpPortal
-_WS_HOST: str = "wss://pumpportal.fun/api/data" # can be deleted?
 _MAX_SUBSCRIPTION_BATCH: int = 100           # For batch unsubscription ... can be deleted?
-
-# Token and API configurations
 _TOTAL_SUPPLY = 1000000000                   # Assumed total supply if not provided
 _PUMPPORTAL_WS = "wss://pumpportal.fun/api/data"
 
@@ -65,7 +62,7 @@ _LOG_LEVEL_FILE: str = "DEBUG"
 _LOG_STORAGE_PATH: str = "log"
 
 # --- Socials Processor Configuration ---
-SOCIALS_CHECK_REFRESH_INTERVAL = 60                  # Timeout for requeing socials check in minutes
+SOCIALS_CHECK_REFRESH_INTERVAL = 120                  # Timeout for requeing socials check in minutes
 SOCIALS_DISALLOWED_WEBSITE_DOMAINS = {
     "youtube.com", "youtu.be", "tiktok.com", "spotify.com", "soundcloud.com",
     "discord.com", "discord.gg", "medium.com", "substack.com", "linktr.ee",

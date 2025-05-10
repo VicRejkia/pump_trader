@@ -398,7 +398,6 @@ class TradingBot:
                                 log_error(f"Error removing command file {COMMAND_FILE}: {e}")
                             break # Exit listener loop once stop is triggered
 
-
                         elif command == "START" and last_command != "START":
                              log_info(f":arrow_forward: Received START command from {COMMAND_FILE}. Bot should already be starting/running.")
                              last_command = "START"
@@ -421,8 +420,6 @@ class TradingBot:
                                 log_debug(f"Cleared command file: {COMMAND_FILE}")
                             except OSError as e:
                                 log_error(f"Error clearing command file {COMMAND_FILE}: {e}")
-
-                        elif command and command not in ["START", "STOP", "UNSUB_NEWTOKEN"] and command != last_command:
 
                         elif command == "UNSUB_NEWTOKEN" and last_command != "UNSUB_NEWTOKEN":
                             log_info(f":no_bell: Received UNSUB_NEWTOKEN command from {COMMAND_FILE}.")
@@ -455,10 +452,10 @@ class TradingBot:
                             # If file is now empty, reset last_command to allow re-reading
                             last_command = None
                              # Clear the command file after processing unknown command
-                             try:
+                            try:
                                  with open(COMMAND_FILE, 'w') as f: f.write("") # Clear file
                                  log_debug(f"Cleared command file: {COMMAND_FILE}")
-                             except OSError as e:
+                            except OSError as e:
                                  log_error(f"Error clearing command file {COMMAND_FILE}: {e}")
 
                         elif not command and last_command:
@@ -919,10 +916,6 @@ class TradingBot:
             self.db_client = DatabaseClient(self.config)
             await self.db_client.connect()
             await self.state.set_db_client(self.db_client)
-        try:
-            self.db_client = DatabaseClient(self.config)
-            await self.db_client.connect()
-            await self.state.set_db_client(self.db_client)
 
             if self.backup:
                 log_info(":floppy_disk: Starting database backup...")
@@ -949,9 +942,9 @@ class TradingBot:
             log_info(":white_check_mark: Database schema initialized.")
             await self.db_client.restore_creator_wallets()
         except Exception as db_setup_err:
-             log_critical(f"CRITICAL: Failed database setup: {db_setup_err}", exc_info=True)
-             self._write_status("ERROR")
-             return # Cannot continue without DB
+            log_critical(f"CRITICAL: Failed database setup: {db_setup_err}", exc_info=True)
+            self._write_status("ERROR")
+            return # Cannot continue without DB
             log_info(":rocket: [bold]Initializing database schema...[/bold]")
             await self.db_client.init_db()
             log_info(":white_check_mark: Database schema initialized.")
@@ -987,8 +980,6 @@ class TradingBot:
             asyncio.create_task(self.status_updater(), name="status_updater"),
             asyncio.create_task(self.command_listener(), name="command_listener"),
             asyncio.create_task(self.config_updater(), name="config_updater")
-            asyncio.create_task(self.command_listener(), name="command_listener"),
-            asyncio.create_task(self.config_updater(), name="config_updater")
         ]
         # Start WebSocket tasks (listen, manage_subscriptions)
         # Start WebSocket tasks (listen, manage_subscriptions)
@@ -1011,13 +1002,6 @@ class TradingBot:
         # --- Main Execution Loop ---
         try:
             log_info(":rocket: [bold green]Trading bot started successfully.[/bold green] Listening for market updates...")
-            # Wait for any task to finish (usually the shutdown signal)
-            done, pending = await asyncio.wait(self.tasks, return_when=asyncio.FIRST_COMPLETED)
-            log_info(f"Primary task finished: { {t.get_name() for t in done} }. Initiating shutdown.")
-            # Trigger shutdown for remaining tasks if not already triggered
-            if not self.state.shutdown_event.is_set():
-                 self.state.trigger_shutdown()
-
             # Wait for any task to finish (usually the shutdown signal)
             done, pending = await asyncio.wait(self.tasks, return_when=asyncio.FIRST_COMPLETED)
             log_info(f"Primary task finished: { {t.get_name() for t in done} }. Initiating shutdown.")
@@ -1063,8 +1047,6 @@ class TradingBot:
                 log_error(f":x: Error in sell checker loop: {e}", exc_info=True)
                 await asyncio.sleep(12)
 
-
-# --- Modify main execution block ---
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PumpTrader Bot")
     parser.add_argument("--cleanup", action="store_true", help="Clean up database before starting the bot. Deletes data permanently!")

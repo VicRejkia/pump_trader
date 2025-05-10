@@ -33,7 +33,6 @@ RUGCHECK_REQUEST_TIMEOUT = 20.0 # Increased timeout for RugCheck API calls
 class Rugcheck:
     # Accept SocialsProcessor instance during initialization
     def __init__(self, state: GlobalState, db_client: DatabaseClient, websocket_handler: WebSocketHandler, socials_processor: SocialsProcessor, config_dict: dict):
-    def __init__(self, state: GlobalState, db_client: DatabaseClient, websocket_handler: WebSocketHandler, socials_processor: SocialsProcessor, config_dict: dict):
         self.state = state
         self.config = config_dict
         self.db_client = db_client
@@ -374,8 +373,6 @@ class Rugcheck:
         # --- Score Check and Deactivation (only if data was fetched successfully) ---
         fetched_data = fetch_result # We know it's a dict here
         score = fetched_data.get("score")
-        if score is not None and score > self.config['RUGCHECK_SCORE_THRESHOLD']:
-            logger.debug(f"🚨 High RugCheck score ({score} > {self.config['RUGCHECK_SCORE_THRESHOLD']}) for {mint}. Deactivating and unsubscribing.")
         if score is not None and score > self.config['RUGCHECK_SCORE_THRESHOLD']:
             logger.debug(f"🚨 High RugCheck score ({score} > {self.config['RUGCHECK_SCORE_THRESHOLD']}) for {mint}. Deactivating and unsubscribing.")
             try:
