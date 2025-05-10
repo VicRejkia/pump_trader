@@ -892,6 +892,56 @@ class DatabaseClient:
                 logger.exception("Error loading backup data: %s", e)
                 raise
 
+    # async def restore_creator_wallets(self):
+    #     backup_path = os.path.abspath(os.path.join(
+    #         os.path.dirname(__file__), 
+    #         "data", 
+    #         "creator_wallets_backup.json"
+    #     ))
+
+    #     if not os.path.exists(backup_path):
+    #         logger.warning("Backup file not found: %s", backup_path)
+    #         return
+
+    #     try:
+    #         with open(backup_path, "r") as f:
+    #             data = json.load(f)
+
+    #         # Convert JSON data into tuples for faster insertion
+    #         records = [
+    #             (
+    #                 record["wallet_address"],
+    #                 record["token_count"],
+    #                 record.get("last_token_time")  # Use .get() to safely handle missing keys
+    #             )
+    #             for record in data
+    #         ]
+
+    #         # Batch size
+    #         BATCH_SIZE = 100
+
+    #         # Insert using batches
+    #         for i in range(0, len(records), BATCH_SIZE):
+    #             batch = records[i:i + BATCH_SIZE]
+    #             sql = """
+    #                 INSERT INTO creator_wallets (wallet_address, token_count, last_token_time)
+    #                 VALUES ($1, $2, $3)
+    #                 ON CONFLICT (wallet_address) DO UPDATE SET
+    #                     token_count = GREATEST(creator_wallets.token_count, EXCLUDED.token_count),
+    #                     last_token_time = CASE
+    #                         WHEN EXCLUDED.token_count > creator_wallets.token_count THEN EXCLUDED.last_token_time
+    #                         ELSE creator_wallets.last_token_time
+    #                     END;
+    #             """
+    #             async with self.pool.acquire() as conn:
+    #                 await conn.executemany(sql, batch)
+
+    #         logger.info("Loaded backup data from %s (%d records)", backup_path, len(records))
+
+    #     except Exception as e:
+    #         logger.exception("Error loading backup data: %s", e)
+    #         raise
+
     async def get_total_tracked_tokens(self, backedup=False):
         """Fetches the total number of tracked tokens from the database."""
         query = "SELECT COUNT(*) FROM tokens"
