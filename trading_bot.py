@@ -1,5 +1,3 @@
-# FILE: trading_bot.py (Modified)
-
 import argparse
 import asyncio
 import signal
@@ -8,24 +6,23 @@ import inspect
 import threading
 import os
 import time
-import json
-import numpy as np # <-- Add numpy import
-import pandas as pd # <-- Add pandas import
-from datetime import datetime, timezone, timedelta
+import json # Ensure json is imported
+import numpy as np
+import pandas as pd
 from datetime import datetime, timezone, timedelta
 
-import config as config_module
+# Assuming these imports are correct for your project structure
 import config as config_module
 from database_handler import DatabaseClient
 from trading_logic import TradingManager
 from websocket_handler import WebSocketHandler
 from logger import setup_logging, log_info, log_debug, log_error, log_warning, log_critical, rotate_log_file
-from state_manager import GlobalState
+from state_manager import GlobalState # Assuming GlobalState is in state_manager.py
 from trade_processor import trade_worker
 from sol_price_api import update_sol_price
 from rugcheck_handler import Rugcheck
 from socials_processor import SocialsProcessor
-from utils import calculate_volatility
+from utils import calculate_volatility # Assuming this is your utility
 
 # --- RL Imports (add these) ---
 try:
@@ -37,14 +34,17 @@ except ImportError:
     RL_AVAILABLE = False
 # Import RL config to know parameter names and observation details
 import rl_config
-
 # --- End RL Imports ---
 
-
 # Define paths for communication files relative to project root
-COMMAND_FILE = os.path.join('data', 'bot_command.txt')
-STATUS_FILE = os.path.join('data', 'bot_status.txt')
-DYNAMIC_CONFIG_FILE = os.path.join('data', 'dynamic_config.json')
+# Ensure these paths are consistent with how your Flask app will find them.
+# If flask_app is in 'web_app', and bot is in root, these paths are from root.
+PROJECT_ROOT_DIR = os.path.dirname(os.path.abspath(__file__)) # Or however you define your project root
+DATA_DIR_BOT = os.path.join(PROJECT_ROOT_DIR, 'data')
+COMMAND_FILE = os.path.join(DATA_DIR_BOT, 'bot_command.txt')
+# Change to JSON for structured status
+STATUS_FILE = os.path.join(DATA_DIR_BOT, 'bot_status.json')
+DYNAMIC_CONFIG_FILE = os.path.join(DATA_DIR_BOT, 'dynamic_config.json')
 
 class TradingBot:
     """Main class for running the trading bot."""
@@ -54,73 +54,65 @@ class TradingBot:
         """Initialize the TradingBot with optional cleanup, backup, GA params file, and RL agent path."""
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
-        self.state = GlobalState.get_instance()
+        self.state = GlobalState.get_instance() # Bot's instance of GlobalState
         self.cleanup = cleanup
         self.backup = backup
-        self.params_file = params_file # Store the GA params file path
-        self.rl_agent_path = rl_agent_path # Store the RL agent path
-        self.rl_agent = None # Placeholder for loaded RL agent
-        self.db_client = None #DatabaseClient()
-        self.ws_handler = None #WebSocketHandler(db_client=self.db_client)
+        self.params_file = params_file
+        self.rl_agent_path = rl_agent_path
+        self.rl_agent = None
+        self.db_client = None
+        self.ws_handler = None
         self.tasks = []
-
-        # --- Configuration Handling ---
-        self.config = {} # Holds the *active* configuration (mutable dictionary)
-        self.base_config = {} # Holds the config as loaded initially from config.py
-        self._load_base_config() # Load initial config into self.config and self.base_config
-        # --- End Configuration Handling ---
-
-        # Initialize trading_manager later in main after full config setup
-
-        # --- Configuration Handling ---
-        self.config = {} # Holds the *active* configuration (mutable dictionary)
-        self.base_config = {} # Holds the config as loaded initially from config.py
-        self._load_base_config() # Load initial config into self.config and self.base_config
-        # --- End Configuration Handling ---
-
-        # Initialize trading_manager later in main after full config setup
+        self.config = {}
+        self.base_config = {}
+        self._load_base_config()
         self.trading_manager = None
-        self._write_status("INITIALIZING")
-        self._last_dynamic_config_mtime = 0 # For config_updater task
+        self._last_dynamic_config_mtime = 0
+        self.bot_start_time = datetime.now(timezone.utc) # For uptime calculation
 
-    # --- Add a helper to filter non-JSON serializable types ---
+        # Ensure data directory exists
+        os.makedirs(DATA_DIR_BOT, exist_ok=True)
+
+        # Initialize status file with an "INITIALIZING" state
+        self._write_status({"bot_process_status": "INITIALIZING", "timestamp": datetime.now(timezone.utc).isoformat()})
+
     def _filter_serializable_config(self, config_dict):
         serializable_config = {}
         skipped_keys = []
         for key, value in config_dict.items():
-            # Convert sets to lists for JSON serialization
             if isinstance(value, set):
                 serializable_config[key] = list(value)
-            elif isinstance(value, (timedelta)): # Add other types like custom classes if needed
-                skipped_keys.append(key)
-            else:
+            elif isinstance(value, timedelta):
+                serializable_config[key] = str(value) # Convert timedelta to string
+            elif isinstance(value, (int, float, str, bool, list, dict)) or value is None:
                 serializable_config[key] = value
+            else:
+                # For other non-standard types, convert to string or skip
+                try:
+                    json.dumps({key: value}) # Test serializability
+                    serializable_config[key] = value
+                except TypeError:
+                    serializable_config[key] = str(value)
+                    skipped_keys.append(f"{key} (type: {type(value).__name__} converted to str)")
         if skipped_keys:
-            log_debug(f"Skipped non-serializable keys when preparing config for JSON: {skipped_keys}")
+            log_debug(f"Skipped/converted non-JSON serializable keys for status config summary: {skipped_keys}")
         return serializable_config
-    # --- End helper ---
 
     def _load_base_config(self):
-        """Loads configuration from the config module into dictionaries."""
         try:
             loaded_config = {}
             for key in dir(config_module):
-                # Load only uppercase variables that are not modules/classes/functions
                 if key.isupper() and not key.startswith('_'):
                     value = getattr(config_module, key)
-                    # Check type to exclude modules etc. Be careful with complex types like timedelta
                     if not inspect.ismodule(value) and \
                        not inspect.isclass(value) and \
                        not inspect.isfunction(value):
                         loaded_config[key] = value
-
-            self.base_config = loaded_config.copy() # Store the initial load
-            self.config = loaded_config.copy() # Active config starts as base
+            self.base_config = loaded_config.copy()
+            self.config = loaded_config.copy()
             log_info(":gear: Base configuration loaded successfully.")
-            log_debug(f"Initial Config: {self.config}") # Debug log loaded config
         except Exception as e:
             log_critical(f":x: [bold red]CRITICAL: Failed to load base configuration[/bold red]: {e}", exc_info=True)
-            # Potentially raise the error or exit if config loading fails
             raise ValueError("Failed to load critical base configuration.") from e
         
     def register_signal_handlers(self):
@@ -135,190 +127,217 @@ class TradingBot:
         if hasattr(signal, 'SIGTERM'):
             signal.signal(signal.SIGTERM, lambda *_: signal_handler())
 
-    # --- Add the new config_updater task ---
     async def config_updater(self):
         """Periodically checks dynamic_config.json for updates and applies them."""
         log_info(f"⚙️ Dynamic config updater started. Watching: {os.path.abspath(DYNAMIC_CONFIG_FILE)}")
 
         while not self.state.shutdown_event.is_set():
-            await asyncio.sleep(10) # Check every 10 seconds
+            await asyncio.sleep(10)
             try:
                 if not os.path.exists(DYNAMIC_CONFIG_FILE):
-                    continue # File doesn't exist, nothing to do
+                    continue
 
                 current_mtime = os.path.getmtime(DYNAMIC_CONFIG_FILE)
-
-                # Check if file was modified since last check
                 if current_mtime > self._last_dynamic_config_mtime:
                     log_info(f"Detected change in {DYNAMIC_CONFIG_FILE}. Attempting to load updates.")
                     try:
-                        with open(DYNAMIC_CONFIG_FILE, 'r') as f:
+                        with open(DYNAMIC_CONFIG_FILE, 'r', encoding='utf-8') as f:
                             dynamic_conf = json.load(f)
 
                         if not isinstance(dynamic_conf, dict):
-                            log_warning(f"Invalid format in {DYNAMIC_CONFIG_FILE}: Expected a JSON object (dictionary). Skipping update.")
-                            self._last_dynamic_config_mtime = current_mtime # Update time even if format is wrong to avoid re-reading
+                            log_warning(f"Invalid format in {DYNAMIC_CONFIG_FILE}: Expected JSON object. Skipping.")
+                            self._last_dynamic_config_mtime = current_mtime
                             continue
+                        
+                        # Convert lists from JSON back to sets if the base config had them as sets
+                        for key_in_json, value_from_json in dynamic_conf.items():
+                            key_upper = key_in_json.upper()
+                            if key_upper in self.base_config and isinstance(self.base_config[key_upper], set) and isinstance(value_from_json, list):
+                                dynamic_conf[key_in_json] = set(value_from_json)
+
 
                         updated_count = 0
-                        for key, value in dynamic_conf.items():
-                            key_upper = key.upper() # Assume keys in JSON might not be uppercase
-                            if key_upper in self.config:
-                                current_value = self.config[key_upper]
-                                # Basic type check (allow int to update float, but not string to int etc.)
-                                if isinstance(value, type(current_value)) or \
-                                   (isinstance(value, int) and isinstance(current_value, float)):
-                                    # Convert incoming int to float if the original was float
-                                    if isinstance(value, int) and isinstance(current_value, float):
-                                        value_to_set = float(value)
-                                    else:
-                                        value_to_set = value
+                        changed_params = {} # For logging specific changes
 
-                                    if value_to_set != current_value:
-                                        self.config[key_upper] = value_to_set
-                                        log_info(f"⚙️ Dynamic Config Update: '{key_upper}' changed from '{current_value}' to '{value_to_set}'")
-                                        updated_count += 1
-                                    # else: log debug config value not changed
+                        for key, value in dynamic_conf.items():
+                            key_upper = key.upper()
+                            if key_upper in self.config: # Check against active config
+                                current_value_active = self.config[key_upper]
+                                
+                                # Determine the target type from base_config if available, else from current_value_active
+                                target_type = None
+                                if key_upper in self.base_config:
+                                    target_type = type(self.base_config[key_upper])
                                 else:
-                                    log_warning(f"Type mismatch for '{key_upper}' in {DYNAMIC_CONFIG_FILE}. Expected type {type(current_value)}, got {type(value)}. Skipping update for this key.")
+                                    target_type = type(current_value_active)
+
+                                value_to_set = value
+                                try:
+                                    if target_type == bool and not isinstance(value, bool): value_to_set = str(value).lower() in ['true', '1', 'yes']
+                                    elif target_type == int and not isinstance(value, int): value_to_set = int(value)
+                                    elif target_type == float and not isinstance(value, float): value_to_set = float(value)
+                                    elif target_type == set and not isinstance(value, set):
+                                        if isinstance(value, list): value_to_set = set(value)
+                                        else: raise TypeError(f"Cannot convert {type(value)} to set for {key_upper}")
+                                    # Add other type coercions if necessary (e.g., Decimal, timedelta from string)
+                                except (ValueError, TypeError) as e:
+                                    log_warning(f"Type mismatch or conversion error for '{key_upper}' in {DYNAMIC_CONFIG_FILE}. Expected compatible with {target_type}, got {type(value)} ('{value}'). Error: {e}. Skipping update for this key.")
+                                    continue # Skip this key
+
+                                if value_to_set != current_value_active:
+                                    self.config[key_upper] = value_to_set
+                                    changed_params[key_upper] = {"from": str(current_value_active), "to": str(value_to_set)}
+                                    updated_count += 1
                             else:
-                                log_warning(f"Unknown configuration key '{key_upper}' found in {DYNAMIC_CONFIG_FILE}. Ignoring.")
+                                # If key is not in current config, it's a new parameter. Add it.
+                                # Type is taken directly from JSON.
+                                self.config[key_upper] = value
+                                changed_params[key_upper] = {"from": "N/A (new)", "to": str(value)}
+                                updated_count +=1
+                                log_info(f"⚙️ Dynamic Config: Added new parameter '{key_upper}' = '{value}'")
+
 
                         if updated_count > 0:
                             log_info(f"Applied {updated_count} configuration updates from {DYNAMIC_CONFIG_FILE}.")
-                            # Optionally log the full updated config (can be verbose)
-                            # log_debug(f"Current active config: {self.config}")
+                            for k, v_change in changed_params.items():
+                                log_info(f"  - '{k}': from '{v_change['from']}' to '{v_change['to']}'")
+                            # Update components that depend on self.config if necessary
+                            if self.trading_manager: self.trading_manager.config = self.config
+                            if self.ws_handler: self.ws_handler.config = self.config
+                            if self.db_client: self.db_client.config = self.config # If DBClient uses it dynamically
+                            # ... update other components like Rugcheck, SocialsProcessor if they cache config values
                         else:
                             log_info(f"No configuration values changed in {DYNAMIC_CONFIG_FILE}.")
 
-                        self._last_dynamic_config_mtime = current_mtime # Update timestamp after successful processing
-
+                        self._last_dynamic_config_mtime = current_mtime
                     except FileNotFoundError:
-                        log_warning(f"{DYNAMIC_CONFIG_FILE} disappeared between check and read. Skipping.")
-                        self._last_dynamic_config_mtime = 0 # Reset time if file disappears
+                        log_warning(f"{DYNAMIC_CONFIG_FILE} disappeared. Skipping.")
+                        self._last_dynamic_config_mtime = 0
                     except json.JSONDecodeError as e:
-                        log_error(f"Error decoding JSON from {DYNAMIC_CONFIG_FILE}: {e}. Please ensure it's valid JSON. Skipping update.")
-                        # Don't update mtime on decode error, try again next time
-                    except IOError as e:
-                        log_error(f"Error reading {DYNAMIC_CONFIG_FILE}: {e}. Skipping update.")
-                        # Don't update mtime on IO error
+                        log_error(f"Error decoding JSON from {DYNAMIC_CONFIG_FILE}: {e}. Skipping.")
                     except Exception as e:
                          log_error(f"Unexpected error processing {DYNAMIC_CONFIG_FILE}: {e}", exc_info=True)
-                         # Update mtime to avoid potential infinite loop on malformed file? Risky.
                          self._last_dynamic_config_mtime = current_mtime
-
-
             except FileNotFoundError:
-                 # This handles the case where the file existed before but is deleted now
                  if self._last_dynamic_config_mtime != 0:
                       log_info(f"{DYNAMIC_CONFIG_FILE} was removed.")
-                      self._last_dynamic_config_mtime = 0 # Reset timestamp
+                      self._last_dynamic_config_mtime = 0
             except Exception as e:
                 log_error(f"Error in config_updater loop: {e}", exc_info=True)
-                # Prevent potential fast loop on persistent errors
                 await asyncio.sleep(30)
-
         log_info("⚙️ Dynamic config updater task shutting down.")
-    # --- End config_updater task ---
 
-    def _write_status(self, status):
-        """Writes the bot's status to the status file."""
+    def _write_status(self, status_data: dict):
+        """Writes the bot's status dictionary to the status JSON file."""
         try:
-            # Ensure data directory exists
-            os.makedirs(os.path.dirname(STATUS_FILE), exist_ok=True)
-            with open(STATUS_FILE, 'w') as f:
-                f.write(status.upper())
-            log_debug(f"Status updated to: {status.upper()}")
+            with open(STATUS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(status_data, f, indent=4)
+            # log_debug(f"Status updated to: {status_data.get('bot_process_status', 'UNKNOWN')}")
         except IOError as e:
             log_error(f"Error writing status file {STATUS_FILE}: {e}")
         except Exception as e:
              log_error(f"Unexpected error writing status file: {e}", exc_info=True)
 
-    #     log_info("⚙️ Dynamic config updater task shutting down.")
-    async def config_updater(self):
-        """Periodically checks dynamic_config.json for updates and applies them."""
-        log_info(f"⚙️ Dynamic config updater started. Watching: {os.path.abspath(DYNAMIC_CONFIG_FILE)}")
+    async def status_updater(self):
+        """Periodically gathers and writes detailed bot status to bot_status.json."""
+        log_info("🚀 Status updater task started.")
+        current_process_status = "STARTING" # Initial status
 
         while not self.state.shutdown_event.is_set():
-            await asyncio.sleep(10)  # Check every 10 seconds
             try:
-                if not os.path.exists(DYNAMIC_CONFIG_FILE):
-                    continue  # Nothing to do if file doesn't exist
+                # Determine current bot process status
+                if self.state.shutdown_event.is_set(): # Check if shutdown initiated
+                    current_process_status = "STOPPING"
+                elif not self.tasks or any(t.done() and not t.cancelled() and t.exception() for t in self.tasks if t.get_name() not in ["command_listener", "status_updater", "config_updater", "task_monitor"]): # Check for critical task failures
+                    # Exclude auxiliary tasks from causing ERROR state if they fail,
+                    # focus on core tasks like ws_handlers, price_updater, workers, buy/sell checkers.
+                    critical_tasks_failed = False
+                    for task in self.tasks:
+                        if task.done() and not task.cancelled() and task.exception():
+                             # Define which tasks are critical
+                            critical_task_names = ["ws_", "sol_price_updater", "trade_worker", "rugcheck_worker", "socialscheck_worker", "buy_opportunity_checker", "sell_opportunity_checker"]
+                            if any(ct_name in task.get_name() for ct_name in critical_task_names):
+                                log_error(f"Critical task {task.get_name()} failed: {task.exception()}. Setting status to ERROR.")
+                                critical_tasks_failed = True
+                                break
+                    if critical_tasks_failed:
+                        current_process_status = "ERROR"
+                    elif current_process_status != "STOPPING": # Don't override STOPPING
+                        current_process_status = "RUNNING" # If no critical failures and not stopping
+                elif current_process_status != "STOPPING": # If tasks are running and not stopping
+                     current_process_status = "RUNNING"
 
-                current_mtime = os.path.getmtime(DYNAMIC_CONFIG_FILE)
 
-                if current_mtime > self._last_dynamic_config_mtime:
-                    log_info(f"Detected change in {DYNAMIC_CONFIG_FILE}. Attempting to load updates.")
-                    try:
-                        with open(DYNAMIC_CONFIG_FILE, 'r') as f:
-                            dynamic_conf = json.load(f)
+                # Gather status data points
+                uptime_seconds = (datetime.now(timezone.utc) - self.bot_start_time).total_seconds()
+                active_subs = await self.state.get_token_subscriptions() # This is from bot's GlobalState
+                
+                sol_balance = await self.state.get_current_sol_balance()
+                sol_price = await self.state.get_sol_price()
+                sol_balance_usd = (sol_balance * sol_price) if sol_balance is not None and sol_price is not None else 0.0
 
-                        if not isinstance(dynamic_conf, dict):
-                            log_warning(f"Invalid format in {DYNAMIC_CONFIG_FILE}: Expected JSON object. Skipping update.")
-                            self._last_dynamic_config_mtime = current_mtime
-                            continue
+                # Example: Get counts for active tasks (excluding self and other utility tasks)
+                # This is a simple count, more sophisticated tracking might be needed
+                active_async_tasks = [
+                    t for t in asyncio.all_tasks(loop=self.loop) 
+                    if not t.done() and t is not asyncio.current_task()
+                ]
 
-                        # Convert specific lists to sets before processing
-                        set_conversions = {
-                            'SOCIALS_DISALLOWED_WEBSITE_DOMAINS': set,
-                            'SOCIALS_ALLOWED_NEWS_DOMAINS': set
-                        }
-                        for key, converter in set_conversions.items():
-                            if key in dynamic_conf and isinstance(dynamic_conf[key], list):
-                                dynamic_conf[key] = converter(dynamic_conf[key])
 
-                        updated_count = 0
-                        for key, value in dynamic_conf.items():
-                            key_upper = key.upper()
-                            if key_upper in self.config:
-                                current_value = self.config[key_upper]
+                # Key configuration items to display (be selective)
+                # Use self._filter_serializable_config to ensure it's JSON friendly
+                config_summary = self._filter_serializable_config({
+                    "SOL_TO_BUY": self.config.get("SOL_TO_BUY"),
+                    "INITIAL_STOP_LOSS_PERCENT": self.config.get("INITIAL_STOP_LOSS_PERCENT"),
+                    "FIRST_SELL_PERCENT": self.config.get("FIRST_SELL_PERCENT"),
+                    "TRAILING_STOP_LOSS_PERCENT": self.config.get("TRAILING_STOP_LOSS_PERCENT"),
+                    "DEFAULT_VOLUME_THRESHOLD": self.config.get("DEFAULT_VOLUME_THRESHOLD"),
+                    "DEFAULT_MARKETCAP_THRESHOLD": self.config.get("DEFAULT_MARKETCAP_THRESHOLD"),
+                    "RL_AGENT_ACTIVE": bool(self.rl_agent) # Indicate if RL agent is loaded
+                })
+                
+                rl_status_info = "Not Loaded"
+                if self.rl_agent:
+                    # Placeholder: In a real scenario, you might get more detailed status from the agent
+                    # For example, if your RLAgentManager has a get_status method:
+                    # rl_status_info = self.rl_agent_manager.get_status() # if you have such a manager
+                    rl_status_info = "Loaded & Active"
 
-                                # Handle set comparisons properly
-                                if isinstance(value, set) and isinstance(current_value, set):
-                                    if value != current_value:
-                                        self.config[key_upper] = value
-                                        log_info(f"⚙️ Dynamic Config Update: '{key_upper}' changed to {value}")
-                                        updated_count += 1
-                                    continue
 
-                                # Original type checking logic
-                                if isinstance(value, type(current_value)) or \
-                                (isinstance(value, int) and isinstance(current_value, float)):
-                                    # Type conversion logic
-                                    if isinstance(value, int) and isinstance(current_value, float):
-                                        value_to_set = float(value)
-                                    else:
-                                        value_to_set = value
+                status_data = {
+                    "bot_process_status": current_process_status,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "uptime_seconds": int(uptime_seconds),
+                    "active_token_subscriptions_count": len(active_subs),
+                    # "active_token_subscriptions_list": list(active_subs)[:20], # Example: limit list size
+                    "current_sol_balance": round(sol_balance, 6) if sol_balance is not None else None,
+                    "current_sol_price_usd": round(sol_price, 4) if sol_price is not None else None,
+                    "current_portfolio_value_usd": round(sol_balance_usd, 2),
+                    "rugcheck_queue_size": self.state.get_rugcheck_queue().qsize(),
+                    "socialscheck_queue_size": self.state.get_socialscheck_queue().qsize(),
+                    "asyncio_tasks_count": len(active_async_tasks), # Tasks in bot's loop
+                    "config_summary": config_summary,
+                    "rl_agent_status": rl_status_info,
+                    # Add other fields as needed:
+                    # "last_buy_check_ts": self.trading_manager.last_buy_check_ts.isoformat() if self.trading_manager and hasattr(self.trading_manager, 'last_buy_check_ts') else None,
+                    # "last_sell_check_ts": self.trading_manager.last_sell_check_ts.isoformat() if self.trading_manager and hasattr(self.trading_manager, 'last_sell_check_ts') else None,
+                }
 
-                                    if value_to_set != current_value:
-                                        self.config[key_upper] = value_to_set
-                                        log_info(f"⚙️ Dynamic Config Update: '{key_upper}' changed from {current_value} to {value_to_set}")
-                                        updated_count += 1
-                                else:
-                                    log_warning(f"Type mismatch for '{key_upper}'. Expected {type(current_value)}, got {type(value)}. Skipping.")
+                self._write_status(status_data)
+                await asyncio.sleep(5) # Update status every 5 seconds
 
-                        if updated_count > 0:
-                            log_info(f"Applied {updated_count} configuration updates from {DYNAMIC_CONFIG_FILE}.")
-                        else:
-                            log_info("No configuration values changed in dynamic config.")
-
-                        self._last_dynamic_config_mtime = current_mtime
-
-                    except json.JSONDecodeError as e:
-                        log_error(f"JSON decode error in {DYNAMIC_CONFIG_FILE}: {e}. Skipping update.")
-                    except Exception as e:
-                        log_error(f"Error processing dynamic config: {e}", exc_info=True)
-
-            except FileNotFoundError:
-                if self._last_dynamic_config_mtime != 0:
-                    log_info(f"{DYNAMIC_CONFIG_FILE} was removed.")
-                    self._last_dynamic_config_mtime = 0
+            except asyncio.CancelledError:
+                log_info(":stop_sign: Status updater task shutting down.")
+                break # Exit loop
             except Exception as e:
-                log_error(f"Error in config_updater loop: {e}", exc_info=True)
-                await asyncio.sleep(30)
-
-        log_info("⚙️ Dynamic config updater task shutting down.")
-    # --- End config_updater task ---
+                log_error(f":x: Error in status updater: {e}", exc_info=True)
+                # Write an error status if the updater itself fails critically
+                self._write_status({"bot_process_status": "ERROR_IN_STATUS_UPDATER", "error_message": str(e), "timestamp": datetime.now(timezone.utc).isoformat()})
+                await asyncio.sleep(15) # Wait longer on error to avoid spamming logs
+        
+        # Final status write on shutdown
+        log_info("Status updater task finished. Writing final STOPPED status.")
+        self._write_status({"bot_process_status": "STOPPED", "timestamp": datetime.now(timezone.utc).isoformat()})
 
     async def monitor_tasks(self):
         """Monitor and log the status of background tasks."""
@@ -372,161 +391,73 @@ class TradingBot:
 
     async def command_listener(self):
         """Periodically checks the command file for STOP command."""
-        last_command = None
+        last_command_content = None
         try:
             while not self.state.shutdown_event.is_set():
-                command = None
+                current_command_content = None
                 try:
                     if os.path.exists(COMMAND_FILE):
-                        with open(COMMAND_FILE, 'r') as f:
-                            command = f.read().strip().upper()
+                        with open(COMMAND_FILE, 'r', encoding='utf-8') as f:
+                            current_command_content = f.read().strip()
 
-                        if command == "STOP" and last_command != "STOP":
-                            log_info(f":hand: Received STOP command from {COMMAND_FILE}. Initiating shutdown...")
-                            self.state.trigger_shutdown() # Trigger internal shutdown
-                            last_command = "STOP"
-                            # Optionally delete the command file after processing
-                            try:
-                                os.remove(COMMAND_FILE)
-                                log_debug(f"Removed command file: {COMMAND_FILE}")
-                            except OSError as e:
-                                log_error(f"Error removing command file {COMMAND_FILE}: {e}")
-                            try:
-                                os.remove(COMMAND_FILE)
-                                log_debug(f"Removed command file: {COMMAND_FILE}")
-                            except OSError as e:
-                                log_error(f"Error removing command file {COMMAND_FILE}: {e}")
-                            break # Exit listener loop once stop is triggered
+                        if current_command_content and current_command_content != last_command_content:
+                            log_info(f"Received command via {COMMAND_FILE}: '{current_command_content}'")
+                            last_command_content = current_command_content # Update last command processed
 
-                        elif command == "START" and last_command != "START":
-                             log_info(f":arrow_forward: Received START command from {COMMAND_FILE}. Bot should already be starting/running.")
-                             last_command = "START"
-                             # Optionally delete START command file? Or leave it?
-                             # If left, bot might re-log this message on restart.
-
-                        elif command == "UNSUB_NEWTOKEN" and last_command != "UNSUB_NEWTOKEN":
-                            log_info(f":no_bell: Received UNSUB_NEWTOKEN command from {COMMAND_FILE}.")
-                            last_command = "UNSUB_NEWTOKEN"
-                            if self.ws_handler:
+                            # Process command
+                            command_upper = current_command_content.upper()
+                            if command_upper == "STOP":
+                                log_info(f":hand: STOP command processed. Initiating shutdown...")
+                                self.state.trigger_shutdown()
+                                # Clear command file after processing
                                 try:
-                                    await self.ws_handler.unsubscribe_new_tokens()
-                                except Exception as e:
-                                     log_error(f"Error calling unsubscribe_new_tokens: {e}", exc_info=True)
-                            else:
-                                log_warning("Cannot unsubscribe new tokens: WebSocket handler not ready.")
-                            # Clear the command file after processing
-                            try:
-                                with open(COMMAND_FILE, 'w') as f: f.write("") # Clear file
-                                log_debug(f"Cleared command file: {COMMAND_FILE}")
-                            except OSError as e:
-                                log_error(f"Error clearing command file {COMMAND_FILE}: {e}")
-
-                        elif command == "UNSUB_NEWTOKEN" and last_command != "UNSUB_NEWTOKEN":
-                            log_info(f":no_bell: Received UNSUB_NEWTOKEN command from {COMMAND_FILE}.")
-                            last_command = "UNSUB_NEWTOKEN"
-                            if self.ws_handler:
+                                    with open(COMMAND_FILE, 'w', encoding='utf-8') as f_clear: f_clear.write("")
+                                except OSError as e_clear: log_error(f"Error clearing command file: {e_clear}")
+                                break # Exit listener loop
+                            elif command_upper == "UNSUB_NEWTOKEN":
+                                log_info(f":no_bell: UNSUB_NEWTOKEN command processed.")
+                                if self.ws_handler:
+                                    asyncio.create_task(self.ws_handler.unsubscribe_new_tokens())
+                                else: log_warning("WS handler not ready for UNSUB_NEWTOKEN.")
                                 try:
-                                    await self.ws_handler.unsubscribe_new_tokens()
-                                except Exception as e:
-                                     log_error(f"Error calling unsubscribe_new_tokens: {e}", exc_info=True)
+                                    with open(COMMAND_FILE, 'w', encoding='utf-8') as f_clear: f_clear.write("")
+                                except OSError as e_clear: log_error(f"Error clearing command file: {e_clear}")
+                            # Add more commands here (e.g., RELOAD_CONFIG, GET_STATUS)
+                            # For GET_STATUS, the bot could write its current status_data to a response file.
                             else:
-                                log_warning("Cannot unsubscribe new tokens: WebSocket handler not ready.")
-                            # Clear the command file after processing
-                            try:
-                                with open(COMMAND_FILE, 'w') as f: f.write("") # Clear file
-                                log_debug(f"Cleared command file: {COMMAND_FILE}")
-                            except OSError as e:
-                                log_error(f"Error clearing command file {COMMAND_FILE}: {e}")
+                                log_warning(f"Unknown command '{current_command_content}' in {COMMAND_FILE}. Ignoring.")
+                                try: # Clear unknown commands too
+                                    with open(COMMAND_FILE, 'w', encoding='utf-8') as f_clear: f_clear.write("")
+                                except OSError as e_clear: log_error(f"Error clearing command file: {e_clear}")
 
-                        elif command and command not in ["START", "STOP", "UNSUB_NEWTOKEN"] and command != last_command:
-                             log_warning(f"Ignoring unknown command '{command}' in {COMMAND_FILE}")
-                             last_command = command # Avoid re-logging warning
-                             # Clear the command file after processing unknown command
-                             try:
-                                 with open(COMMAND_FILE, 'w') as f: f.write("") # Clear file
-                                 log_debug(f"Cleared command file: {COMMAND_FILE}")
-                             except OSError as e:
-                                 log_error(f"Error clearing command file {COMMAND_FILE}: {e}")
-
-                        elif not command and last_command:
-                            # If file is now empty, reset last_command to allow re-reading
-                            last_command = None
-                             # Clear the command file after processing unknown command
-                            try:
-                                 with open(COMMAND_FILE, 'w') as f: f.write("") # Clear file
-                                 log_debug(f"Cleared command file: {COMMAND_FILE}")
-                            except OSError as e:
-                                 log_error(f"Error clearing command file {COMMAND_FILE}: {e}")
-
-                        elif not command and last_command:
-                            # If file is now empty, reset last_command to allow re-reading
-                            last_command = None
-
+                        elif not current_command_content and last_command_content:
+                            # If file is now empty, reset last_command_content
+                            last_command_content = None
                 except IOError as e:
                     log_error(f"Error reading command file {COMMAND_FILE}: {e}")
                 except Exception as e:
                     log_error(f"Unexpected error in command listener: {e}", exc_info=True)
 
-                await asyncio.sleep(5) # Check command file every 5 seconds
+                await asyncio.sleep(5)
         except asyncio.CancelledError:
             log_info(":stop_sign: Command listener task shutting down.")
         finally:
              log_debug("Command listener task finished.")
 
-    # async def shutdown(self):
-    #     """Gracefully shut down all tasks and close resources."""
-    #     log_info(":stop_button: [bold red]Shutdown initiated[/bold red]. Cleaning up resources...")
-    #     self._write_status("STOPPING") # Update status during shutdown
-    #     try:
-    #         await asyncio.wait_for(self.ws_handler.shutdown(), timeout=60)
-    #         log_info(":link: WebSocket shutdown complete.")
-    #     except Exception as e:
-    #         log_error(f":x: WebSocket shutdown error: {e}", exc_info=True)
-
-    #     for task in self.tasks:
-    #         task.cancel()
-    #         log_debug(f":no_entry: Cancelling task: {task.get_name()}")
-
-    #     # Backup creator wallets before closing the pool
-    #     try:
-    #         await self.db_client.backup_creator_wallets()
-    #     except Exception as e:
-    #         log_error(f":x: Error backing up creator wallets during shutdown: {e}", exc_info=True)
-
-    #     if self.db_client and self.db_client.pool: # Check if pool exists before closing
-    #         await self.db_client.pool.close()
-    #         log_info(":electric_plug: Database connection closed.")
-    #     else:
-    #         log_info(":electric_plug: Database connection already closed or not initialized.")
-
-
-    #     pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-    #     if pending:
-    #         log_info(f"Waiting for {len(pending)} pending tasks to cancel...")
-    #         await asyncio.gather(*pending, return_exceptions=True)
-    #         log_info("Pending tasks cancelled.")
-    #     else:
-    #          log_info("No pending tasks found.")
-
-    #     self._write_status("STOPPED") # Final status update
-    #     log_info(":checkered_flag: Shutdown complete.")
-
     async def shutdown(self):
-        """Gracefully shut down all tasks and close resources."""
-        # Check if shutdown is already triggered to prevent redundant logs/actions
-        if self.state.shutdown_event.is_set():
-            # log_debug("Shutdown already in progress.") # Optional debug log
-            return # Avoid running shutdown multiple times
+        if self.state.shutdown_event.is_set() and getattr(self, '_shutdown_called', False):
+            log_debug("Shutdown already called and in progress.")
+            return
+        self._shutdown_called = True # Mark that shutdown has been called
 
         log_info(":stop_button: [bold red]Shutdown initiated[/bold red]. Cleaning up resources...")
-        self._write_status("STOPPING") # Update status during shutdown
-        self.state.trigger_shutdown() # Ensure event is set
+        # Initial status write, status_updater will write final STOPPED
+        self._write_status({"bot_process_status": "STOPPING", "timestamp": datetime.now(timezone.utc).isoformat()})
+        self.state.trigger_shutdown()
 
-        # Gracefully shutdown WebSocket Handler first
         if self.ws_handler:
             try:
                 log_info("Attempting WebSocket shutdown...")
-                # Give WS handler some time to send unsub messages etc.
                 await asyncio.wait_for(self.ws_handler.shutdown(), timeout=15.0)
                 log_info(":link: WebSocket shutdown complete.")
             except asyncio.TimeoutError:
@@ -534,62 +465,45 @@ class TradingBot:
             except Exception as e:
                 log_error(f":x: WebSocket shutdown error: {e}", exc_info=True)
         else:
-            log_info("WebSocket handler not initialized, skipping shutdown.")
+            log_info("WebSocket handler not initialized, skipping its shutdown.")
 
-
-        # Cancel all managed tasks
-        cancelled_tasks = []
-        for task in self.tasks:
-            if task and not task.done():
-                 task.cancel()
-                 log_debug(f":no_entry: Cancelling task: {task.get_name()}")
-                 cancelled_tasks.append(task)
-            elif task and task.done():
-                 # Check for exceptions in already completed tasks
-                 try:
-                     task.result() # Raise exception if task failed
-                 except asyncio.CancelledError:
-                      pass # Expected
-                 except Exception as e:
-                      log_error(f"Task {task.get_name()} finished with error before cancellation: {e}", exc_info=True)
-
+        active_tasks_before_cancel = [t for t in self.tasks if t and not t.done()]
+        log_info(f"Cancelling {len(active_tasks_before_cancel)} managed tasks...")
+        for task in active_tasks_before_cancel:
+            task.cancel()
+            log_debug(f":no_entry: Sent cancel request to task: {task.get_name()}")
 
         # Wait for tasks to actually cancel
-        if cancelled_tasks:
-            log_info(f"Waiting for {len(cancelled_tasks)} tasks to cancel...")
-            await asyncio.gather(*cancelled_tasks, return_exceptions=True)
-            log_info("Remaining tasks cancelled.")
-
-        # Backup creator wallets before closing the pool
-        if self.db_client and self.db_client.pool: # Check if connected
-            try:
-                 await self.db_client.backup_creator_wallets()
-            except Exception as e:
-                log_error(f":x: Error backing up creator wallets during shutdown: {e}", exc_info=True)
-        else:
-            log_info("DB client not connected, skipping creator wallet backup.")
+        if active_tasks_before_cancel:
+            results = await asyncio.gather(*active_tasks_before_cancel, return_exceptions=True)
+            for i, result in enumerate(results):
+                task_name = active_tasks_before_cancel[i].get_name()
+                if isinstance(result, asyncio.CancelledError):
+                    log_debug(f"Task {task_name} cancelled successfully.")
+                elif isinstance(result, Exception):
+                    log_error(f"Task {task_name} raised an exception during cancellation: {result}", exc_info=result)
+                # else: log_debug(f"Task {task_name} finished with result: {result}") # If it completed normally before cancel took effect
+            log_info("All managed tasks processed for cancellation.")
 
 
-        # Close DB connection Pool
         if self.db_client and self.db_client.pool:
             try:
+                 await self.db_client.backup_creator_wallets() # Backup before closing
+            except Exception as e:
+                log_error(f":x: Error backing up creator wallets: {e}", exc_info=True)
+            try:
                 log_info("Closing database connection pool...")
-                await self.db_client.close() # Close the pool via the client method
+                await self.db_client.close()
                 log_info(":electric_plug: Database connection pool closed.")
             except Exception as e:
                  log_error(f"Error closing database pool: {e}", exc_info=True)
         else:
-            log_info(":electric_plug: Database connection already closed or not initialized.")
+            log_info("DB client not connected or pool not initialized, skipping DB cleanup.")
 
-
-        # Check for any remaining pending tasks (shouldn't be many)
-        pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task() and not t.done()]
-        if pending:
-            log_warning(f"Found {len(pending)} unexpected pending tasks after shutdown sequence. Attempting final gather.")
-            await asyncio.gather(*pending, return_exceptions=True)
-
-        self._write_status("STOPPED") # Final status update
-        log_info(":checkered_flag: Shutdown complete.")
+        # Final status is written by status_updater's finally block
+        log_info(":checkered_flag: Bot shutdown sequence complete.")
+        # Force exit if some non-daemon threads/tasks are stuck (use with caution)
+        # os._exit(0)
 
     # --- RL Agent Integration Functions ---
     async def _get_live_observation(self) -> np.ndarray | None:
@@ -806,26 +720,21 @@ class TradingBot:
     # --- End RL Agent Integration Functions ---
 
     async def main(self):
-        """Main entry point for setting up and starting the bot."""
-        self._write_status("STARTING")
+        self._write_status({"bot_process_status": "STARTING", "timestamp": datetime.now(timezone.utc).isoformat()})
         is_main_thread = threading.current_thread() is threading.main_thread()
 
         if is_main_thread:
             log_info("Running in main thread. Performing log rotation and registering signal handlers.")
-            rotate_log_file()
+            rotate_log_file() # Rotate log file at the very start
+            self.register_signal_handlers() # Register signals if in main thread
         else:
              log_info("Running in a secondary thread. Skipping log rotation and signal handlers.")
+        
+        setup_logging() # Setup logging regardless
 
-        # Setup logging regardless of thread (moved from inside thread check)
-        setup_logging()
-
-        if is_main_thread:
-            self.register_signal_handlers()
-
-        # --- Load GA Parameters (if provided) ---
-        if self.params_file and not self.rl_agent_path: # Only load GA if RL not specified
+        # --- Load GA Parameters (if provided and RL not active) ---
+        if self.params_file and not self.rl_agent_path:
             log_info(f":dna: Attempting to load GA optimized parameters from: {self.params_file}")
-            # ... (rest of GA param loading logic - same as before) ...
             if os.path.exists(self.params_file):
                 try:
                     with open(self.params_file, 'r') as f:
@@ -834,18 +743,20 @@ class TradingBot:
                     if optimized_params:
                         log_info(f":white_check_mark: Found {len(optimized_params)} GA optimized parameters.")
                         for key, value in optimized_params.items():
-                          if key in self.config:
-                              # Optional: Add type conversion logic here if needed
-                              self.config[key] = value
-                          else:
-                              log_warning(f"GA Param '{key}' not found in base config. Adding anyway.")
-                              self.config[key] = value
-
+                            key_upper = key.upper() # Ensure uppercase for consistency
+                            if key_upper in self.config:
+                                original_type = type(self.config[key_upper])
+                                try: # Attempt type conversion
+                                    self.config[key_upper] = original_type(value)
+                                except (ValueError, TypeError):
+                                    log_warning(f"Could not convert GA param '{key_upper}' value '{value}' to type {original_type}. Using as is.")
+                                    self.config[key_upper] = value
+                            else:
+                                log_warning(f"GA Param '{key_upper}' not found in base config. Adding anyway.")
+                                self.config[key_upper] = value
                         log_info(":sparkles: Merged GA optimized parameters into active configuration.")
-                        overridden_keys = set(self.base_config.keys()) & set(optimized_params.keys())
-                        log_debug(f"Overridden by GA: {overridden_keys}")
                     else:
-                        log_warning(f":warning: 'best_solution_parameters' not found in {self.params_file}. Using base/default config.")
+                        log_warning(f":warning: 'best_solution_parameters' not found in {self.params_file}.")
                 except Exception as e:
                     log_error(f":x: Error loading GA parameters file {self.params_file}: {e}. Using base/default config.", exc_info=True)
             else:
@@ -855,232 +766,207 @@ class TradingBot:
         if self.rl_agent_path:
             if not RL_AVAILABLE:
                 log_error(":x: RL Agent path specified, but Stable Baselines3 library is not installed!")
-                log_error("Please install it: pip install stable-baselines3[extra]>=2.0.0a5")
-                self.rl_agent_path = None # Disable RL mode
             else:
                 log_info(f":brain: Attempting to load RL agent from: {self.rl_agent_path}")
                 if os.path.exists(self.rl_agent_path):
                     try:
-                        # Determine agent class based on config or filename convention? Assume PPO for now.
-                        AgentClass = PPO # Or SAC, TD3 based on rl_config or how you save
-                        self.rl_agent = AgentClass.load(self.rl_agent_path)
+                        AgentClass = PPO # Or determine from rl_config.RL_ALGORITHM
+                        self.rl_agent = AgentClass.load(self.rl_agent_path, device='cpu') # Specify device
                         log_info(f":white_check_mark: Successfully loaded RL agent: {self.rl_agent_path}")
                         if self.params_file:
-                            log_warning(":information: RL agent loaded, ignoring GA parameters file.")
+                            log_warning(":information_source: RL agent loaded, GA parameters file will be ignored for initial config (RL will override).")
                     except Exception as e:
                         log_error(f":x: Failed to load RL agent from {self.rl_agent_path}: {e}", exc_info=True)
-                        self.rl_agent = None # Ensure agent is None if loading failed
+                        self.rl_agent = None
                 else:
                     log_warning(f":warning: RL Agent file not found: {self.rl_agent_path}. Cannot use RL agent.")
                     self.rl_agent = None
-
-        # --- Final Config Log ---
-        if self.rl_agent:
-             log_info(":robot: RL Agent will dynamically update parameters during runtime.")
-             if self.params_file:
-                log_warning(":information: RL agent loaded, ignoring GA parameters file for initial config (RL will override).")
-
-        # --- Ensure data directory exists ---
-        try:
-            os.makedirs(os.path.dirname(DYNAMIC_CONFIG_FILE), exist_ok=True)
-        except OSError as e:
-             log_error(f"Could not create data directory '{os.path.dirname(DYNAMIC_CONFIG_FILE)}': {e}")
-             # Decide if this is critical - maybe continue if dir already exists?
-
-        # --- Write Initial Config to JSON if it doesn't exist ---
+        
+        # --- Initialize DYNAMIC_CONFIG_FILE ---
         try:
             if not os.path.exists(DYNAMIC_CONFIG_FILE):
-                log_info(f"{DYNAMIC_CONFIG_FILE} not found. Writing initial configuration...")
-                # Filter out non-serializable types before writing
+                log_info(f"{DYNAMIC_CONFIG_FILE} not found. Writing initial active configuration...")
+                # Filter for JSON serializable before writing
                 config_to_write = self._filter_serializable_config(self.config)
                 with open(DYNAMIC_CONFIG_FILE, 'w', encoding='utf-8') as f:
-                    # Use indent for readability
                     json.dump(config_to_write, f, indent=4)
-                log_info(f"Successfully wrote initial configuration to {DYNAMIC_CONFIG_FILE}")
-                # Initialize the mtime tracker *after* writing the initial file
                 self._last_dynamic_config_mtime = os.path.getmtime(DYNAMIC_CONFIG_FILE)
             else:
-                log_info(f"Found existing {DYNAMIC_CONFIG_FILE}. Bot will use its contents for dynamic updates.")
-                # Initialize the mtime tracker with the existing file's time
+                log_info(f"Found existing {DYNAMIC_CONFIG_FILE}. Bot will use its contents for dynamic updates if changed.")
                 self._last_dynamic_config_mtime = os.path.getmtime(DYNAMIC_CONFIG_FILE)
-
-        except (IOError, OSError, TypeError, json.JSONDecodeError) as e: # Added TypeError for json.dump issues
+        except Exception as e:
              log_error(f"Error handling initial dynamic config file {DYNAMIC_CONFIG_FILE}: {e}", exc_info=True)
-             # Bot can likely continue, but dynamic updates might not work initially
-             self._last_dynamic_config_mtime = 0 # Ensure updater tries to read later if possible
-        # --- End Initial Config Write ---
-        log_debug(f":wrench: FINAL INITIAL CONFIG in use: {self.config}")
+             self._last_dynamic_config_mtime = 0
+
+        log_debug(f":wrench: FINAL INITIAL CONFIG in use by bot: {self.config}")
+
 
         # --- Database and Services Setup ---
         try:
-            self.db_client = DatabaseClient(self.config)
+            # Pass the active self.config to DatabaseClient if its __init__ expects it
+            self.db_client = DatabaseClient(config_dict=self.config)
             await self.db_client.connect()
-            await self.state.set_db_client(self.db_client)
+            await self.state.set_db_client(self.db_client) # Store in GlobalState for other modules
 
-            if self.backup:
+            if self.backup: # From command line arg
                 log_info(":floppy_disk: Starting database backup...")
                 await self.db_client.backup_db(backup_flag=True)
-                log_info(":white_check_mark: Database backup completed.")
-            if self.backup:
-                log_info(":floppy_disk: Starting database backup...")
-                await self.db_client.backup_db(backup_flag=True)
-                log_info(":white_check_mark: Database backup completed.")
-
-            if self.cleanup:
-                log_warning(":wastebasket: Starting database cleanup (dropping tables)...") # Changed to warning
+            if self.cleanup: # From command line arg
+                log_warning(":wastebasket: Starting database cleanup (dropping tables)...")
                 await self.db_client.cleanup_db(cleanup_flag=True)
-                log_info(":white_check_mark: Database cleanup finished.")
-                # No need to rotate log file again here
-            if self.cleanup:
-                log_warning(":wastebasket: Starting database cleanup (dropping tables)...") # Changed to warning
-                await self.db_client.cleanup_db(cleanup_flag=True)
-                log_info(":white_check_mark: Database cleanup finished.")
-                # No need to rotate log file again here
-
+            
             log_info(":rocket: [bold]Initializing database schema...[/bold]")
             await self.db_client.init_db()
-            log_info(":white_check_mark: Database schema initialized.")
             await self.db_client.restore_creator_wallets()
+            log_info(":white_check_mark: Database schema initialized and wallets restored.")
+
         except Exception as db_setup_err:
             log_critical(f"CRITICAL: Failed database setup: {db_setup_err}", exc_info=True)
-            self._write_status("ERROR")
-            return # Cannot continue without DB
-            log_info(":rocket: [bold]Initializing database schema...[/bold]")
-            await self.db_client.init_db()
-            log_info(":white_check_mark: Database schema initialized.")
-            await self.db_client.restore_creator_wallets()
-        except Exception as db_setup_err:
-             log_critical(f"CRITICAL: Failed database setup: {db_setup_err}", exc_info=True)
-             self._write_status("ERROR")
-             return # Cannot continue without DB
+            self._write_status({"bot_process_status": "ERROR_DB_SETUP", "error_message": str(db_setup_err), "timestamp": datetime.now(timezone.utc).isoformat()})
+            return
 
-        # --- Initialize Core Components ---
-        # Initialize ws_handler here now that config is ready
+        # --- Initialize Core Components (pass self.config) ---
         self.ws_handler = WebSocketHandler(db_client=self.db_client, config_dict=self.config, state_manager=self.state)
-        # Initialize ws_handler here now that config is ready
-        self.ws_handler = WebSocketHandler(db_client=self.db_client, config_dict=self.config, state_manager=self.state)
-        await self.ws_handler.connect()
-        await self.state.set_websocket_handler(self.ws_handler)
+        await self.ws_handler.connect() # Connect WS
+        await self.state.set_websocket_handler(self.ws_handler) # Store in GlobalState
 
-        # Pass the active self.config dictionary
         socials_proc = SocialsProcessor(state=self.state, db_client=self.db_client, config_dict=self.config)
         rugchecker = Rugcheck(state=self.state, db_client=self.db_client, websocket_handler=self.ws_handler, socials_processor=socials_proc, config_dict=self.config)
-        self.trading_manager = TradingManager(db_client=self.db_client, config_dict=self.config, state=self.state) # Pass config dict
+        self.trading_manager = TradingManager(db_client=self.db_client, config_dict=self.config, state=self.state)
 
 
         # --- Start Background Tasks ---
         self.tasks = [
-            asyncio.create_task(self.monitor_tasks(), name="task_monitor"),
+            asyncio.create_task(self.status_updater(), name="status_updater"), # Writes to bot_status.json
+            asyncio.create_task(self.config_updater(), name="config_updater"), # Reads dynamic_config.json
+            asyncio.create_task(self.command_listener(), name="command_listener"), # Reads bot_command.txt
+            asyncio.create_task(self.monitor_tasks(), name="task_monitor"), # Internal task logging
+            
             asyncio.create_task(update_sol_price(self.state, self.db_client), name="sol_price_updater"),
-            asyncio.create_task(trade_worker(), name="trade_worker"),
-            rugchecker.start(),
-            socials_proc.start(),
+            asyncio.create_task(trade_worker(), name="trade_worker"), # Uses self.state.db_client
+            rugchecker.start(), # Returns a task
+            socials_proc.start(), # Returns a task
+            
             asyncio.create_task(self.run_buy_checks(), name="buy_opportunity_checker"),
             asyncio.create_task(self.run_sell_checks(), name="sell_opportunity_checker"),
-            asyncio.create_task(self.status_updater(), name="status_updater"),
-            asyncio.create_task(self.command_listener(), name="command_listener"),
-            asyncio.create_task(self.config_updater(), name="config_updater")
         ]
-        # Start WebSocket tasks (listen, manage_subscriptions)
-        # Start WebSocket tasks (listen, manage_subscriptions)
-        self.tasks.extend(self.ws_handler.start())
+        self.tasks.extend(self.ws_handler.start()) # Add WebSocket handler's tasks
 
-        # --- Start RL Agent Update Task (if agent loaded) ---
         if self.rl_agent:
             self.tasks.append(asyncio.create_task(self.run_rl_agent_updates(), name="rl_agent_updater"))
+        
+        # Initial status update to RUNNING after all tasks are launched
+        # status_updater will take over from here.
+        # self._write_status({"bot_process_status": "RUNNING", "timestamp": datetime.now(timezone.utc).isoformat()})
+        # No, status_updater will set it to RUNNING on its first successful pass.
 
-        self._write_status("RUNNING") # Bot is now fully running
-
-        # # --- Main Execution Loop ---
-        # try:
-        #     log_info(":rocket: [bold green]Trading bot started successfully.[/bold green] Listening for market updates...")
-        #     await self.state.wait_for_shutdown()
-        # except Exception as e:
-        #     log_error(f"Main loop encountered an error: {e}", exc_info=True)
-        #     self._write_status("ERROR") # Set status to error if main loop crashes
-
-        # --- Main Execution Loop ---
+        log_info(":rocket: [bold green]Trading bot core components started.[/bold green]")
         try:
-            log_info(":rocket: [bold green]Trading bot started successfully.[/bold green] Listening for market updates...")
-            # Wait for any task to finish (usually the shutdown signal)
+            # Wait for any task to complete (e.g., if shutdown is triggered, command_listener might exit)
+            # Or if a critical task errors out.
             done, pending = await asyncio.wait(self.tasks, return_when=asyncio.FIRST_COMPLETED)
-            log_info(f"Primary task finished: { {t.get_name() for t in done} }. Initiating shutdown.")
-            # Trigger shutdown for remaining tasks if not already triggered
+            
+            # If we are here, one of the main tasks has finished.
+            # Check if it was due to an error or normal completion (like shutdown signal)
+            for task in done:
+                if task.exception():
+                    log_critical(f"Task {task.get_name()} exited with exception: {task.exception()}", exc_info=task.exception())
+                    self.state.trigger_shutdown() # Trigger shutdown if a task crashes
+                else:
+                    log_info(f"Task {task.get_name()} completed.")
+            
+            # If shutdown wasn't triggered by the completed task, wait for the shutdown event
             if not self.state.shutdown_event.is_set():
-                 self.state.trigger_shutdown()
+                log_info("A task completed, but shutdown not triggered. Waiting for shutdown signal...")
+                await self.state.wait_for_shutdown()
 
         except Exception as e:
-            log_critical(f"CRITICAL ERROR in main loop: {e}", exc_info=True)
-            log_critical(f"CRITICAL ERROR in main loop: {e}", exc_info=True)
-            self._write_status("ERROR") # Set status to error if main loop crashes
-            if not self.state.shutdown_event.is_set():
-                 self.state.trigger_shutdown() # Trigger shutdown on critical error
+            log_critical(f"CRITICAL ERROR in bot's main execution: {e}", exc_info=True)
+            self.state.trigger_shutdown() # Ensure shutdown is triggered on any main error
+        finally:
+            log_info("Main execution loop ended. Proceeding to full shutdown.")
+            # The shutdown method will handle cancelling remaining tasks and cleanup.
+            # No need to call self.shutdown() here as it's called in the final `finally` block of the script's entry point
 
-    # --- run_buy_checks / run_sell_checks (No changes needed here) ---
     async def run_buy_checks(self):
-        """Continuously check for buy opportunities."""
         log_info(":chart_with_upwards_trend: [bold]Starting buy opportunity checker...[/bold]")
         while not self.state.shutdown_event.is_set():
             try:
-                # TradingManager uses self.config, which might be updated by RL agent
-                await self.trading_manager.check_trading_opportunities()
-                await asyncio.sleep(10) # Consider if interval needs adjusting based on RL update freq
+                if self.trading_manager: # Ensure manager is initialized
+                    await self.trading_manager.check_trading_opportunities()
+                else:
+                    log_warning("TradingManager not initialized, buy checks skipped.")
+                await asyncio.sleep(self.config.get('BUY_CHECK_INTERVAL', 10)) # Use configured interval
             except asyncio.CancelledError:
                 log_info(":no_entry_sign: Buy checker task cancelled.")
                 break
             except Exception as e:
                 log_error(f":x: Error in buy checker loop: {e}", exc_info=True)
-                await asyncio.sleep(30)
+                await asyncio.sleep(self.config.get('BUY_CHECK_ERROR_RETRY_INTERVAL', 30))
 
     async def run_sell_checks(self):
-        """Continuously check for sell opportunities."""
         log_info(":chart_with_downwards_trend: [bold]Starting sell opportunity checker...[/bold]")
         while not self.state.shutdown_event.is_set():
             try:
-                 # TradingManager uses self.config, which might be updated by RL agent
-                await self.trading_manager.check_sell_opportunities()
-                await asyncio.sleep(3) # Consider if interval needs adjusting
+                if self.trading_manager: # Ensure manager is initialized
+                    await self.trading_manager.check_sell_opportunities()
+                else:
+                    log_warning("TradingManager not initialized, sell checks skipped.")
+                await asyncio.sleep(self.config.get('SELL_CHECK_INTERVAL', 3)) # Use configured interval
             except asyncio.CancelledError:
                 log_info(":no_entry_sign: Sell checker task cancelled.")
                 break
             except Exception as e:
                 log_error(f":x: Error in sell checker loop: {e}", exc_info=True)
-                await asyncio.sleep(12)
+                await asyncio.sleep(self.config.get('SELL_CHECK_ERROR_RETRY_INTERVAL', 12))
 
+# --- Main Script Entry Point (if running trading_bot.py directly) ---
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PumpTrader Bot")
     parser.add_argument("--cleanup", action="store_true", help="Clean up database before starting the bot. Deletes data permanently!")
     parser.add_argument("--backup", action="store_true", help="Backup database before starting the bot.")
     parser.add_argument("--params-file", type=str, default=None, help="Path to JSON file containing optimized parameters from GA.")
     parser.add_argument("--rl-agent-path", type=str, default=None, help="Path to the trained RL agent model file (e.g., .zip for SB3). Overrides --params-file.")
-
     args = parser.parse_args()
 
-    # Set policy for Windows
     if os.name == 'nt':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-    async def run_bot():
-        bot = TradingBot(
+    bot_instance = None # Keep a reference for shutdown
+
+    async def run_bot_async_wrapper(): # Renamed to avoid conflict
+        # nonlocal bot_instance # <--- REMOVED THIS LINE
+        global bot_instance # Use global if you need to modify the global bot_instance from the outer scope
+                           # For this structure, direct assignment works as bot_instance is in the same scope.
+                           # If run_bot_async_wrapper were truly nested inside another function
+                           # that defined bot_instance, then nonlocal would be appropriate for that inner function.
+
+        bot_instance = TradingBot(
             cleanup=args.cleanup,
             backup=args.backup,
             params_file=args.params_file,
             rl_agent_path=args.rl_agent_path
         )
         try:
-            await bot.main()
-        except (KeyboardInterrupt, SystemExit):
-            log_info(":stop_button: [bold red]Interrupted by user.[/bold red] Exiting.")
-        except Exception as e:
-            log_error(f":x: Unexpected error: {e}", exc_info=True)
+            await bot_instance.main()
+        except (KeyboardInterrupt, SystemExit) as ki_se: # Catch explicit interrupts
+            log_info(f":stop_button: [bold red]Interrupted by {type(ki_se).__name__}.[/bold red] Triggering shutdown...")
+            if bot_instance and not bot_instance.state.shutdown_event.is_set():
+                bot_instance.state.trigger_shutdown()
+        except Exception as e: # Catch other unexpected errors from main
+            log_critical(f":x: Unexpected error in bot's main execution: {e}", exc_info=True)
+            if bot_instance and not bot_instance.state.shutdown_event.is_set():
+                 bot_instance.state.trigger_shutdown() # Ensure shutdown is triggered
         finally:
-            await bot.shutdown()
+            if bot_instance:
+                log_info("Ensuring final shutdown process is called...")
+                await bot_instance.shutdown() # Call the bot's shutdown method
 
     try:
-        asyncio.run(run_bot())
-    except KeyboardInterrupt:
-        print("\nShutdown requested by user...")
-    except Exception as e:
-        print(f"Fatal error: {e}")
+        asyncio.run(run_bot_async_wrapper())
+    except KeyboardInterrupt: # This catches interrupt if it happens outside the async wrapper's try/except
+        log_info("\nTop-level KeyboardInterrupt. Bot should be shutting down.")
+    except Exception as e: # Catch errors during asyncio.run itself
+        log_critical(f"Fatal error during asyncio.run: {e}", exc_info=True)
     finally:
-        print("Bot shutdown complete.")
+        log_info("Trading Bot script finished.")

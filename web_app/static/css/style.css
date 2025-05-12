@@ -1,0 +1,86 @@
+body {
+    font-size: .875rem;
+}
+
+.sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 100; /* Behind the navbar */
+    padding: 48px 0 0; /* Height of navbar */
+    box-shadow: inset -1px 0 0 rgba(0, 0, 0, .1);
+}
+
+@media (max-width: 767.98px) {
+    .sidebar {
+        top: 5rem; /* Adjust if navbar height changes */
+    }
+}
+
+.sidebar-sticky {
+    position: relative;
+    top: 0;
+    height: calc(100vh - 48px); /* Adjust if navbar height changes */
+    padding-top: .5rem;
+    overflow-x: hidden;
+    overflow-y: auto; /* Scrollable contents if viewport is shorter than content. */
+}
+
+.sidebar .nav-link {
+    font-weight: 500;
+    color: #333;
+}
+
+.sidebar .nav-link .fas { /* Font Awesome icons */
+    margin-right: 8px;
+}
+
+.sidebar .nav-link.active {
+    color: #007bff;
+}
+
+.sidebar .nav-link:hover,
+.sidebar .nav-link.active {
+    color: #0056b3;
+}
+
+.navbar-brand {
+    padding-top: .75rem;
+    padding-bottom: .75rem;
+    font-size: 1rem;
+    background-color: rgba(0, 0, 0, .25);
+    box-shadow: inset -1px 0 0 rgba(0, 0, 0, .25);
+}
+
+.navbar .navbar-toggler {
+    top: .25rem;
+    right: 1rem;
+}
+
+/* Footer styling */
+.footer {
+    font-size: 0.8em;
+    /* fixed-bottom is applied via Bootstrap class */
+}
+
+#log-display {
+    font-family: monospace;
+    background-color: #272822; /* Monokai-like background */
+    color: #f8f8f2; /* Monokai-like text */
+    border: 1px solid #555;
+    max-height: 200px; /* Ensure it doesn't take too much space initially */
+}
+
+/* Main content padding to avoid overlap with fixed footer */
+#main-content-area {
+    padding-bottom: 200px; /* Adjust based on your footer's final height + some margin */
+}
+
+/* Card header styling */
+.card-header {
+    font-weight: bold;
+}
+.card-header .fas {
+    margin-right: 0.5em;
+}

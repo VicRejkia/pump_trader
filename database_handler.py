@@ -860,87 +860,87 @@ class DatabaseClient:
             logger.exception(f"Error backing up creator_wallets table: {e}")
             # Decide if we should raise or just log
 
-    async def restore_creator_wallets(self):
-        ## Restore creator_wallets table from backup
-        backup_path = os.path.abspath(os.path.join(
-            os.path.dirname(__file__), 
-            "data", 
-            "creator_wallets_backup.json"
-        ))
-        if os.path.exists(backup_path):
-            try:
-                with open(backup_path, "r") as f:
-                    data = json.load(f)
-                
-                # Generate and execute SQL statements dynamically
-                for record in data:
-                    wallet_address = record["wallet_address"]
-                    token_count = record["token_count"]
-                    last_token_time_str = f"'{record['last_token_time']}'" if record["last_token_time"] else "NULL"
-                    
-                    sql_line = (
-                        f"INSERT INTO creator_wallets (wallet_address, token_count, last_token_time) "
-                        f"VALUES ('{wallet_address}', {token_count}, {last_token_time_str}) "
-                        f"ON CONFLICT (wallet_address) DO UPDATE SET token_count = GREATEST(creator_wallets.token_count, EXCLUDED.token_count), "
-                        f"last_token_time = CASE WHEN EXCLUDED.token_count > creator_wallets.token_count THEN EXCLUDED.last_token_time ELSE creator_wallets.last_token_time END;"
-                    )
-                    async with self.pool.acquire() as conn:
-                        await conn.execute(sql_line)
-                
-                logger.info("Loaded backup data from %s", backup_path)
-            except Exception as e:
-                logger.exception("Error loading backup data: %s", e)
-                raise
-
     # async def restore_creator_wallets(self):
+    #     ## Restore creator_wallets table from backup
     #     backup_path = os.path.abspath(os.path.join(
     #         os.path.dirname(__file__), 
     #         "data", 
     #         "creator_wallets_backup.json"
     #     ))
+    #     if os.path.exists(backup_path):
+    #         try:
+    #             with open(backup_path, "r") as f:
+    #                 data = json.load(f)
+                
+    #             # Generate and execute SQL statements dynamically
+    #             for record in data:
+    #                 wallet_address = record["wallet_address"]
+    #                 token_count = record["token_count"]
+    #                 last_token_time_str = f"'{record['last_token_time']}'" if record["last_token_time"] else "NULL"
+                    
+    #                 sql_line = (
+    #                     f"INSERT INTO creator_wallets (wallet_address, token_count, last_token_time) "
+    #                     f"VALUES ('{wallet_address}', {token_count}, {last_token_time_str}) "
+    #                     f"ON CONFLICT (wallet_address) DO UPDATE SET token_count = GREATEST(creator_wallets.token_count, EXCLUDED.token_count), "
+    #                     f"last_token_time = CASE WHEN EXCLUDED.token_count > creator_wallets.token_count THEN EXCLUDED.last_token_time ELSE creator_wallets.last_token_time END;"
+    #                 )
+    #                 async with self.pool.acquire() as conn:
+    #                     await conn.execute(sql_line)
+                
+    #             logger.info("Loaded backup data from %s", backup_path)
+    #         except Exception as e:
+    #             logger.exception("Error loading backup data: %s", e)
+    #             raise
 
-    #     if not os.path.exists(backup_path):
-    #         logger.warning("Backup file not found: %s", backup_path)
-    #         return
+    async def restore_creator_wallets(self):
+        backup_path = os.path.abspath(os.path.join(
+            os.path.dirname(__file__), 
+            "data", 
+            "creator_wallets_backup.json"
+        ))
 
-    #     try:
-    #         with open(backup_path, "r") as f:
-    #             data = json.load(f)
+        if not os.path.exists(backup_path):
+            logger.warning("Backup file not found: %s", backup_path)
+            return
 
-    #         # Convert JSON data into tuples for faster insertion
-    #         records = [
-    #             (
-    #                 record["wallet_address"],
-    #                 record["token_count"],
-    #                 record.get("last_token_time")  # Use .get() to safely handle missing keys
-    #             )
-    #             for record in data
-    #         ]
+        try:
+            with open(backup_path, "r") as f:
+                data = json.load(f)
 
-    #         # Batch size
-    #         BATCH_SIZE = 100
+            # Convert JSON data into tuples for faster insertion
+            records = [
+                (
+                    record["wallet_address"],
+                    record["token_count"],
+                    datetime.fromisoformat(record["last_token_time"]) if record.get("last_token_time") else None
+                )
+                for record in data
+            ]
 
-    #         # Insert using batches
-    #         for i in range(0, len(records), BATCH_SIZE):
-    #             batch = records[i:i + BATCH_SIZE]
-    #             sql = """
-    #                 INSERT INTO creator_wallets (wallet_address, token_count, last_token_time)
-    #                 VALUES ($1, $2, $3)
-    #                 ON CONFLICT (wallet_address) DO UPDATE SET
-    #                     token_count = GREATEST(creator_wallets.token_count, EXCLUDED.token_count),
-    #                     last_token_time = CASE
-    #                         WHEN EXCLUDED.token_count > creator_wallets.token_count THEN EXCLUDED.last_token_time
-    #                         ELSE creator_wallets.last_token_time
-    #                     END;
-    #             """
-    #             async with self.pool.acquire() as conn:
-    #                 await conn.executemany(sql, batch)
+            # Batch size
+            BATCH_SIZE = 100
 
-    #         logger.info("Loaded backup data from %s (%d records)", backup_path, len(records))
+            # Insert using batches
+            for i in range(0, len(records), BATCH_SIZE):
+                batch = records[i:i + BATCH_SIZE]
+                sql = """
+                    INSERT INTO creator_wallets (wallet_address, token_count, last_token_time)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (wallet_address) DO UPDATE SET
+                        token_count = GREATEST(creator_wallets.token_count, EXCLUDED.token_count),
+                        last_token_time = CASE
+                            WHEN EXCLUDED.token_count > creator_wallets.token_count THEN EXCLUDED.last_token_time
+                            ELSE creator_wallets.last_token_time
+                        END;
+                """
+                async with self.pool.acquire() as conn:
+                    await conn.executemany(sql, batch)
 
-    #     except Exception as e:
-    #         logger.exception("Error loading backup data: %s", e)
-    #         raise
+            logger.info("Loaded backup data from %s (%d records)", backup_path, len(records))
+
+        except Exception as e:
+            logger.exception("Error loading backup data: %s", e)
+            raise
 
     async def get_total_tracked_tokens(self, backedup=False):
         """Fetches the total number of tracked tokens from the database."""
