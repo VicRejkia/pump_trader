@@ -1,569 +1,462 @@
-import os
-import threading
-import queue
 import sys
+import os
+import json
 import asyncio
-import pandas as pd
-from flask import Flask, request, jsonify, render_template
-import json         # For reading the price file
-import requests     # For synchronous API fallback
-import time         # For checking file age
-import os           # For file path operations
-from datetime import datetime, timezone
-import numpy as np
+from datetime import datetime, timezone, timedelta
+import pandas as pd # For chart data handling
 
-# Add project root to the Python path to allow importing modules from the parent directory
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
+from flask import Flask, render_template, jsonify, request, send_from_directory
 
+# --- Add Project Root to Python Path ---
+# This allows importing modules from the parent directory (your bot's root)
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+# --- Import from your Trading Bot Project ---
 try:
     from database_handler import DatabaseClient
-    from trading_bot import TradingBot
-    from state_manager import GlobalState
-    # Only import log_queue, not the logger instance or setup function from logger.py
-    from logger import log_queue
-    import config  # Import the API URL
+    from state_manager import GlobalState, SOL_PRICE_FILE # Import SOL_PRICE_FILE if defined there
+    import config as bot_config_module # Alias to avoid naming conflict
+    from logger import _LOG_STORAGE_PATH as BOT_LOG_DIR_CONFIG, _LOGGER_NAME as BOT_LOGGER_NAME_CONFIG
+    # Import any other necessary utilities or configs
 except ImportError as e:
-    print(f"Error importing modules: {e}. Make sure you are running from the project root or the necessary modules are in the Python path.")
+    print(f"CRITICAL ERROR: Could not import trading bot modules: {e}")
+    print(f"Ensure the Flask app is in a 'web_app' subfolder of your main project, and all bot modules are in the root.")
+    print(f"PROJECT_ROOT tried: {PROJECT_ROOT}")
     sys.exit(1)
 
+# --- File Paths (relative to project root, derived from bot's config) ---
+DATA_DIR = os.path.join(PROJECT_ROOT, 'data') # Standard data directory
+# Use log path and name from the bot's config
+LOG_DIR = os.path.join(PROJECT_ROOT, BOT_LOG_DIR_CONFIG)
+LOG_FILE_NAME = f"{BOT_LOGGER_NAME_CONFIG}.log"
+LOG_FILE_PATH = os.path.join(LOG_DIR, LOG_FILE_NAME)
 
-# Define the path for the shared SOL price file (must match state_manager.py)
-SOL_PRICE_FILE = 'data/sol_price.json'
-MAX_FILE_AGE_SECONDS = 3600 # 5 minutes - how old the file can be before we call the API
+DYNAMIC_CONFIG_FILE = os.path.join(DATA_DIR, 'dynamic_config.json')
+BOT_STATUS_FILE = os.path.join(DATA_DIR, 'bot_status.txt') # Status file written by the bot
+# If SOL_PRICE_FILE is not in state_manager, define it:
+# SOL_PRICE_FILE = os.path.join(DATA_DIR, 'sol_price.json')
 
-# Removed global setup_logging() call. Bot will configure its own logging.
+
 app = Flask(__name__)
-# Removed redirection of Flask logger to keep logs separate
-# Flask logs will go to console by default
+app.secret_key = os.urandom(24)
 
-db_client = DatabaseClient()
+# --- Initialize Bot Components (Flask app gets its own instances) ---
+# These will be fresh instances. For live data from a *running bot process*,
+# the bot needs to write its state to files/DB that Flask can read.
+# The GlobalState singleton here will be specific to the Flask process.
+db_client = DatabaseClient(config_dict=None) # Pass config if your DBClient expects it from bot's config
+global_state = GlobalState.get_instance() # Flask app's instance of GlobalState
 
-# Define paths for communication files relative to project root
-COMMAND_FILE = os.path.join(project_root, 'data', 'bot_command.txt')
-STATUS_FILE = os.path.join(project_root, 'data', 'bot_status.txt')
-LOG_FILE = os.path.join(project_root, config.LOG_STORAGE_PATH, f"{config.LOGGER_NAME}.log")
+# --- Helper function to load base config from bot's config module ---
+def load_base_bot_config():
+    """Loads configuration from the bot's config module."""
+    config_dict = {}
+    skipped_keys = []
+    for key in dir(bot_config_module):
+        if key.isupper() and not key.startswith('_'):
+            value = getattr(bot_config_module, key)
+            if not callable(value) and not isinstance(value, type(sys)): # type(sys) is module
+                 # Skip types that are definitely not config values or not easily serializable by default
+                if isinstance(value, (set, timedelta)): # Example: convert set to list for JSON
+                    config_dict[key] = list(value) if isinstance(value, set) else str(value)
+                elif isinstance(value, (int, float, str, bool, list, dict, type(None))):
+                    config_dict[key] = value
+                else:
+                    skipped_keys.append(f"{key} (type: {type(value).__name__})")
+    if skipped_keys:
+        print(f"WebApp Info: Skipped loading some base config keys due to type: {', '.join(skipped_keys)}")
+    return config_dict
 
-async def get_db():
-    """Helper function to get a database connection."""
-    if not db_client.pool:
+BASE_BOT_CONFIG = load_base_bot_config()
+
+
+# Ensure data and log directories exist (Flask app might be first to run)
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
+if not os.path.exists(DYNAMIC_CONFIG_FILE):
+    print(f"Info: {DYNAMIC_CONFIG_FILE} not found. Creating with base bot config.")
+    # Initialize with base config if it doesn't exist, so UI has something to show
+    initial_dynamic_config = {k: v for k, v in BASE_BOT_CONFIG.items() if isinstance(v, (int, float, str, bool, list))}
+    try:
+        with open(DYNAMIC_CONFIG_FILE, 'w') as f:
+            json.dump(initial_dynamic_config, f, indent=4)
+    except Exception as e:
+        print(f"Error creating initial {DYNAMIC_CONFIG_FILE}: {e}")
+        with open(DYNAMIC_CONFIG_FILE, 'w') as f: # Create empty if base fails
+            json.dump({}, f)
+
+
+# --- Helper Functions (mostly same as before) ---
+def read_log_file(lines=100):
+    if not os.path.exists(LOG_FILE_PATH):
+        return f"Log file not found at: {LOG_FILE_PATH}"
+    try:
+        with open(LOG_FILE_PATH, 'r', encoding='utf-8') as f:
+            log_lines = f.readlines()
+            return "".join(log_lines[-lines:])
+    except Exception as e:
+        return f"Error reading log file: {str(e)}"
+
+def read_dynamic_config_file_content(): # Renamed to avoid conflict with variable
+    try:
+        with open(DYNAMIC_CONFIG_FILE, 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        print(f"Warning: {DYNAMIC_CONFIG_FILE} not found. Returning empty config.")
+        return {}
+    except json.JSONDecodeError:
+        print(f"Error: Invalid JSON in {DYNAMIC_CONFIG_FILE}. Returning empty config.")
+        return {"error": "Invalid JSON in config file"} # So UI can show error
+    except Exception as e:
+        print(f"Error reading {DYNAMIC_CONFIG_FILE}: {str(e)}. Returning empty config.")
+        return {"error": f"Error reading config: {str(e)}"}
+
+def write_dynamic_config_to_file(config_data): # Renamed to avoid conflict
+    try:
+        with open(DYNAMIC_CONFIG_FILE, 'w') as f:
+            json.dump(config_data, f, indent=4)
+        return True
+    except Exception as e:
+        print(f"Error writing dynamic config to {DYNAMIC_CONFIG_FILE}: {e}")
+        return False
+
+def get_bot_status_from_file():
+    try:
+        if os.path.exists(BOT_STATUS_FILE):
+            with open(BOT_STATUS_FILE, 'r') as f:
+                return f.read().strip().upper()
+        return "NOT_RUNNING_OR_STATUS_FILE_MISSING"
+    except Exception as e:
+        print(f"Error reading status file {BOT_STATUS_FILE}: {e}")
+        return "ERROR_READING_STATUS"
+
+async def get_live_sol_price_from_file():
+    """Reads SOL price from the file shared by the bot."""
+    try:
+        # Use SOL_PRICE_FILE from state_manager or defined above
+        if os.path.exists(SOL_PRICE_FILE): # SOL_PRICE_FILE defined in state_manager.py
+            with open(SOL_PRICE_FILE, 'r') as f:
+                data = json.load(f)
+                return data.get("price")
+        return None # Or a default/stale value
+    except Exception as e:
+        print(f"Error reading SOL price file ({SOL_PRICE_FILE}): {e}")
+        return None
+
+# --- Event Loop Management for Async DB Calls ---
+# This is a simplified way. For production, use an ASGI server.
+def async_adapter(awaitable):
+    """Runs an awaitable in a new event loop if not already in one."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:  # 'RuntimeError: There is no current event loop...'
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(awaitable)
+    # If already in a loop (e.g. under ASGI server), just await
+    return asyncio.ensure_future(awaitable)
+
+
+# --- Flask App Setup ---
+@app.before_request
+async def before_request_async():
+    # This ensures DB connection for async routes if needed
+    # However, with asyncpg, connections are typically acquired per query/transaction
+    if not db_client.pool: # Assuming pool is None if not connected
+        print("Attempting to connect DB client before request...")
         try:
             await db_client.connect()
-            app.logger.info("Database connection established.")
+            print("DB client connected via before_request_async.")
         except Exception as e:
-            app.logger.error(f"Failed to connect to database: {e}")
-            raise # Re-raise to handle in the route
-    return db_client
-
-# --- Helper Functions for File Flags ---
-def write_command(command):
-    """Writes a command (START/STOP) to the command file."""
-    try:
-        with open(COMMAND_FILE, 'w') as f:
-            f.write(command.upper())
-        app.logger.info(f"Wrote command '{command}' to {COMMAND_FILE}")
-    except IOError as e:
-        app.logger.error(f"Error writing command file {COMMAND_FILE}: {e}")
-
-def read_status():
-    """Reads the status (RUNNING/STOPPED) from the status file."""
-    try:
-        if os.path.exists(STATUS_FILE):
-            with open(STATUS_FILE, 'r') as f:
-                status = f.read().strip().upper()
-                # Basic validation
-                if status in ["RUNNING", "STOPPED", "STARTING", "STOPPING", "ERROR"]:
-                     return status
-                else:
-                     app.logger.warning(f"Read invalid status '{status}' from {STATUS_FILE}. Defaulting to STOPPED.")
-                     return "STOPPED" # Default to STOPPED if file content is invalid
-        else:
-            # If status file doesn't exist, assume stopped
-            return "STOPPED"
-    except IOError as e:
-        app.logger.error(f"Error reading status file {STATUS_FILE}: {e}")
-        return "ERROR" # Indicate an error reading the status
-
-def convert_datetime(o):
-    """Helper to serialize datetime objects."""
-    if isinstance(o, datetime):
-        return o.isoformat()
-    raise TypeError(f"Type {type(o)} not serializable")
-# --- End Helper Functions ---
-
-# Removed redundant /log_file endpoint. /logs now reads from the file.
-# --- SOL Price Fetching Logic ---
-def get_sol_price_from_file():
-    """Tries to read the SOL price from the shared JSON file."""
-    try:
-        if os.path.exists(SOL_PRICE_FILE):
-            file_mod_time = os.path.getmtime(SOL_PRICE_FILE)
-            if (time.time() - file_mod_time) < MAX_FILE_AGE_SECONDS:
-                with open(SOL_PRICE_FILE, 'r') as f:
-                    data = json.load(f)
-                    price = data.get("price")
-                    if isinstance(price, (int, float)):
-                        app.logger.info(f"Read SOL price {price} from file {SOL_PRICE_FILE}") # Use app.logger
-                        return float(price)
-                    else:
-                        app.logger.warning(f"Invalid price data type in {SOL_PRICE_FILE}") # Use app.logger
-            else:
-                app.logger.warning(f"{SOL_PRICE_FILE} is older than {MAX_FILE_AGE_SECONDS} seconds.") # Use app.logger
-        else:
-            app.logger.info(f"{SOL_PRICE_FILE} not found.") # Use app.logger
-    except (IOError, json.JSONDecodeError, KeyError, TypeError) as e:
-        app.logger.error(f"Error reading SOL price from {SOL_PRICE_FILE}: {e}") # Use app.logger
-    return None # Return None if file read fails or file is too old/missing
-
-def get_sol_price_from_api():
-    """Fetches the SOL price directly from the API (synchronous fallback)."""
-    app.logger.info(f"Falling back to fetching SOL price directly from API: {config.SOL_PRICE_API_URL}") # Use app.logger
-    try:
-        response = requests.get(config.SOL_PRICE_API_URL, timeout=10) # Add timeout
-        response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
-        data = response.json()
-        price = data.get("solana", {}).get("usd")
-        if isinstance(price, (int, float)):
-            app.logger.info(f"Fetched SOL price {price} from API") # Use app.logger
-            return float(price)
-        else:
-            app.logger.error(f"Invalid price data type received from API: {price}") # Use app.logger
-    except requests.exceptions.RequestException as e:
-        app.logger.error(f"Error fetching SOL price from API: {e}") # Use app.logger
-    except (json.JSONDecodeError, KeyError, TypeError) as e:
-        app.logger.error(f"Error parsing SOL price API response: {e}") # Use app.logger
-    return None # Return None if API call fails
-
-def get_current_sol_price():
-    """Gets SOL price, preferring the file, falling back to API."""
-    price = get_sol_price_from_file()
-    if price is None:
-        price = get_sol_price_from_api()
-    return price
-# --- End SOL Price Fetching Logic ---
-
-# Helper function to manage DB connection per request
-async def execute_db_query(query_func, *args):
-    """Creates a connection, executes a query function, and closes."""
-    try:
-        await db_client.connect()
-        app.logger.debug("DB connection established for request.") # Use app.logger
-        result = await query_func(db_client, *args)
-        return result
-    except Exception as e:
-        app.logger.exception(f"Database query failed: {e}") # Use app.logger
-        raise # Re-raise the exception to be handled by the route
-    finally:
-        if db_client.pool:
-            await db_client.close()
-            app.logger.debug("DB connection closed for request.") # Use app.logger
-
-# Wrapper for the specific query needed by the API (trade history)
-async def fetch_trade_history_query(db_client, mints):
-    return await db_client.get_trade_history(mints)
-
-# Wrapper for portfolio transactions query
-async def fetch_portfolio_transactions_query(db_client, mints):
-    return await db_client.get_portfolio_transactions(mints)
-# Routes for the dashboard pages
+            print(f"Failed to connect DB client in before_request_async: {e}")
+            # You might want to return an error response here if DB is critical for all requests
 
 
+@app.teardown_appcontext
+async def teardown_db(exception=None):
+    # This might not work as expected with `flask run` for async cleanup.
+    # Proper cleanup is better handled when the app server (Gunicorn, Uvicorn) shuts down.
+    if db_client and db_client.pool:
+        print("Attempting to close DB client pool on app teardown...")
+        # await db_client.close() # Ensure this method correctly closes the pool
+        print("DB client pool closed via teardown_db.")
+        pass
 
-@app.route('/logs')
-def logs():
-    """Reads the last N lines from the TradingBot log file."""
-    MAX_LOG_LINES = 100 # Adjust as needed
-    try:
-        if not os.path.exists(LOG_FILE):
-            return jsonify([]) # Return empty list if log file doesn't exist yet
 
-        # Explicitly specify UTF-8 encoding and ignore errors
-        with open(LOG_FILE, 'r', encoding='utf-8', errors='ignore') as f:
-            # Read all lines and take the last N
-            lines = f.readlines()
-            log_content = lines[-MAX_LOG_LINES:]
-        # Strip newline characters for cleaner JSON output
-        log_content = [line.strip() for line in log_content]
-        return jsonify(log_content)
-    except IOError as e:
-        app.logger.error(f"Error reading log file {LOG_FILE}: {e}")
-        return jsonify({"error": f"Could not read log file: {e}"}), 500
-    except Exception as e:
-        app.logger.error(f"Unexpected error reading log file {LOG_FILE}: {e}")
-        return jsonify({"error": f"Unexpected error reading log file: {e}"}), 500
-    
+# --- Routes (largely same, but using actual components) ---
 @app.route('/')
-@app.route('/charts')
-async def index():
-    """Renders the main charts page. Token list is loaded dynamically via JS."""
-    # No initial token fetching here anymore
-    return render_template('token_price_analysis.html') # Pass no token list initially
+def index():
+    return render_template('base.html')
 
-@app.route('/config')
-async def configuration():
-    """Renders the configuration page."""
-    return render_template('configuration.html')
+@app.route('/page/dashboard')
+def page_dashboard():
+    return render_template('dashboard.html')
 
-@app.route('/portfolio')
-async def portfolio():
-    """Renders the portfolio page."""
+@app.route('/page/config')
+def page_config():
+    return render_template('config.html')
 
-    # Fetch all tracked tokens
-    async def fetch_tracked_tokens_query(db_client, bc): # Added po
-        return await db_client.get_total_tracked_tokens(backedup=bc) # Pass po
+@app.route('/page/charts')
+def page_charts():
+    return render_template('charts.html')
 
+# --- API Endpoints ---
+
+@app.route('/api/status', methods=['GET'])
+async def api_status():
     try:
-        # Execute the query using the helper
-        fetched_tokens = await execute_db_query(
-            fetch_tracked_tokens_query,
-            False
-        )
-        app.logger.info(f"Returning {len(fetched_tokens)} tokens matching filters.") # Use app.logger
-        print(fetched_tokens) # Debug print to check the data structure
+        # Uptime: If the bot writes its start time to a file, read that.
+        # Otherwise, this shows Flask app's uptime via global_state.
+        # For this example, we'll assume the bot writes its status.
+        bot_file_status = get_bot_status_from_file()
+        
+        # Get live SOL price from the bot's shared file
+        live_sol_price = await get_live_sol_price_from_file()
+        sol_balance_usd = 0
+        current_sol_bal = 0
+        # Note: global_state.get_current_sol_balance() is from *this Flask app's* state.
+        # If the bot updates a file with its actual balance, read that.
+        # For now, we'll use a placeholder or the Flask app's GlobalState.
+        try:
+            current_sol_bal = await global_state.get_current_sol_balance() # Reads from config._INITIAL_SOL_BALANCE
+            if live_sol_price:
+                sol_balance_usd = current_sol_bal * live_sol_price
+        except Exception as e:
+            print(f"Could not get SOL balance for status: {e}")
 
-        total_tracked_tokens = fetched_tokens
-    
-    except Exception as e:
-        # Error already logged by execute_db_query
-        app.logger.error(f"Failed to fetch filtered tokens for API request.") # Use app.logger
-        return jsonify({"error": "Failed to fetch filtered tokens"}), 500
-    
-    return render_template('portfolio.html')
 
-@app.route('/analytics')
-async def analytics():
-    """Renders the analytics page."""
-    return render_template('analytics.html')
-
-# API endpoint to get filtered tokens for the dropdown
-@app.route('/api/filtered_tokens', methods=['GET'])
-async def get_filtered_tokens_api():
-    """API endpoint to fetch tokens based on filter criteria."""
-    # Get filter parameters from query string, providing defaults
-    max_socials = request.args.get('max_socials', default=100, type=int)
-    max_rugcheck = request.args.get('max_rugcheck', default=10000, type=int)
-    min_volume = request.args.get('min_volume', default=0, type=float)
-    time_window_minutes = request.args.get('time_window', default=60, type=int) # e.g., 60, 360, 1440
-    # Get portfolio_only flag, converting 'true'/'false' string to boolean
-    portfolio_only = request.args.get('portfolio_only', default=False, type=lambda v: v.lower() == 'true')
-    # Get volume aggregation type, default to 'avg'
-
-    current_sol_price = get_current_sol_price()
-    if current_sol_price is None:
-         # Handle error: maybe return an error response or use a default SOL price
-         app.logger.error("Could not get SOL price for volume conversion in /api/filtered_tokens") # Use app.logger
-         return jsonify({"error": "Could not determine SOL price"}), 503
-
-    min_volume_sol = (min_volume / current_sol_price) if min_volume > 0 and current_sol_price > 0 else 0 # Convert to SOL, handle zero price
-
-    app.logger.info(f"Received request for filtered tokens: socials<={max_socials}, rug<={max_rugcheck}, vol>={min_volume_sol} (last {time_window_minutes} min), portfolio_only={portfolio_only}") # Use app.logger
-
-    # Wrapper for the specific query needed by this route
-    async def fetch_filtered_tokens_query(db_client, ms, mr, mv, tw, po): # Added po
-        return await db_client.get_filtered_tokens(max_socials=ms, max_rugcheck=mr, min_volume_sol=mv, time_window_minutes=tw, portfolio_only=po) # Pass po
-
-    try:
-        # Execute the query using the helper
-        filtered_tokens = await execute_db_query(
-            fetch_filtered_tokens_query,
-            max_socials,
-            max_rugcheck,
-            min_volume_sol,
-            time_window_minutes,
-            portfolio_only
-        )
-        app.logger.info(f"Returning {len(filtered_tokens)} tokens matching filters.") # Use app.logger
-        return jsonify(filtered_tokens)
-    except Exception as e:
-        # Error already logged by execute_db_query
-        app.logger.error(f"Failed to fetch filtered tokens for API request.") # Use app.logger
-        return jsonify({"error": "Failed to fetch filtered tokens"}), 500
-
-# API endpoint to get token chart data (remains largely the same)
-@app.route('/api/token_chart_data', methods=['POST'])
-async def get_token_chart_data():
-    """API endpoint to fetch and process trade and portfolio data for charting."""
-    if not request.is_json:
-        return jsonify({"error": "Request must be JSON"}), 400
-
-    data = request.get_json()
-    mints = data.get('mints')
-
-    if not mints or not isinstance(mints, list):
-        return jsonify({"error": "Missing or invalid 'mints' list in request body"}), 400
-
-    app.logger.info(f"Received request for chart data for mints: {mints}") # Use app.logger
-
-    try:
-        # Execute the trade history query
-        trade_history = await execute_db_query(fetch_trade_history_query, mints)
-        # Execute the portfolio transactions query
-        portfolio_transactions = await execute_db_query(fetch_portfolio_transactions_query, mints)
-
-        if not trade_history:
-            app.logger.warning(f"No trade history found for mints: {mints}") # Use app.logger
-            # Still return portfolio data if it exists, even without trade history
-            # The frontend will need to handle cases where only portfolio markers are available
-            processed_portfolio_data = {}
-            if portfolio_transactions:
-                 # Process portfolio timestamps relative to *something* if no trade history
-                 # For simplicity, let's just return the raw portfolio data here if no trades
-                 # Or maybe calculate elapsed time from the *first* portfolio event?
-                 # Let's return it for now, frontend needs adjustment.
-                 # A better approach might be to find the earliest timestamp across both datasets.
-                 # For now, returning raw portfolio data if no trade history.
-                 app.logger.warning(f"Returning only portfolio data as trade history is missing for {mints}") # Use app.logger
-                 # Convert timestamps to Unix ms for JS compatibility before returning
-                 for mint_key, data_val in portfolio_transactions.items():
-                     for tx_type in ['buys', 'sells']:
-                         if tx_type in data_val:
-                             for event in data_val[tx_type]:
-                                 # Assuming event['timestamp'] is a datetime object from DB
-                                 event['time'] = int(pd.to_datetime(event['timestamp']).timestamp() * 1000)
-                                 del event['timestamp'] # Remove original datetime object
-                 return jsonify(portfolio_transactions) # Adjust frontend to handle this structure
+        # Number of active subscriptions - this should ideally come from the running bot.
+        # The Flask app's global_state.active_token_subscriptions will be empty
+        # unless this Flask app also runs subscription logic (not typical).
+        # For now, let's assume the bot could write this to a status file or DB.
+        # Fallback: Display total tracked tokens from DB as a proxy.
+        active_subs_count = "N/A (Bot needs to provide)"
+        try:
+            if db_client.pool: # Check if DB is connected
+                 active_subs_count = await db_client.get_total_tracked_tokens(backedup=False) # Example metric
             else:
-                 return jsonify({}) # Return empty if neither trade nor portfolio data exists
+                print("DB not connected for active_subs_count in api_status")
+        except Exception as e:
+            print(f"Error getting active_subs_count: {e}")
+            active_subs_count = "Error"
 
 
-        # Fetch the current SOL price
-        sol_price_usd = get_current_sol_price()
-        if sol_price_usd is None:
-            app.logger.error("Failed to obtain SOL price. Cannot calculate USD prices.") # Use app.logger
-            return jsonify({"error": "Could not determine SOL price"}), 503
-
-        app.logger.info(f"Using SOL price: {sol_price_usd} USD for calculations.") # Use app.logger
-
-        # Process trade data with pandas
-        df = pd.DataFrame(trade_history)
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df['price_sol'] = pd.to_numeric(df['price'])
-        df['price_usd'] = df['price_sol'] * sol_price_usd
-
-        chart_data = {}
-        grouped = df.groupby('mint')
-
-        # Find the overall minimum timestamp across all requested mints in trade history
-        # This ensures consistent x-axis (elapsed time) across multiple charts if displayed together
-        # If only one mint is requested, this is just the min timestamp for that mint.
-        overall_min_timestamp = df['timestamp'].min()
-        app.logger.debug(f"Overall minimum timestamp for relative calculation: {overall_min_timestamp}") # Use app.logger
-
-
-        for mint, group in grouped:
-            if group.empty:
-                continue
-
-            group = group.sort_values(by='timestamp')
-            # Use the overall min timestamp for consistent elapsed time calculation
-            group['elapsed_minutes'] = (group['timestamp'] - overall_min_timestamp).dt.total_seconds() / 60.0
-
-            # Prepare trade data
-            mint_chart_data = {
-                'time': group['elapsed_minutes'].round(2).tolist(),
-                'price_usd': group['price_usd'].round(4).tolist(),
-                'buys': [],
-                'sells': []
-            }
-
-            # Process portfolio data for this mint
-            if mint in portfolio_transactions:
-                mint_portfolio = portfolio_transactions[mint]
-                for buy_event in mint_portfolio.get('buys', []):
-                    buy_timestamp = pd.to_datetime(buy_event['timestamp'])
-                    elapsed_minutes = (buy_timestamp - overall_min_timestamp).total_seconds() / 60.0
-                    price_usd = buy_event['price'] * sol_price_usd # Assume portfolio price is SOL, convert to USD
-                    mint_chart_data['buys'].append({
-                        'time': round(elapsed_minutes, 2),
-                        'price_usd': round(price_usd, 4)
-                    })
-                for sell_event in mint_portfolio.get('sells', []):
-                    sell_timestamp = pd.to_datetime(sell_event['timestamp'])
-                    elapsed_minutes = (sell_timestamp - overall_min_timestamp).total_seconds() / 60.0
-                    price_usd = sell_event['price'] * sol_price_usd # Assume portfolio price is SOL, convert to USD
-                    mint_chart_data['sells'].append({
-                        'time': round(elapsed_minutes, 2),
-                        'price_usd': round(price_usd, 4)
-                    })
-                app.logger.debug(f"Processed {len(mint_chart_data['buys'])} buys and {len(mint_chart_data['sells'])} sells for mint: {mint}") # Use app.logger
-
-
-            chart_data[mint] = mint_chart_data
-            app.logger.debug(f"Processed chart data (trades + portfolio) for mint: {mint}, {len(group)} trade points") # Use app.logger
-
-        return jsonify(chart_data)
-
+        status_data = {
+            "uptime": "N/A (Bot needs to provide start time)", # Placeholder
+            "asyncio_tasks": len(asyncio.all_tasks(loop=asyncio.get_event_loop_policy().get_event_loop())), # Tasks in Flask process
+            "token_subscriptions_count": active_subs_count,
+            "current_sol_balance_val": f"{current_sol_bal:.4f}",
+            "current_sol_price_usd": f"{live_sol_price:.2f}" if live_sol_price else "N/A",
+            "current_sol_balance_usd": f"${sol_balance_usd:,.2f}" if live_sol_price else "N/A",
+            "bot_file_status": bot_file_status,
+            "dynamic_config_last_modified": datetime.fromtimestamp(os.path.getmtime(DYNAMIC_CONFIG_FILE)).isoformat() if os.path.exists(DYNAMIC_CONFIG_FILE) else "N/A"
+        }
+        return jsonify(status_data)
     except Exception as e:
-        # Error already logged by execute_db_query if it was a DB error
-        app.logger.error(f"Error processing chart data request for mints {mints}: {e}", exc_info=True) # Use app.logger
-        return jsonify({"error": "Internal server error processing request"}), 500
+        print(f"Error in /api/status: {e}")
+        return jsonify({"error": str(e)}), 500
 
-@app.route('/start_bot', methods=['POST'])
-def start_bot():
-    """Signals the external bot process to start by writing to the command file."""
-    app.logger.info("Received request to start bot via command file.")
-    write_command("START")
-    # We don't know the exact status immediately, client JS should poll /api/bot_status
-    return jsonify({"status": "START command issued"}), 200
+@app.route('/api/logs', methods=['GET'])
+def api_logs():
+    lines = request.args.get('lines', 100, type=int)
+    log_content = read_log_file(lines)
+    return jsonify({"logs": log_content})
 
-@app.route('/stop_bot', methods=['POST'])
-def stop_bot():
-    """Signals the external bot process to stop by writing to the command file."""
-    app.logger.info("Received request to stop bot via command file.")
-    write_command("STOP")
-    # We don't know the exact status immediately, client JS should poll /api/bot_status
-    return jsonify({"status": "STOP command issued"}), 200
+@app.route('/api/config', methods=['GET'])
+def api_get_config():
+    # Merge base config with dynamic config for display
+    # Dynamic config takes precedence
+    dynamic_conf = read_dynamic_config_file_content()
+    if "error" in dynamic_conf: # If reading dynamic_config.json failed
+        # Fallback to base config or show error
+        print(f"Error reading dynamic config for GET: {dynamic_conf['error']}. Showing base config.")
+        #return jsonify(BASE_BOT_CONFIG) # Or return error
+        # For UI, better to show what IS there + error
+        return jsonify({"error_reading_dynamic": dynamic_conf['error'], **BASE_BOT_CONFIG})
 
-@app.route('/api/bot_status', methods=['GET'])
-def bot_status():
-    """Reads the status file written by the bot process."""
-    status = read_status()
-    app.logger.debug(f"Reporting bot status as: {status}")
-    return jsonify({"status": status}), 200
 
-@app.route('/trading_view') # Corrected route name
-async def trading_view_page():
-    """Renders the TradingView chart page."""
-    db = None
-    tokens_sorted = []
+    # Create a new dict for the merged config to preserve original types from BASE_BOT_CONFIG where possible
+    # and apply dynamic overrides.
+    merged_config = {}
+    for key, base_value in BASE_BOT_CONFIG.items():
+        if key in dynamic_conf:
+            # Override with dynamic value, try to cast to original type if simple
+            dyn_value = dynamic_conf[key]
+            try:
+                if isinstance(base_value, bool): merged_config[key] = bool(dyn_value)
+                elif isinstance(base_value, int): merged_config[key] = int(dyn_value)
+                elif isinstance(base_value, float): merged_config[key] = float(dyn_value)
+                elif isinstance(base_value, list) and isinstance(dyn_value, list): merged_config[key] = dyn_value # Assume list is fine
+                else: merged_config[key] = dyn_value # string or other complex types
+            except (ValueError, TypeError):
+                merged_config[key] = dyn_value # Fallback to dynamic value if cast fails
+        else:
+            merged_config[key] = base_value # Use base value
+
+    # Add any keys from dynamic_conf that are not in BASE_BOT_CONFIG (newly added params)
+    for key, dyn_value in dynamic_conf.items():
+        if key not in merged_config:
+            merged_config[key] = dyn_value
+
+    return jsonify(merged_config)
+
+
+@app.route('/api/config/update', methods=['POST'])
+def api_update_config():
     try:
-        db = await get_db()
-        # Fetch all unique tokens for the dropdown menu
-        tokens = await db.get_all_unique_mints_with_names()
-        # Sort tokens alphabetically by name for the dropdown
-        tokens_sorted = sorted(tokens, key=lambda x: x.get('name', '').lower())
-        app.logger.info(f"Fetched {len(tokens_sorted)} tokens for TradingView dropdown.")
+        new_config_data_from_form = request.json
+        if not isinstance(new_config_data_from_form, dict):
+            return jsonify({"error": "Invalid data format, expected a JSON object."}), 400
+
+        current_dynamic_config = read_dynamic_config_file_content()
+        if "error" in current_dynamic_config:
+             return jsonify({"error": f"Could not read current config to update: {current_dynamic_config['error']}"}), 500
+
+        updated_config = current_dynamic_config.copy() # Start with current dynamic config
+
+        for key_from_form, value_from_form in new_config_data_from_form.items():
+            # All keys from form are assumed to be intended for DYNAMIC_CONFIG_FILE
+            # Type conversion based on BASE_BOT_CONFIG if key exists there, otherwise store as is from form
+            key_upper = key_from_form.upper() # Standardize key
+
+            final_value = value_from_form
+            if key_upper in BASE_BOT_CONFIG:
+                base_type = type(BASE_BOT_CONFIG[key_upper])
+                try:
+                    if base_type == bool: final_value = bool(value_from_form)
+                    elif base_type == int: final_value = int(value_from_form)
+                    elif base_type == float: final_value = float(value_from_form)
+                    elif base_type == list and isinstance(value_from_form, list): final_value = value_from_form
+                    elif base_type == set and isinstance(value_from_form, list): final_value = list(value_from_form) # Store as list in JSON
+                    # else string or already correct type
+                except (ValueError, TypeError) as e:
+                    print(f"Warning: Could not convert form value for '{key_upper}' to base type {base_type}. Storing as received. Error: {e}")
+            
+            updated_config[key_upper] = final_value
+
+        if write_dynamic_config_to_file(updated_config):
+            return jsonify({"message": "Configuration update written to dynamic_config.json. Bot should apply changes."})
+        else:
+            return jsonify({"error": "Failed to write configuration file."}), 500
     except Exception as e:
-        app.logger.error(f"Error fetching token list for TradingView page: {e}")
-        tokens_sorted = [] # Ensure it's always a list
-    finally:
-        if db and db.pool:
-             # Consider if you want to close the pool here or keep it open
-             # await db.close() # Uncomment if you want to close after each request
-             pass
-    # Pass the sorted list to the template
-    return render_template('trading_view.html', tokens=tokens_sorted) # Ensure template name matches
+        print(f"Error in /api/config/update: {e}")
+        return jsonify({"error": str(e)}), 500
 
-# Add/Update the API endpoint for TradingView chart data
-@app.route('/api/trading_view/<string:mint>') # Corrected route name
-async def get_trading_view_data(mint):
-    """Provides OHLCV and portfolio data for the TradingView chart."""
-    db = None
-    # Define the time window (e.g., last 24 hours, adjust as needed)
-    end_date = datetime.now(timezone.utc)
-    # Fetch a reasonable duration, e.g., 7 days, or make it configurable
-    start_date = end_date - pd.Timedelta(days=7)
-    app.logger.info(f"Fetching TradingView data for mint: {mint} from {start_date} to {end_date}")
-
+@app.route('/api/tokens', methods=['GET'])
+async def api_get_tokens():
+    """API endpoint to get a list of tokens for TradingView chart selection."""
+    if not db_client.pool:
+        await db_client.connect() # Ensure connected
     try:
-        db = await get_db()
+        # Your DatabaseClient.get_all_unique_mints_with_names() is async
+        tokens = await db_client.get_all_unique_mints_with_names()
+        return jsonify(tokens)
+    except Exception as e:
+        print(f"Error in /api/tokens: {e}")
+        return jsonify({"error": str(e)}), 500
 
-        # 1. Fetch OHLCV data using the backtesting data function
-        # This function already calculates OHLCV at 5s intervals
-        ohlcv_data_dict = await db.get_historical_data_for_backtesting(
-            mints=[mint],
+@app.route('/api/token_data/<mint_address>', methods=['GET'])
+async def api_get_token_data(mint_address):
+    if not db_client.pool:
+        await db_client.connect() # Ensure connected
+    try:
+        end_date = datetime.now(timezone.utc)
+        start_date = end_date - timedelta(days=request.args.get('days', 7, type=int)) # Allow dynamic days
+
+        # Your DatabaseClient.get_historical_data_for_backtesting is async
+        data_dict = await db_client.get_historical_data_for_backtesting(
+            mints=[mint_address],
             start_date=start_date,
             end_date=end_date
         )
 
-        if not ohlcv_data_dict or mint not in ohlcv_data_dict:
-            app.logger.warning(f"No OHLCV data found for mint {mint} in the time range.")
-            return jsonify({"error": "No OHLCV data found for this token in the time range."}), 404
+        if not data_dict or mint_address not in data_dict or data_dict[mint_address].empty:
+            return jsonify({"error": "No data found for this token in the selected range."}), 404
 
-        ohlcv_df = ohlcv_data_dict[mint]
-        app.logger.debug(f"Fetched {len(ohlcv_df)} OHLCV data points for {mint}.")
+        df = data_dict[mint_address]
+        # Ensure required columns exist, otherwise provide defaults or error
+        required_cols = ['Open', 'High', 'Low', 'Close']
+        for col in required_cols:
+            if col not in df.columns:
+                 return jsonify({"error": f"Missing required column '{col}' in data for {mint_address}."}), 500
 
-        # Convert DataFrame to list of dictionaries suitable for Lightweight Charts
-        # Ensure timestamp is in seconds (epoch time)
-        ohlcv_formatted = []
-        volume_formatted = []
-        for timestamp, row in ohlcv_df.iterrows():
+        chart_data = []
+        for timestamp, row in df.iterrows():
             # Ensure timestamp is timezone-aware before converting
             ts_aware = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
-            epoch_time = int(ts_aware.timestamp())
-
-            # Check for NaN or None values before appending
-            open_val = row.get('Open')
-            high_val = row.get('High')
-            low_val = row.get('Low')
-            close_val = row.get('Close')
-            volume_val = row.get('Volume') # Fetch Volume
-
-            if all(v is not None and not np.isnan(v) for v in [open_val, high_val, low_val, close_val]):
-                 ohlcv_formatted.append({
-                     "time": epoch_time,
-                     "open": open_val,
-                     "high": high_val,
-                     "low": low_val,
-                     "close": close_val,
-                 })
-
-            # Add volume data separately
-            if volume_val is not None and not np.isnan(volume_val):
-                 # Determine volume bar color based on price change
-                 color = 'rgba(239, 83, 80, 0.5)' if close_val < open_val else 'rgba(38, 166, 154, 0.5)' # Red down, Green up
-                 volume_formatted.append({
-                    "time": epoch_time,
-                    "value": volume_val,
-                    "color": color
-                 })
-
-
-        app.logger.debug(f"Formatted {len(ohlcv_formatted)} valid OHLCV points and {len(volume_formatted)} volume points.")
-
-        # 2. Fetch portfolio transactions (buy/sell markers)
-        portfolio_data = await db.get_portfolio_transactions(mints=[mint])
-        portfolio_markers = []
-        if mint in portfolio_data:
-            buy_markers = portfolio_data[mint].get('buys', [])
-            sell_markers = portfolio_data[mint].get('sells', [])
-            app.logger.debug(f"Fetched {len(buy_markers)} buys and {len(sell_markers)} sells for {mint}.")
-
-            for buy in buy_markers:
-                ts_aware = buy['timestamp'] if buy['timestamp'].tzinfo else buy['timestamp'].replace(tzinfo=timezone.utc)
-                portfolio_markers.append({
-                    "time": int(ts_aware.timestamp()),
-                    "position": 'belowBar',
-                    "color": '#26a69a', # Green for buy
-                    "shape": 'arrowUp',
-                    "text": f'Buy @ {buy["price"]:.6f}'
-                })
-            for sell in sell_markers:
-                ts_aware = sell['timestamp'] if sell['timestamp'].tzinfo else sell['timestamp'].replace(tzinfo=timezone.utc)
-                portfolio_markers.append({
-                    "time": int(ts_aware.timestamp()),
-                    "position": 'aboveBar',
-                    "color": '#ef5350', # Red for sell
-                    "shape": 'arrowDown',
-                    "text": f'Sell @ {sell["price"]:.6f}'
-                })
-        else:
-            app.logger.debug(f"No portfolio transactions found for {mint}.")
-
-
-        # Combine data
-        chart_data = {
-            "ohlcv": ohlcv_formatted,
-            "volume": volume_formatted, # Add volume data
-            "markers": portfolio_markers
-        }
+            chart_data.append({
+                "time": int(ts_aware.timestamp()),
+                "open": row['Open'],
+                "high": row['High'],
+                "low": row['Low'],
+                "close": row['Close'],
+                "volume": row.get('Volume', 0)
+            })
         return jsonify(chart_data)
-
     except Exception as e:
-        app.logger.error(f"Error fetching TradingView data for mint {mint}: {e}", exc_info=True)
-        import traceback
-        traceback.print_exc() # Print full traceback for debugging
-        return jsonify({"error": "Failed to fetch chart data."}), 500
-    finally:
-        if db and db.pool:
-             # await db.close() # Uncomment if you want to close after each request
-             pass
-    
+        print(f"Error in /api/token_data/{mint_address}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+async def flask_main():
+    """Main entry point to run the Flask app with an ASGI server like Hypercorn."""
+    # This function is intended to be called by an ASGI server.
+    # Example: `hypercorn web_app.app:app`
+    # For development, you can still use `flask run --debug` which handles its own loop.
+    # When using `flask run`, async routes are handled by Flask's development server's capabilities.
+    try:
+        if not db_client.pool: # Check if already connected (e.g., by multiple workers)
+            await db_client.connect()
+            print("Flask App: DB Client connected via flask_main.")
+        # The app object is already defined globally.
+        # The ASGI server will run the app.
+    except Exception as e:
+        print(f"Error during Flask app async setup: {e}")
+        # Potentially re-raise or handle gracefully
+
+
 if __name__ == '__main__':
-    # Port can be changed here or via environment variable if needed
-    # Keeping port 89 as manually set by the user previously.
-    port = int(os.environ.get("FLASK_PORT", 89))
-    # Use Flask's logger for Flask-specific messages
-    app.logger.info(f"Starting Flask development server on http://127.0.0.1:{port}...")
-    app.run(debug=True, port=port, use_reloader=False)
+    # This block is for direct execution (python web_app/app.py)
+    # For development, `flask run --debug` is preferred after setting FLASK_APP.
+    # For production, use an ASGI server like Hypercorn or Uvicorn:
+    # e.g., `hypercorn web_app.app:app -b 0.0.0.0:5001` (install hypercorn first)
+
+    print("Starting Flask development server...")
+    print("IMPORTANT: For async routes to work correctly with database calls,")
+    print("           consider running with an ASGI server like Hypercorn for production,")
+    print("           or ensure your development Flask server supports async/await properly.")
+    print(f"Project root: {PROJECT_ROOT}")
+    print(f"Log file path: {LOG_FILE_PATH}")
+    print(f"Dynamic config path: {DYNAMIC_CONFIG_FILE}")
+
+    # Simplified run for development (Flask's dev server has some async support)
+    async def run_dev_server():
+        if not db_client.pool:
+            try:
+                await db_client.connect()
+                print("DB Client connected for dev server.")
+            except Exception as e:
+                print(f"Failed to connect DB for dev server: {e}")
+                # Decide if app should run without DB for UI testing
+    
+    # Flask's app.run() is synchronous. To manage the async DB connection:
+    # We connect before starting the Flask app.
+    # For Flask's dev server, routes with `async def` are generally handled.
+    try:
+        asyncio.run(run_dev_server()) # Connect DB
+    except Exception as e:
+        print(f"Error during pre-run setup: {e}")
+
+    app.run(debug=True, host='0.0.0.0', port=89, use_reloader=True)
+    # Note: use_reloader=True might cause issues with async setup in some cases or
+    # re-run the module-level code (like DB connection) multiple times.
+    # `flask run --debug` is generally more robust for development.
+
+    # Cleanup (might not be reached if app.run() blocks indefinitely until Ctrl+C)
+    # async def cleanup_on_exit():
+    #     if db_client and db_client.pool:
+    #         print("Closing DB client pool on script exit...")
+    #         await db_client.close()
+    # asyncio.run(cleanup_on_exit())
