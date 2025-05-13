@@ -17,8 +17,7 @@ from utils import (
     play_buy_opportunity_sound, play_sell_sl_sound_async, play_sell_tp_sound_async,
     format_buy_order_log, format_sell_order_log # Import the new sell log formatter
 )
-# Removed unused imports like np, json, get_db, calculate_market_cap (if not used)
-# Config dictionary is passed in __init__
+from telegram_interface import send_telegram_message # Import Telegram message function
 
 class TradingManager:
     def __init__(self, db_client: DatabaseClient, config_dict: dict, state: GlobalState):
@@ -388,14 +387,16 @@ class TradingManager:
 
 
             # Use the new formatted log message
-            logger.info(format_sell_order_log(
+            message = format_sell_order_log(
                 mint=mint,
                 token_name=token_name,
                 market_cap_sol=market_cap_sol,
                 profit=profit,
                 reason=reason,
                 sol_price=sol_price
-            ))
+            )
+            logger.info(message)
+            asyncio.create_task(send_telegram_message(message))
             # Removed old log message here
 
             # Update global SOL balance using the instance passed to the manager
@@ -543,7 +544,7 @@ class TradingManager:
                     token_name_row = await self.db.get_token_name(mint, conn) # Fetch token name for logging
                     token_name = token_name_row['name'] if token_name_row else mint
                     # Update log format if needed to show total_sol_investment
-                    logger.info(format_buy_order_log(
+                    message = format_buy_order_log(
                         self.state,
                         name=token_name,
                         mint=mint,
@@ -552,7 +553,10 @@ class TradingManager:
                         market_cap=market_cap_sol,
                         sol_price=sol_price,
                         total_investment=total_sol_investment # Pass total investment to log formatter if it accepts it
-                    ))
+                    )
+
+                    logger.info(message)
+                    asyncio.create_task(send_telegram_message(message))
 
                     # Update global SOL balance using the instance passed to the manager
                     await self.state.update_sol_balance(-total_sol_investment) # Subtract TOTAL investment
