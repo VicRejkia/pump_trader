@@ -24,6 +24,8 @@ from rugcheck_handler import Rugcheck
 from socials_processor import SocialsProcessor
 from utils import calculate_volatility # Assuming this is your utility
 
+from telegram_interface import send_telegram_message
+
 # --- RL Imports (add these) ---
 try:
     import stable_baselines3
@@ -373,21 +375,21 @@ class TradingBot:
         except asyncio.CancelledError:
             log_info(":stop_sign: Monitor task shutting down")
 
-    async def status_updater(self):
-        """Periodically writes 'RUNNING' status to the status file."""
-        try:
-            while not self.state.shutdown_event.is_set():
-                self._write_status("RUNNING")
-                await asyncio.sleep(15) # Update status every 15 seconds
-        except asyncio.CancelledError:
-            log_info(":stop_sign: Status updater task shutting down.")
-        except Exception as e:
-            log_error(f":x: Error in status updater: {e}", exc_info=True)
-            self._write_status("ERROR") # Write error status if updater fails
-        finally:
-            # Attempt to write STOPPED status when task ends, unless shutdown already happened
-             if not self.state.shutdown_event.is_set():
-                  self._write_status("STOPPED") # Or maybe ERROR?
+    # async def status_updater(self):
+    #     """Periodically writes 'RUNNING' status to the status file."""
+    #     try:
+    #         while not self.state.shutdown_event.is_set():
+    #             self._write_status("RUNNING")
+    #             await asyncio.sleep(15) # Update status every 15 seconds
+    #     except asyncio.CancelledError:
+    #         log_info(":stop_sign: Status updater task shutting down.")
+    #     except Exception as e:
+    #         log_error(f":x: Error in status updater: {e}", exc_info=True)
+    #         self._write_status("ERROR") # Write error status if updater fails
+    #     finally:
+    #         # Attempt to write STOPPED status when task ends, unless shutdown already happened
+    #          if not self.state.shutdown_event.is_set():
+    #               self._write_status("STOPPED") # Or maybe ERROR?
 
     async def command_listener(self):
         """Periodically checks the command file for STOP command."""

@@ -32,6 +32,9 @@ class WebSocketHandler:
 
     async def connect(self):
         """Establishes a WebSocket connection and subscribes to new token events."""
+        if await self.state.get_new_token_subscription():
+            logger.info("Already subscribed to newToken stream. Skipping subscription.")
+            return
         self.websocket = await websockets.connect(_PUMPPORTAL_WS)
         logger.info("Connected to PumpPortal WebSocket")
         await self.websocket.send(json.dumps({"method": "subscribeNewToken"}))
@@ -337,42 +340,6 @@ class WebSocketHandler:
             except Exception as e:
                 logger.error(f"Error in check_inactive_tokens: {e}", exc_info=True)
                 await self.state.wait_or_interrupt(timeout=5)  # Brief pause on error
-
-    async def unsubscribe_new_tokens(self):
-        """Sends a request to unsubscribe from the newToken stream."""
-        current_state = await self.state.get_new_token_subscription()
-        if not current_state:
-            logger.info("Already unsubscribed from newToken stream. No action needed.")
-            return
-
-        if self.websocket and self.websocket.open:
-            try:
-                payload = json.dumps({"method": "unsubscribeNewToken"})
-                await asyncio.wait_for(self.websocket.send(payload), timeout=10.0)
-                # Assuming successful send means unsubscription on the server side
-                await self.state.set_new_token_subscription(False)
-                logger.info("✅ Successfully sent unsubscribe request for newToken stream.")
-                # Reset the flag in config.py directly (if still needed elsewhere, though state manager is better)
-                # Be cautious modifying config directly, state manager is preferred.
-                # config.NEW_TOKEN_SUBSCRIPTION = False
-
-            except websockets.exceptions.ConnectionClosed:
-                logger.error("❌ Cannot unsubscribe from newToken: WebSocket connection is closed.")
-                # Optionally update state anyway, as we can't be subscribed if disconnected
-                await self.state.set_new_token_subscription(False)
-                # config.NEW_TOKEN_SUBSCRIPTION = False
-            except asyncio.TimeoutError:
-                logger.error("⏳ Timeout sending unsubscribe request for newToken stream.")
-                # State remains true, maybe retry later? Or set false optimistically?
-                # For now, let's keep state as true, indicating we *think* we are still subscribed.
-            except Exception as e:
-                logger.error(f"❌ Error sending unsubscribe request for newToken: {e}", exc_info=True)
-                # State remains true
-        else:
-            logger.warning("⚠️ Cannot unsubscribe from newToken: WebSocket is not connected or not initialized.")
-            # If not connected, we are effectively unsubscribed, so update state
-            await self.state.set_new_token_subscription(False)
-            # config.NEW_TOKEN_SUBSCRIPTION = False
 
     async def shutdown(self):
         """Gracefully shutdown the WebSocket connection, unsubscribing from new token events and token trade subscriptions with retries."""
