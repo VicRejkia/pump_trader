@@ -248,25 +248,28 @@ class DatabaseClient:
                     # The transaction will be rolled back automatically
                     raise # Re-raise the exception so the caller knows about the failure
 
-    async def get_tokens_to_unsubscribe(self, sol_price, min_market_cap):
-        """Fetch tokens that should be unsubscribed based on market cap and activity."""
+    async def get_tokens_to_unsubscribe(self, mc_drop_threshold, inactivity_period):
+        """Fetch tokens to unsubscribe based on market cap drop and inactivity."""
         query = """
             SELECT t.mint
             FROM tokens t
             INNER JOIN (
-                SELECT mint, marketCapSol, timestamp AS lt,
+                SELECT mint, marketCapSol, timestamp,
                     ROW_NUMBER() OVER (PARTITION BY mint ORDER BY timestamp DESC) AS rn
                 FROM trades
             ) latest ON t.mint = latest.mint AND latest.rn = 1
             WHERE 
-                ((latest.marketCapSol * $1) < $2 AND
-                t.timestamp <= NOW() - INTERVAL '15 minutes') OR
-				latest.lt <= NOW() - INTERVAL '60 minutes'
+                (
+                    (latest.marketCapSol * 100.0 / t.marketCapSol) < (100 - $1)
+                    OR
+                    latest.timestamp <= NOW() - (INTERVAL '1 minute' * $2)
+                )
+                AND t.timestamp <= NOW() - INTERVAL '15 minutes'
                 AND t.mint NOT IN (SELECT mint FROM portfolio WHERE status = 'active')
-			ORDER BY timestamp DESC
+            ORDER BY t.timestamp DESC;
         """
         async with self.pool.acquire() as conn:
-            return await conn.fetch(query, sol_price, min_market_cap)
+            return await conn.fetch(query, mc_drop_threshold, inactivity_period)
 
     async def get_active_tokens(self, limit: int = 1000):
         """Fetch active tokens from the database."""
@@ -793,15 +796,15 @@ class DatabaseClient:
                 logger.error(f"Error fetching portfolio transactions for mints {mints}: {e}", exc_info=True)
                 return {} # Return empty dict on error
 
-    async def backup_and_delete_token(self, mint: str, archived_at: datetime):
+    async def backup_and_delete_token(self, mint: str, archived_at: datetime, reason: str=None):
         """Backup core table data to a corresponding backup table."""
         try:
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
                     try:
                         await conn.execute('''
-                            INSERT INTO tokens_backup SELECT *, NOW() FROM tokens WHERE mint = $1
-                        ''', mint)
+                            INSERT INTO tokens_backup SELECT *, NOW(), $2 FROM tokens WHERE mint = $1
+                        ''', mint, reason)
                         
                         await conn.execute('''
                             INSERT INTO trades_backup SELECT *, NOW() FROM trades WHERE mint = $1
