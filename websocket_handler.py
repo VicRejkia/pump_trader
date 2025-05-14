@@ -265,7 +265,7 @@ class WebSocketHandler:
                     deleted_count = 0
                     for mint in mints_to_process_batch:
                         try:
-                            await self.db_client.backup_and_delete_token(mint=mint, archived_at=datetime.now(timezone.utc), reason="dead")
+                            await self.db_client.backup_and_delete_token(mint=mint, archived_at=datetime.now(timezone.utc), reason="rugged_dead")
                             deleted_count += 1
                         except Exception as e:
                             logger.error(f"DB backup/delete failed for {mint}: {e}", exc_info=True)
@@ -302,7 +302,7 @@ class WebSocketHandler:
 
                 # Backup and delete tokens
                 for mint in tokens_to_unsubscribe:
-                    await self.db_client.backup_and_delete_token(mint=mint, archived_at=datetime.now(timezone.utc),reason="Suspicious creator")
+                    await self.db_client.backup_and_delete_token(mint=mint, archived_at=datetime.now(timezone.utc),reason="suspicious_creator")
         except Exception as e:
             logger.error(f"unsubscribe_tokens_from_creator error: {e}", exc_info=True)
             await self.state.wait_or_interrupt(timeout=5)
