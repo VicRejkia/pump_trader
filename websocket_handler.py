@@ -228,7 +228,7 @@ class WebSocketHandler:
                 continue
 
             try:
-                rows = await self.db_client.get_tokens_to_unsubscribe(sol_price, self.config['MIN_MARKET_CAP'])
+                rows = await self.db_client.get_tokens_to_unsubscribe(self.config['MC_DROP_THRESHOLD'], self.config['INACTIVITY_PERIOD'])
 
                 # Identify candidate mints from DB
                 candidate_mints = [row['mint'] for row in rows]
@@ -265,7 +265,7 @@ class WebSocketHandler:
                     deleted_count = 0
                     for mint in mints_to_process_batch:
                         try:
-                            await self.db_client.backup_and_delete_token(mint, datetime.now(timezone.utc))
+                            await self.db_client.backup_and_delete_token(mint=mint, archived_at=datetime.now(timezone.utc), reason="dead")
                             deleted_count += 1
                         except Exception as e:
                             logger.error(f"DB backup/delete failed for {mint}: {e}", exc_info=True)
@@ -302,44 +302,44 @@ class WebSocketHandler:
 
                 # Backup and delete tokens
                 for mint in tokens_to_unsubscribe:
-                    await self.db_client.backup_and_delete_token(mint, datetime.now(timezone.utc))
+                    await self.db_client.backup_and_delete_token(mint=mint, archived_at=datetime.now(timezone.utc),reason="Suspicious creator")
         except Exception as e:
             logger.error(f"unsubscribe_tokens_from_creator error: {e}", exc_info=True)
             await self.state.wait_or_interrupt(timeout=5)
 
-    async def check_inactive_tokens(self):
-        while not self.state.shutdown_event.is_set():  # Assuming state has a shutdown flag
-            try:
-                current_time = datetime.now(timezone.utc)
-                inactivity_period = timedelta(minutes=self.config['INACTIVITY_PERIOD'])
-                inactive_tokens = []
-                # Safely access shared state
-                async with self.state.lock:  # Assuming state has a lock for thread safety
-                    for mint, last_update in self.last_update_times.items():
-                        if current_time - last_update > inactivity_period:
-                            inactive_tokens.append(mint)
+    # async def check_inactive_tokens(self):
+    #     while not self.state.shutdown_event.is_set():  # Assuming state has a shutdown flag
+    #         try:
+    #             current_time = datetime.now(timezone.utc)
+    #             inactivity_period = timedelta(minutes=self.config['INACTIVITY_PERIOD'])
+    #             inactive_tokens = []
+    #             # Safely access shared state
+    #             async with self.state.lock:  # Assuming state has a lock for thread safety
+    #                 for mint, last_update in self.last_update_times.items():
+    #                     if current_time - last_update > inactivity_period:
+    #                         inactive_tokens.append(mint)
 
-                # Unsubscribe from inactive tokens
-                for mint in inactive_tokens:
-                    logger.info(f"💀 Token {mint} inactive for over {self.config['INACTIVITY_PERIOD']}. Unsubscribing...")
-                    try:
-                        logger.info(f"💀 Token {mint} inactive for over {self.config['INACTIVITY_PERIOD']}. Unsubscribing...")
-                        await self.websocket.send(json.dumps({
-                            "method": "unsubscribeTokenTrade",
-                            "keys": [mint]
-                        }))
-                        async with self.state.lock:
-                            self.state.active_subscriptions.discard(mint)  # Remove from active subscriptions
-                            del self.last_update_times[mint]  # Remove from tracking
-                        logger.debug(f"✅ Unsubscribed from inactive token {mint}")
-                    except Exception as e:
-                        logger.error(f"❌ Failed to unsubscribe from {mint}: {e}", exc_info=True)
+    #             # Unsubscribe from inactive tokens
+    #             for mint in inactive_tokens:
+    #                 logger.info(f"💀 Token {mint} inactive for over {self.config['INACTIVITY_PERIOD']}. Unsubscribing...")
+    #                 try:
+    #                     logger.info(f"💀 Token {mint} inactive for over {self.config['INACTIVITY_PERIOD']}. Unsubscribing...")
+    #                     await self.websocket.send(json.dumps({
+    #                         "method": "unsubscribeTokenTrade",
+    #                         "keys": [mint]
+    #                     }))
+    #                     async with self.state.lock:
+    #                         self.state.active_subscriptions.discard(mint)  # Remove from active subscriptions
+    #                         del self.last_update_times[mint]  # Remove from tracking
+    #                     logger.debug(f"✅ Unsubscribed from inactive token {mint}")
+    #                 except Exception as e:
+    #                     logger.error(f"❌ Failed to unsubscribe from {mint}: {e}", exc_info=True)
 
-                # Wait before the next check
-                await self.state.wait_or_interrupt(timeout=60)  # Check every 60 seconds
-            except Exception as e:
-                logger.error(f"Error in check_inactive_tokens: {e}", exc_info=True)
-                await self.state.wait_or_interrupt(timeout=5)  # Brief pause on error
+    #             # Wait before the next check
+    #             await self.state.wait_or_interrupt(timeout=60)  # Check every 60 seconds
+    #         except Exception as e:
+    #             logger.error(f"Error in check_inactive_tokens: {e}", exc_info=True)
+    #             await self.state.wait_or_interrupt(timeout=5)  # Brief pause on error
 
     async def shutdown(self):
         """Gracefully shutdown the WebSocket connection, unsubscribing from new token events and token trade subscriptions with retries."""

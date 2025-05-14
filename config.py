@@ -9,12 +9,11 @@ PLAY_BUY_SOUND = False                      # Play the buy sound when a buy is m
 PLAY_SELL_SOUND = False                     # Play the sell sound when a sell is made
 
 # --- New Multi-Stage Sell Logic Configuration ---
-INITIAL_STOP_LOSS_PERCENT = 40.0            # Initial SL as % below buy price (e.g., 25.0 for -25%)
-# INITIAL_TAKE_PROFIT_PERCENT is removed as TP1 price is now calculated based on investment, costs, and margin.
+FIRST_SELL_PROFIT_MARGIN = 70.0             # Desired profit margin % on the *total initial investment* for the first TP sell
 FIRST_SELL_PERCENT = 35.0                   # % of *initial* tokens to sell at First TP (e.g., 50.0 for 50%)
+INITIAL_STOP_LOSS_PERCENT = 40.0            # Initial SL as % below buy price (e.g., 25.0 for -25%)
 TRAILING_STOP_LOSS_PERCENT = 50.0           # Trailing SL % drop from highest price *after* First TP (e.g., 15.0 for -15%)
 SECOND_TAKE_PROFIT_PERCENT = 800.0          # Second TP as % above buy price (e.g., 200.0 for +200%)
-FIRST_SELL_PROFIT_MARGIN = 70.0             # Desired profit margin % on the *total initial investment* for the first TP sell
 
 # --- Fees and Tips ---
 DEFAULT_BUY_FEE = 0.001                     # Fee for buying in SOL
@@ -30,16 +29,17 @@ MIN_MARKETCAP_THRESHOLD = 3600              # Minimum market cap threshold in US
 DEFAULT_MARKETCAP_THRESHOLD = 45000         # Minimum market cap threshold in USD to search for buy opportunities
 MIN_VOLATILITY = 0.18                       # Minimum volatility threshold in % to search for buy opportunities
 DEFAULT_TIME_INTERVALL = 30                 # Time interval for checking volatility, volume and marketcap in minutes
-MAX_DRAWDOWN_SOL = 10                       # Maximum allowed 24h loss in SOL (not integrated)
-DRAWDOWN_CHECK_INTERVAL = 3600              # Drawdown check interval (seconds) (not integrated)
+#MAX_DRAWDOWN_SOL = 10                       # Maximum allowed 24h loss in SOL (not integrated)
+#DRAWDOWN_CHECK_INTERVAL = 3600              # Drawdown check interval (seconds) (not integrated)
 
 # UNSUBSCRIBING CONDITIONS
-INACTIVITY_PERIOD = 20                      # Inactivity period in minutes before unsubscribing & backup
+INACTIVITY_PERIOD = 30                      # Inactivity period in minutes before unsubscribing & backup
 MIN_MARKET_CAP = 3600                       # Minimum market cap (in USD) - for unsubscription & backup
+MC_DROP_THRESHOLD = 5                       # Market cap drop threshold (in %) - for unsubscription & backup
 
 # Subscription tracking
-ACTIVE_SUBSCRIPTIONS = set()                # leave it alone ... can be deleted?
-NEW_TOKEN_SUBSCRIPTION = False              # leave it alone ... can be deleted?
+#ACTIVE_SUBSCRIPTIONS = set()                # leave it alone ... can be deleted?
+#NEW_TOKEN_SUBSCRIPTION = False              # leave it alone ... can be deleted?
 
 # PumpPortal
 _MAX_SUBSCRIPTION_BATCH: int = 100           # For batch unsubscription ... can be deleted?

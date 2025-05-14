@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS tokens_backup (
 );
 
 -- Add the `backed_up` column to the backup table
+ALTER TABLE tokens_backup ADD COLUMN IF NOT EXISTS backup_reason TEXT;
 ALTER TABLE tokens_backup ADD COLUMN IF NOT EXISTS backup_timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
 -- Remove the default value for the `timestamp` column in the backup table
 ALTER TABLE tokens_backup ALTER COLUMN timestamp DROP DEFAULT;
