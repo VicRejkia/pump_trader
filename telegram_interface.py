@@ -41,13 +41,14 @@ def escape_markdown_v2_text(text: str) -> str:
     # Characters to escape for MarkdownV2.
     # Note: '.' and '!' are only special if not part of a URL and might need context.
     # For broad safety, we escape them. Hyphen '-' is also critical.
-    escape_chars = r'\_*[]()~`>#+-=|{}.!' # Removed '.' from here temporarily, handle manually. Added '-'
     # Escape hyphen first to avoid issues with it being in a range in char sets if not careful.
     # Simpler to just list it.
     processed_text = text
-    for char in r'_*[]()~`>#+-=|{}.!': # Iterate and replace
+    for char in r'\\_*[]()~`>#+-=|{}.!': # Iterate and replace
         if char in processed_text: # Check if char exists to avoid unnecessary replaces
-            processed_text = processed_text.replace(char, f'\\{char}')
+            processed_text = processed_text.replace(char, f'\{char}')
+
+    # print(f"Escaped text: {processed_text}")  # Debugging line
     return processed_text
 
 
@@ -57,6 +58,7 @@ def escape_markdown_v2_text_for_code_block(text: str) -> str:
     """
     processed_text = text.replace('\\', '\\\\') # Escape backslash first
     processed_text = processed_text.replace('`', '\\`')  # Then escape backtick
+    # print(f"Escaped code block text: {processed_text}")  # Debugging line
     return processed_text
 
 # --- Helper Functions for Dynamic Config ---
@@ -237,24 +239,27 @@ async def edit_dynamic_config_start_command(update: Update, context: ContextType
                                       parse_mode="MarkdownV2")
         return ConversationHandler.END
 
-    params_list_md = [escape_markdown_v2_text("Available parameters to edit:")]
+    params_list_md = [("Available parameters to edit:")]
     params_list_plain = ["Available parameters to edit:"]
 
     for key, value in sorted(config_data.items()):
-        key_for_code_block = escape_markdown_v2_text_for_code_block(key)
-        json_value_for_code_block = escape_markdown_v2_text_for_code_block(json.dumps(value, ensure_ascii=False))
-        type_hint_escaped = escape_markdown_v2_text(get_type_hint(value))
+        # key_for_code_block = escape_markdown_v2_text_for_code_block(key)
+        # json_value_for_code_block = escape_markdown_v2_text_for_code_block(json.dumps(value, ensure_ascii=False))
+        # type_hint_escaped = escape_markdown_v2_text(get_type_hint(value))        
+        key_for_code_block = key
+        json_value_for_code_block = json.dumps(value, ensure_ascii=False)
+        type_hint_escaped = get_type_hint(value)
         
         params_list_md.append(f"- `{key_for_code_block}` (current: `{json_value_for_code_block}`){type_hint_escaped}")
         params_list_plain.append(f"- {key} (current: {json.dumps(value, ensure_ascii=False)}){get_type_hint(value)}")
 
     params_text_md = "\n".join(params_list_md)
-    params_text_md += escape_markdown_v2_text("\n\nWhich parameter do you want to edit? (Type the exact name)")
+    params_text_md += "\n\nWhich parameter do you want to edit? (Type the exact name)"
     params_text_plain = "\n".join(params_list_plain)
-    params_text_plain += "\n\nWhich parameter do you want to edit? (Type the exact name)"
+    params_text_plain += "\n\nPT: Which parameter do you want to edit? (Type the exact name)"
     
     try:
-        await query.edit_message_text(text=params_text_md, parse_mode="MarkdownV2",
+        await query.edit_message_text(text=escape_markdown_v2_text(params_text_md), parse_mode="MarkdownV2",
                                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel", callback_data='cancel_edit_config')]]))
     except Exception as e:
         print(f"Error displaying params for edit (MarkdownV2): {e}. Using plain text.")
