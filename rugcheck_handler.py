@@ -407,7 +407,7 @@ class Rugcheck:
                          logger.debug(f"Token {mint} already removed from active subscriptions, skipping WS unsubscribe.")
 
                 # 3. Backup and Delete
-                await self.db_client.backup_and_delete_token(mint, datetime.now(timezone.utc), "high rugcheckscore")
+                await self.db_client.backup_and_delete_token(mint=mint, archived_at=datetime.now(timezone.utc), reason="high_rugcheckscore")
                 #logger.debug(f"🧹 Backed up and deleted high-score token {mint}.")
 
                 # Even if unsubscribe fails, we consider processing successful as it's deactivated in DB

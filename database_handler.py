@@ -803,8 +803,8 @@ class DatabaseClient:
                 async with conn.transaction():
                     try:
                         await conn.execute('''
-                            INSERT INTO tokens_backup SELECT *, NOW(), $2 FROM tokens WHERE mint = $1
-                        ''', mint, reason)
+                            INSERT INTO tokens_backup SELECT *, $1, NOW() FROM tokens WHERE mint = $2
+                        ''', reason, mint)
                         
                         await conn.execute('''
                             INSERT INTO trades_backup SELECT *, NOW() FROM trades WHERE mint = $1
