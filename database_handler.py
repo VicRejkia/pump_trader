@@ -945,6 +945,71 @@ class DatabaseClient:
             logger.exception("Error loading backup data: %s", e)
             raise
 
+    async def get_vwap_price(self, mint: str, window_minutes: int, conn=None) -> float | None:
+        query = """
+            SELECT SUM(td.sol_amount) / SUM(td.token_amount) AS vwap
+            FROM trades td
+            WHERE td.mint = $1
+            AND td.timestamp >= NOW() - ($2 || ' minutes')::interval
+            AND td.token_amount > 0;
+        """
+        connection = conn or await self.pool.acquire()
+        try:
+            result = await connection.fetchval(query, mint, str(window_minutes))
+            return float(result) if result is not None else None
+        except Exception as e:
+            logger.error(f"Error calculating VWAP for {mint}: {e}", exc_info=True)
+            return None
+        finally:
+            if not conn and connection:
+                await self.pool.release(connection)
+
+    # TWAP would be more involved, potentially fetching rows and processing in Python
+    async def get_twap_price(self, mint: str, window_minutes: int, interval_seconds: int, conn=None) -> float | None:
+        # 1. Fetch trades for the window
+        query_trades = """
+            SELECT timestamp, price  -- price is sol_amount / token_amount
+            FROM trades
+            WHERE mint = $1
+            AND timestamp >= NOW() - ($2 || ' minutes')::interval
+            AND token_amount > 0 -- ensure valid price calculation
+            ORDER BY timestamp ASC;
+        """
+        connection = conn or await self.pool.acquire()
+        try:
+            trade_records = await connection.fetch(query_trades, mint, str(window_minutes))
+            if not trade_records:
+                return None
+
+            # 2. Process in Python (example using pandas for simplicity)
+            import pandas as pd # Make sure pandas is available
+            df = pd.DataFrame(trade_records, columns=['timestamp', 'price'])
+            df['price'] = pd.to_numeric(df['price'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            df = df.set_index('timestamp')
+
+            if df.empty:
+                return None
+
+            # Resample into intervals and take the median price of each interval
+            # 'L' offset for 'last' value in interval, 'min_count=1' ensures NaN if no trades
+            interval_prices = df['price'].resample(f'{interval_seconds}S').median(numeric_only=True)
+            
+            # Drop intervals with no trades (NaNs) and calculate the mean of the interval medians
+            valid_interval_prices = interval_prices.dropna()
+            if valid_interval_prices.empty:
+                return None
+                
+            twap = valid_interval_prices.mean()
+            return float(twap) if pd.notnull(twap) else None
+
+        except Exception as e:
+            logger.error(f"Error calculating TWAP for {mint}: {e}", exc_info=True)
+            return None
+        finally:
+            if not conn and connection:
+                await self.pool.release(connection)
+
     async def get_total_tracked_tokens(self, backedup=False):
         """Fetches the total number of tracked tokens from the database."""
         query = "SELECT COUNT(*) FROM tokens"
