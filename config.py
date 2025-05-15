@@ -21,6 +21,11 @@ DEFAULT_BUY_TIP = 0.001                     # Tip for buying in SOL
 DEFAULT_SELL_FEE = 0.001                    # Fee for selling in SOL
 DEFAULT_SELL_TIP = 0.001                    # Tip for selling in SOL
 
+# Price determination strategy
+PRICE_DETERMINATION_METHOD = "VWAP"  # Options: "VWAP", "TWAP", "LATEST"
+PRICE_AVG_WINDOW_MINUTES = 5         # Lookback window for VWAP/TWAP in minutes
+TWAP_SUB_INTERVAL_SECONDS = 60       # Sub-interval for TWAP calculation (if TWAP is used) in seconds
+
 # Trading thresholds
 DEFAULT_RUGCHECK_SCORE_THRESHOLD = 401      # No trading if Rugcheck score is equal or above this threshold
 DEFAULT_SOCIAL_SCORE_THRESHOLD = 100        # No trading if Social score is equal or above this threshold

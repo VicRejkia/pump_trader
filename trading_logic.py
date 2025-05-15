@@ -79,14 +79,15 @@ class TradingManager:
             # Avoid tight loop on persistent errors
             await asyncio.sleep(5)
 
+
     async def check_sell_opportunities(self):
-        """Check for sell opportunities based on SL and TP rules."""
+        """Check for sell opportunities based on SL and TP rules, using configurable price determination."""
         if self.state.shutdown_event.is_set():
             return
 
-        sol_price = await self.state.get_sol_price() # Needed for price conversions if any
-        if sol_price is None or sol_price <= 0:
-            logger.warning(f"⚠ Invalid SOL_PRICE ({sol_price}); skipping sell check.")
+        sol_price_usd = await self.state.get_sol_price()  # Current SOL price in USD
+        if sol_price_usd is None or sol_price_usd <= 0:
+            logger.warning(f"⚠ Invalid SOL_PRICE_USD ({sol_price_usd}); skipping sell check.")
             return
 
         # Acquire connection from the pool within the DatabaseClient instance
@@ -94,180 +95,176 @@ class TradingManager:
             # Use a single transaction for checking and potentially selling multiple positions
             async with conn.transaction():
                 try:
-                    # Fetch active buy positions using the new DatabaseClient method
+                    # Fetch all active buy positions
                     positions = await self.db.get_active_buy_positions(conn)
 
                     if not positions:
                         # logger.debug("No active positions to check for selling.")
-                        return # No active positions to check
+                        return
 
-                    # Fetch latest prices for all active mints in one go
-                    active_mints = list(set(p['mint'] for p in positions)) # Unique mints
+                    # Get unique mints from active positions
+                    active_mints = list(set(p['mint'] for p in positions))
                     if not active_mints:
                         return
 
-                    # Fetch latest prices using the new DatabaseClient method
-                    latest_prices = await self.db.get_latest_prices(active_mints, conn)
-                    # The new method already returns the desired dictionary format
-                    # latest_prices = {row['mint']: {'price': float(row['price']), 'market_cap': float(row['marketcapsol'])}
-                    #                  for row in latest_prices_rows if row['price'] is not None and float(row['price']) > 0}
+                    # Determine the price and market cap to use for each mint
+                    prices_to_use = {} # Stores {'mint': {'price': float, 'market_cap': float}}
 
-                    # This block is removed as the logic is now inside get_latest_prices
+                    for mint_address in active_mints:
+                        price_for_sell_decision = None
+                        market_cap_from_latest = None
 
+                        # Always fetch the latest trade data for market_cap logging and "LATEST" price option
+                        latest_trade_data_map = await self.db.get_latest_prices([mint_address], conn)
+                        if latest_trade_data_map and mint_address in latest_trade_data_map:
+                            latest_data_for_mint = latest_trade_data_map[mint_address]
+                            market_cap_from_latest = latest_data_for_mint.get('market_cap')
+                            if self.config.get('PRICE_DETERMINATION_METHOD', 'LATEST') == 'LATEST':
+                                price_for_sell_decision = latest_data_for_mint.get('price')
+
+                        # Determine price based on configured method (VWAP or TWAP)
+                        # This will override price_for_sell_decision if not 'LATEST'
+                        price_determination_method = self.config.get('PRICE_DETERMINATION_METHOD')
+                        if price_determination_method == "VWAP":
+                            price_for_sell_decision = await self.db.get_vwap_price(
+                                mint_address,
+                                self.config.get('PRICE_AVG_WINDOW_MINUTES', 10),
+                                conn
+                            )
+                        elif price_determination_method == "TWAP":
+                            price_for_sell_decision = await self.db.get_twap_price(
+                                mint_address,
+                                self.config.get('PRICE_AVG_WINDOW_MINUTES', 10),
+                                self.config.get('TWAP_SUB_INTERVAL_SECONDS', 60),
+                                conn
+                            )
+
+                        if price_for_sell_decision is not None and price_for_sell_decision > 0:
+                            prices_to_use[mint_address] = {
+                                'price': float(price_for_sell_decision),
+                                'market_cap': float(market_cap_from_latest) if market_cap_from_latest is not None else 0.0
+                            }
+                        else:
+                            logger.warning(f"Could not determine a valid price for {mint_address} using method '{price_determination_method}'. Price: {price_for_sell_decision}. Skipping sell check for positions of this mint.")
+
+                    # Now iterate through actual positions and apply logic
                     for position in positions:
                         pos_id = position['id']
                         mint = position['mint']
+
+                        if mint not in prices_to_use:
+                            # Price determination failed for this mint earlier
+                            continue
+
+                        current_price_to_use = prices_to_use[mint]['price'] # This is the determined (VWAP, TWAP, or LATEST) price
+                        # For logging and emergency MC check, use market_cap from the latest trade data
+                        current_market_cap_sol_for_log = prices_to_use[mint]['market_cap']
+
                         buy_price = float(position['buy_price'])
                         initial_tokens = float(position['initial_tokens'])
                         remaining_tokens = float(position['remaining_tokens'])
-                        # total_investment_sol = float(position['total_investment_sol']) # Fetched in execute_sell if needed
-                        active_stop_loss_price = float(position['stop_loss_price']) # The currently active SL
-                        highest_price = float(position['highest_price'])
-                        initial_tp_price = float(position['initial_tp_price']) # Calculated TP1 price
-                        second_tp_price = float(position['second_tp_price']) # Calculated TP2 price
-                        first_tp_hit = position['first_tp_hit'] # Boolean
+                        active_stop_loss_price = float(position['stop_loss_price'])
+                        highest_price_since_buy = float(position['highest_price'])
+                        initial_tp_price = float(position['initial_tp_price'])
+                        second_tp_price = float(position['second_tp_price'])
+                        first_tp_hit = position['first_tp_hit']
 
-                        if initial_tokens <= 0: # Should not happen for a buy entry, but safety check
+                        if initial_tokens <= 0: # Safety check
                             continue
 
-                        if mint not in latest_prices:
-                            logger.warning(f"⚠ Could not find latest price for active position {mint} (ID: {pos_id}). Skipping sell check.")
-                            continue
-
-                        current_price = latest_prices[mint]['price']
-                        current_market_cap = latest_prices[mint]['market_cap']
-
-                        # --- Update highest price ---
-                        if current_price > highest_price:
-                            highest_price = current_price # Update local var for subsequent checks
-                            # Update highest price using the new DatabaseClient method
-                            await self.db.update_portfolio_highest_price(pos_id, current_price, conn)
-                            # logger.debug(f"Updated highest price for {mint} to {current_price:.6f}")
-
+                        # --- Update highest price (based on the price used for decisions) ---
+                        if current_price_to_use > highest_price_since_buy:
+                            highest_price_since_buy = current_price_to_use # Update local var
+                            await self.db.update_portfolio_highest_price(pos_id, current_price_to_use, conn)
 
                         # --- Calculate Trailing SL Price (only relevant if first TP was hit) ---
-                        trailing_sl_price = 0 # Default
+                        trailing_sl_price = 0.0
                         if first_tp_hit:
-                            # Calculate trailing SL based on highest price since the buy
-                            # Formula: trailing_sl_price = highest_price * (1 - TRAILING_STOP_LOSS_PERCENT/100)
-                            # Example: 0.0000002 * (1 - 50/100) = 0.0000001
-                            trailing_sl_price = highest_price * (1 - self.config['TRAILING_STOP_LOSS_PERCENT'] / 100.0)
-                            # Note: The active SL is either the initial SL, breakeven (buy_price), or potentially this trailing_sl_price
-                            # depending on the exact logic chosen after first TP hit.
-                            # For now, we assume SL moves to buy_price after first TP, and trailing SL is checked separately.
+                            trailing_sl_price = highest_price_since_buy * (1 - self.config['TRAILING_STOP_LOSS_PERCENT'] / 100.0)
 
                         # --- Check Sell Conditions (Order Matters!) ---
                         sell_reason = None
-                        sell_all = False
-                        sell_partial = False
-                        sell_percentage = 0.0
+                        sell_all = False      # Flag to sell all remaining tokens
+                        sell_partial = False  # Flag for first TP partial sell
+                        sell_percentage_of_initial = 0.0 # For First TP
 
                         # 1. Initial Stop Loss / Breakeven Stop Loss
-                        # Formula: active_stop_loss_price = buy_price * (1 - INITIAL_STOP_LOSS_PERCENT/100)
-                        # Example: 0.000000125 * 0.5 = 0.0000000625
-                        if current_price <= active_stop_loss_price:
+                        if current_price_to_use <= active_stop_loss_price:
                             sell_reason = "Stop Loss" if not first_tp_hit else "Breakeven SL"
                             sell_all = True
-                            sell_percentage = 1.0
-                            logger.info(f"🛑 {sell_reason} hit for {mint} (ID: {pos_id}) at price {current_price:.9f} (SL: {active_stop_loss_price:.9f})")
+                            logger.info(f"🛑 {sell_reason} hit for {mint} (ID: {pos_id}) at price {current_price_to_use:.9f} (SL: {active_stop_loss_price:.9f})")
 
                         # 2. Second Take Profit (Sell Remaining)
-                        # Formula: second_tp_price = buy_price * (1 + SECOND_TAKE_PROFIT_PERCENT/100)
-                        # Example: 0.000000125 * 4 = 0.0000005
-                        elif current_price >= second_tp_price:
-                             # Check if first TP was hit is implicit, as remaining_tokens would be < initial_tokens
-                             # Sell remaining regardless of whether first TP was hit or not if price reaches this high
+                        elif current_price_to_use >= second_tp_price:
                             sell_reason = "Second TP"
                             sell_all = True
-                            sell_percentage = 1.0 # Sell all remaining
-                            logger.info(f"🚀 Second TP hit for {mint} (ID: {pos_id}) at price {current_price:.9f} (Threshold: {second_tp_price:.9f})")
+                            logger.info(f"🚀 Second TP hit for {mint} (ID: {pos_id}) at price {current_price_to_use:.9f} (Threshold: {second_tp_price:.9f})")
 
                         # 3. First Take Profit (Partial Sell, only if not hit before)
-                        # Formula: initial_tp_price = (total_investment * (1 + profit_margin)) / initial_tokens
-                        # Example: (0.2 * 1.3) / 1,600,000 = 0.0000001625
-                        elif not first_tp_hit and current_price >= initial_tp_price:
+                        elif not first_tp_hit and current_price_to_use >= initial_tp_price:
                             sell_reason = "First TP"
                             sell_partial = True
-                            # Sell configured percentage of the *initial* amount
-                            sell_percentage = self.config['FIRST_SELL_PERCENT'] / 100.0 # Use FIRST_SELL_PERCENT
-                            logger.info(f"🎯 First TP hit for {mint} (ID: {pos_id}) at price {current_price:.9f} (Threshold: {initial_tp_price:.9f}). Selling {sell_percentage*100}%.")
+                            sell_percentage_of_initial = self.config['FIRST_SELL_PERCENT'] / 100.0
+                            logger.info(f"🎯 First TP hit for {mint} (ID: {pos_id}) at price {current_price_to_use:.9f} (Threshold: {initial_tp_price:.9f}). Selling {sell_percentage_of_initial*100}%.")
 
                         # 4. Trailing Stop Loss (Only active *after* First TP is hit)
-                        # Formula: trailing_sl_price = highest_price * (1 - TRAILING_STOP_LOSS_PERCENT/100)
-                        # Example: 0.0000002 * 0.5 = 0.0000001
-                        elif first_tp_hit and current_price <= trailing_sl_price:
+                        elif first_tp_hit and current_price_to_use <= trailing_sl_price:
                             sell_reason = "Trailing SL"
                             sell_all = True
-                            sell_percentage = 1.0 # Sell all remaining
-                            logger.info(f"📉 Trailing SL hit for {mint} (ID: {pos_id}) at price {current_price:.9f} (Trailing SL: {trailing_sl_price:.9f}, Highest: {highest_price:.9f})")
-
-                        # 5. Emergency Stop Loss (if applicable)
-                        # Formula: market_cap_usd = current_market_cap * sol_price
-                        # Example: 30 * 130 = 3,900 < 4,000
-                        elif (current_market_cap*sol_price) < self.config['MIN_MARKET_CAP']:
-                            sell_reason = "Emergency SL"
+                            logger.info(f"📉 Trailing SL hit for {mint} (ID: {pos_id}) at price {current_price_to_use:.9f} (Trailing SL: {trailing_sl_price:.9f}, Highest: {highest_price_since_buy:.9f})")
+                        
+                        # 5. Emergency Market Cap Stop Loss
+                        # current_market_cap_sol_for_log is from the LATEST trade data. sol_price_usd is the global one.
+                        elif (current_market_cap_sol_for_log * sol_price_usd) < self.config['MIN_MARKETCAP_THRESHOLD']: # Use MIN_MARKETCAP_THRESHOLD from config
+                            sell_reason = "Emergency SL (MCap)"
                             sell_all = True
-                            sell_percentage = 1.0
-                            logger.info(f"⚠ Emergency SL triggered for {mint} (ID: {pos_id}) at price {current_price:.9f} (Market Cap: {current_market_cap:.9f})")
+                            logger.info(f"🆘 Emergency SL (MCap) for {mint} (ID: {pos_id}). Current MCap_USD: {(current_market_cap_sol_for_log * sol_price_usd):.2f}, Threshold: {self.config['MIN_MARKETCAP_THRESHOLD']:.2f}")
 
 
                         # --- Execute Sell ---
-                        # Execute sell within the same transaction
-                        if sell_partial:
-                            try:
-                                # Pass trigger values specific to First TP
-                                trigger_values = {"initial_tp_price_threshold": initial_tp_price}
-                                profit = await self.execute_sell(
+                        if sell_reason: # If any sell condition was met
+                            trigger_values = {} # To store specific values that triggered the sell
+                            profit_from_sell = None
+
+                            if sell_partial: # First TP
+                                trigger_values = {"first_tp_price_threshold": initial_tp_price}
+                                profit_from_sell = await self.execute_sell(
                                     conn=conn,
                                     mint=mint,
-                                    current_price=current_price,
-                                    market_cap_sol=current_market_cap,
+                                    current_price=current_price_to_use, # Use the determined price
+                                    market_cap_sol=current_market_cap_sol_for_log, # Log the latest MC
                                     reason=sell_reason,
-                                    sell_percentage=sell_percentage,
+                                    sell_percentage=sell_percentage_of_initial, # Pass the percentage of initial tokens
                                     position_id_to_update=pos_id,
                                     sell_trigger_values=trigger_values
                                 )
-                                if profit is not None: # Check if sell was successful
-                                    # --- Post-First TP Actions ---
-                                    # Mark first TP as hit and adjust SL to breakeven (buy_price)
-                                    # Mark first TP hit and adjust SL using the new DatabaseClient method
+                                if profit_from_sell is not None: # If sell was successful
                                     await self.db.mark_first_tp_hit_and_adjust_sl(pos_id, buy_price, conn)
                                     logger.info(f"📈 Marked First TP as hit for {mint} (ID: {pos_id}) and adjusted Stop Loss to breakeven ({buy_price:.9f}).")
-                            except Exception as e:
-                                logger.error(f"Error executing partial sell for {mint} (ID: {pos_id}): {e}", exc_info=True)
-                                # Allow transaction to potentially rollback or continue with other positions
 
-                        elif sell_all:
-                            try:
-                                # Determine and pass trigger values for full sell scenarios
-                                trigger_values = {}
+                            elif sell_all: # SL, Second TP, Trailing SL, Emergency SL
                                 if sell_reason == "Stop Loss" or sell_reason == "Breakeven SL":
                                     trigger_values = {"stop_loss_price_threshold": active_stop_loss_price}
                                 elif sell_reason == "Second TP":
                                     trigger_values = {"second_tp_price_threshold": second_tp_price}
                                 elif sell_reason == "Trailing SL":
-                                    trigger_values = {"trailing_sl_price_threshold": trailing_sl_price, "highest_price_at_trigger": highest_price}
-                                elif sell_reason == "Emergency SL":
-                                     trigger_values = {"current_market_cap_usd": current_market_cap * sol_price} # Pass USD value
-
-                                await self.execute_sell(
+                                    trigger_values = {"trailing_sl_price_threshold": trailing_sl_price, "highest_price_at_trigger": highest_price_since_buy}
+                                elif sell_reason == "Emergency SL (MCap)":
+                                    trigger_values = {"current_market_cap_usd_at_trigger": (current_market_cap_sol_for_log * sol_price_usd), "min_mcap_threshold_config": self.config['MIN_MARKETCAP_THRESHOLD']}
+                                
+                                profit_from_sell = await self.execute_sell(
                                     conn=conn,
                                     mint=mint,
-                                    current_price=current_price,
-                                    market_cap_sol=current_market_cap,
+                                    current_price=current_price_to_use, # Use the determined price
+                                    market_cap_sol=current_market_cap_sol_for_log, # Log the latest MC
                                     reason=sell_reason,
-                                    sell_percentage=sell_percentage,
+                                    sell_percentage=1.0, # Indicates selling all remaining for cost basis calculation
                                     position_id_to_update=pos_id,
                                     sell_trigger_values=trigger_values
                                 )
-                            except Exception as e:
-                                logger.error(f"Error executing full sell for {mint} (ID: {pos_id}): {e}", exc_info=True)
-                                # Allow transaction to potentially rollback or continue with other positions
 
-                        # Add a small delay if a sell occurred to allow logs/state to settle? Optional.
-                        if sell_partial or sell_all:
-                            await asyncio.sleep(0.1)
-
+                            if profit_from_sell is not None:
+                                await asyncio.sleep(0.1) # Small delay if a sell occurred
 
                 except Exception as e:
                     logger.error(f"❌ Error in check_sell_opportunities transaction block: {e}", exc_info=True)
