@@ -22,8 +22,8 @@ DEFAULT_SELL_FEE = 0.001                    # Fee for selling in SOL
 DEFAULT_SELL_TIP = 0.001                    # Tip for selling in SOL
 
 # Price determination strategy
-PRICE_DETERMINATION_METHOD = "VWAP"  # Options: "VWAP", "TWAP", "LATEST"
-PRICE_AVG_WINDOW_MINUTES = 5         # Lookback window for VWAP/TWAP in minutes
+PRICE_DETERMINATION_METHOD = "MEDIAN"  # Options: "VWAP", "TWAP", "LATEST", "MEDIAN"
+PRICE_AVG_WINDOW_MINUTES = 3         # Lookback window for VWAP/TWAP in minutes
 TWAP_SUB_INTERVAL_SECONDS = 60       # Sub-interval for TWAP calculation (if TWAP is used) in seconds
 
 # Trading thresholds
@@ -66,10 +66,12 @@ _LOG_LEVEL_CONSOLE: str = "DEBUG"
 _LOG_LEVEL_FILE: str = "DEBUG"
 _LOG_STORAGE_PATH: str = "log"
 
+# Telegram
+TELEGRAM_INTERACTION = True
+
 # --- Metadata Processor Configuration ---
-_HEARTBEAT_EMIT_INTERVAL_SECONDS = 60  # Interval for emitting heartbeat messages in seconds
-_HEARTBEAT_GAP_THRESHOLD_SECONDS = 300  # Threshold for heartbeat gap in seconds
-_RESTART_GAP_THRESHOLD_SECONDS = 300  # Threshold for restart gap in seconds
+HEARTBEAT_EMIT_INTERVAL_SECONDS = 60  # Interval for emitting heartbeat messages in seconds
+RESTART_GAP_THRESHOLD_SECONDS = 300  # Threshold for restart gap in seconds
 # --- Metadata Processor Configuration ---
 
 # --- Socials Processor Configuration ---

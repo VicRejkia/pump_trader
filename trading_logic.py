@@ -135,6 +135,11 @@ class TradingManager:
                                 self.config.get('TWAP_SUB_INTERVAL_SECONDS', 60),
                                 conn
                             )
+                        elif self.config["PRICE_DETERMINATION_METHOD"] == "MEDIAN": # New MEDIAN logic
+                            price_for_sell_decision = await self.db.get_median_price(
+                                mint_address, 
+                                self.config["PRICE_AVG_WINDOW_MINUTES"]
+                            )
 
                         # Ensure price_for_sell_decision is valid before adding to prices_to_use
                         if price_for_sell_decision is not None and float(price_for_sell_decision) > 0:
@@ -401,8 +406,8 @@ class TradingManager:
                 sol_price=sol_price
             )
             logger.info(message)
-            asyncio.create_task(send_telegram_message(message))
-            # Removed old log message here
+            if self.config['TELEGRAM_INTERACTION']:
+                asyncio.create_task(send_telegram_message(message))
 
             # Update global SOL balance using the instance passed to the manager
             await self.state.update_sol_balance(net_sol_received) # Add received SOL
@@ -561,7 +566,9 @@ class TradingManager:
                     )
 
                     logger.info(message)
-                    asyncio.create_task(send_telegram_message(message))
+                    if self.config['TELEGRAM_INTERACTION']:
+                        # Send message to Telegram asynchronously
+                        asyncio.create_task(send_telegram_message(message))
 
                     # Update global SOL balance using the instance passed to the manager
                     await self.state.update_sol_balance(-total_sol_investment) # Subtract TOTAL investment

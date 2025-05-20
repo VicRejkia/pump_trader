@@ -23,6 +23,7 @@ from typing import Dict, Optional, List, Tuple # Added List, Tuple
 from utils import calculate_volatility
 import inspect 
 from typing import Optional
+import statistics 
 
 # Load environment variables from .env file
 load_dotenv()
@@ -826,11 +827,11 @@ class DatabaseClient:
                 # Example: RESTART_GAP_THRESHOLD_SECONDS = self.config.get('RESTART_GAP_THRESHOLD_SECONDS', 600)
                 # Ensure self.config is available or pass the value directly.
                 # For this example, let's assume it's accessed via self.config.
-                if not hasattr(self, 'config') or '_RESTART_GAP_THRESHOLD_SECONDS' not in self.config:
+                if not hasattr(self, 'config') or 'RESTART_GAP_THRESHOLD_SECONDS' not in self.config:
                     logger.warning("RESTART_GAP_THRESHOLD_SECONDS not found in config. Using default of 600s.")
                     RESTART_GAP_THRESHOLD_SECONDS = 600 # Default to 10 minutes
                 else:
-                    RESTART_GAP_THRESHOLD_SECONDS = self.config['_RESTART_GAP_THRESHOLD_SECONDS']
+                    RESTART_GAP_THRESHOLD_SECONDS = self.config['RESTART_GAP_THRESHOLD_SECONDS']
 
 
                 if await self.check_for_data_gap_on_restart(archived_at, RESTART_GAP_THRESHOLD_SECONDS):
@@ -958,6 +959,43 @@ class DatabaseClient:
             logger.exception("Error loading backup data: %s", e)
             raise
 
+    async def get_median_price(self, mint: str, window_minutes: int, conn=None) -> float | None:
+        async with self.pool.acquire() as conn:
+            try:
+                query = """
+                    SELECT (sol_amount / token_amount) AS price
+                    FROM trades
+                    WHERE mint = $1
+                    AND timestamp >= NOW() - ($2 || ' minutes')::interval
+                    AND token_amount > 0;
+                """
+                records = await conn.fetch(query, mint, str(window_minutes))
+                if not records:
+                    logger.debug(f"No trades found for {mint} in the last {window_minutes} minutes.")
+                    return None
+
+                prices = [float(record['price']) for record in records if record['price'] is not None]
+                if not prices:
+                    logger.warning(f"No valid prices for {mint} after filtering.")
+                    return None
+
+                # IQR Outlier Filtering
+                q1 = np.percentile(prices, 25)
+                q3 = np.percentile(prices, 75)
+                iqr = q3 - q1
+                lower_bound = q1 - 1.5 * iqr
+                upper_bound = q3 + 1.5 * iqr
+
+                filtered_prices = [p for p in prices if lower_bound <= p <= upper_bound]
+                if not filtered_prices:
+                    logger.warning(f"All prices for {mint} filtered out as outliers. Falling back to unfiltered median.")
+                    return statistics.median(prices)  # Fallback to unfiltered median
+
+                return statistics.median(filtered_prices)
+            except Exception as e:
+                logger.error(f"Error calculating median price for {mint}: {e}", exc_info=True)
+                return None
+
     async def get_vwap_price(self, mint: str, window_minutes: int, conn=None) -> float | None:
         query = """
             SELECT SUM(td.sol_amount) / SUM(td.token_amount) AS vwap
@@ -988,40 +1026,37 @@ class DatabaseClient:
             AND token_amount > 0 -- ensure valid price calculation
             ORDER BY timestamp ASC;
         """
-        connection = conn or await self.pool.acquire()
-        try:
-            trade_records = await connection.fetch(query_trades, mint, str(window_minutes))
-            if not trade_records:
-                return None
+        async with self.pool.acquire() as conn:
+            try:
+                trade_records = await conn.fetch(query_trades, mint, str(window_minutes))
+                if not trade_records:
+                    return None
 
-            # 2. Process in Python (example using pandas for simplicity)
-            import pandas as pd # Make sure pandas is available
-            df = pd.DataFrame(trade_records, columns=['timestamp', 'price'])
-            df['price'] = pd.to_numeric(df['price'])
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
-            df = df.set_index('timestamp')
+                # 2. Process in Python (example using pandas for simplicity)
+                import pandas as pd # Make sure pandas is available
+                df = pd.DataFrame(trade_records, columns=['timestamp', 'price'])
+                df['price'] = pd.to_numeric(df['price'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                df = df.set_index('timestamp')
 
-            if df.empty:
-                return None
+                if df.empty:
+                    return None
 
-            # Resample into intervals and take the median price of each interval
-            # 'L' offset for 'last' value in interval, 'min_count=1' ensures NaN if no trades
-            interval_prices = df['price'].resample(f'{interval_seconds}S').median(numeric_only=True)
-            
-            # Drop intervals with no trades (NaNs) and calculate the mean of the interval medians
-            valid_interval_prices = interval_prices.dropna()
-            if valid_interval_prices.empty:
-                return None
+                # Resample into intervals and take the median price of each interval
+                # 'L' offset for 'last' value in interval, 'min_count=1' ensures NaN if no trades
+                interval_prices = df['price'].resample(f'{interval_seconds}S').median(numeric_only=True)
                 
-            twap = valid_interval_prices.mean()
-            return float(twap) if pd.notnull(twap) else None
+                # Drop intervals with no trades (NaNs) and calculate the mean of the interval medians
+                valid_interval_prices = interval_prices.dropna()
+                if valid_interval_prices.empty:
+                    return None
+                    
+                twap = valid_interval_prices.mean()
+                return float(twap) if pd.notnull(twap) else None
 
-        except Exception as e:
-            logger.error(f"Error calculating TWAP for {mint}: {e}", exc_info=True)
-            return None
-        finally:
-            if not conn and connection:
-                await self.pool.release(connection)
+            except Exception as e:
+                logger.error(f"Error calculating TWAP for {mint}: {e}", exc_info=True)
+                return None
 
     async def get_total_tracked_tokens(self, backedup=False):
         """Fetches the total number of tracked tokens from the database."""
