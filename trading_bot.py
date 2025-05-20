@@ -853,6 +853,7 @@ class TradingBot:
             asyncio.create_task(self.run_sell_checks(), name="sell_opportunity_checker"),
         ]
         self.tasks.extend(self.ws_handler.start()) # Add WebSocket handler's tasks
+        self.tasks.append(asyncio.create_task(self.run_heartbeat_emitter(), name="heartbeat_emitter"))
 
         if self.rl_agent:
             self.tasks.append(asyncio.create_task(self.run_rl_agent_updates(), name="rl_agent_updater"))
@@ -889,6 +890,21 @@ class TradingBot:
             log_info("Main execution loop ended. Proceeding to full shutdown.")
             # The shutdown method will handle cancelling remaining tasks and cleanup.
             # No need to call self.shutdown() here as it's called in the final `finally` block of the script's entry point
+
+    async def run_heartbeat_emitter(self): # Add this as a new async method in TradingBot
+        log_debug("❤️ Heartbeat emitter started.")
+        HEARTBEAT_INTERVAL_SECONDS = self.config.get('_HEARTBEAT_EMIT_INTERVAL_SECONDS', 60) # e.g., every 60 seconds, make configurable
+        while not self.state.shutdown_event.is_set():
+            try:
+                if self.db_client: # Ensure db_client is available
+                    await self.db_client.insert_heartbeat()
+                await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+            except asyncio.CancelledError:
+                log_debug("❤️ Heartbeat emitter task cancelled.")
+                break
+            except Exception as e:
+                log_error(f"Error in heartbeat emitter: {e}", exc_info=True)
+                await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS) # Still wait before retrying
 
     async def run_buy_checks(self):
         log_info(":chart_with_upwards_trend: [bold]Starting buy opportunity checker...[/bold]")

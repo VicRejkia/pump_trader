@@ -79,7 +79,6 @@ class TradingManager:
             # Avoid tight loop on persistent errors
             await asyncio.sleep(5)
 
-
     async def check_sell_opportunities(self):
         """Check for sell opportunities based on SL and TP rules, using configurable price determination."""
         if self.state.shutdown_event.is_set():
@@ -90,40 +89,38 @@ class TradingManager:
             logger.warning(f"⚠ Invalid SOL_PRICE_USD ({sol_price_usd}); skipping sell check.")
             return
 
-        # Acquire connection from the pool within the DatabaseClient instance
         async with self.db.pool.acquire() as conn:
-            # Use a single transaction for checking and potentially selling multiple positions
             async with conn.transaction():
                 try:
-                    # Fetch all active buy positions
                     positions = await self.db.get_active_buy_positions(conn)
-
                     if not positions:
-                        # logger.debug("No active positions to check for selling.")
                         return
 
-                    # Get unique mints from active positions
                     active_mints = list(set(p['mint'] for p in positions))
                     if not active_mints:
                         return
 
-                    # Determine the price and market cap to use for each mint
-                    prices_to_use = {} # Stores {'mint': {'price': float, 'market_cap': float}}
+                    prices_to_use = {}
 
                     for mint_address in active_mints:
                         price_for_sell_decision = None
-                        market_cap_from_latest = None
+                        # market_cap_from_latest will store the latest market_cap if valid (positive)
+                        market_cap_from_latest_valid = None
 
-                        # Always fetch the latest trade data for market_cap logging and "LATEST" price option
                         latest_trade_data_map = await self.db.get_latest_prices([mint_address], conn)
                         if latest_trade_data_map and mint_address in latest_trade_data_map:
                             latest_data_for_mint = latest_trade_data_map[mint_address]
-                            market_cap_from_latest = latest_data_for_mint.get('market_cap')
-                            if self.config.get('PRICE_DETERMINATION_METHOD', 'LATEST') == 'LATEST':
-                                price_for_sell_decision = latest_data_for_mint.get('price')
+                            
+                            # Get market_cap; it can be None if get_latest_prices returned it as such (e.g., not positive)
+                            retrieved_mc = latest_data_for_mint.get('market_cap')
+                            if retrieved_mc is not None and float(retrieved_mc) > 0:
+                                market_cap_from_latest_valid = float(retrieved_mc)
+                            # else: market_cap_from_latest_valid remains None
 
-                        # Determine price based on configured method (VWAP or TWAP)
-                        # This will override price_for_sell_decision if not 'LATEST'
+                            if self.config.get('PRICE_DETERMINATION_METHOD', 'LATEST') == 'LATEST':
+                                # Get price; it can be None if get_latest_prices returned it as such (e.g., not positive)
+                                price_for_sell_decision = latest_data_for_mint.get('price')
+                        
                         price_determination_method = self.config.get('PRICE_DETERMINATION_METHOD')
                         if price_determination_method == "VWAP":
                             price_for_sell_decision = await self.db.get_vwap_price(
@@ -139,26 +136,58 @@ class TradingManager:
                                 conn
                             )
 
-                        if price_for_sell_decision is not None and price_for_sell_decision > 0:
+                        # Ensure price_for_sell_decision is valid before adding to prices_to_use
+                        if price_for_sell_decision is not None and float(price_for_sell_decision) > 0:
                             prices_to_use[mint_address] = {
                                 'price': float(price_for_sell_decision),
-                                'market_cap': float(market_cap_from_latest) if market_cap_from_latest is not None else 0.0
+                                # market_cap_from_latest_valid can be None here if latest MC wasn't positive
+                                'market_cap': market_cap_from_latest_valid
                             }
                         else:
-                            logger.warning(f"Could not determine a valid price for {mint_address} using method '{price_determination_method}'. Price: {price_for_sell_decision}. Skipping sell check for positions of this mint.")
+                            # If price is invalid, still store market_cap if it's valid, otherwise store None for MC too.
+                            # This ensures the mint is in prices_to_use if we have at least a market_cap for logging.
+                            # However, sell checks requiring price will skip this position later.
+                            prices_to_use[mint_address] = {
+                                'price': None, # Explicitly None if price is invalid
+                                'market_cap': market_cap_from_latest_valid
+                            }
+                            logger.warning(f"Could not determine a valid positive price for {mint_address} using method '{price_determination_method}'. Price determined: {price_for_sell_decision}. Sell checks requiring price will be skipped.")
 
-                    # Now iterate through actual positions and apply logic
+
                     for position in positions:
                         pos_id = position['id']
                         mint = position['mint']
 
                         if mint not in prices_to_use:
-                            # Price determination failed for this mint earlier
+                            logger.warning(f"⚠ No price/market_cap data resolved for active position {mint} (ID: {pos_id}). Skipping sell check.")
                             continue
+                        
+                        position_data = prices_to_use[mint]
+                        current_price_to_use = position_data.get('price') # Can be None if price determination failed
+                        current_market_cap_sol_for_log = position_data.get('market_cap') # Can be None if latest MC wasn't positive
 
-                        current_price_to_use = prices_to_use[mint]['price'] # This is the determined (VWAP, TWAP, or LATEST) price
-                        # For logging and emergency MC check, use market_cap from the latest trade data
-                        current_market_cap_sol_for_log = prices_to_use[mint]['market_cap']
+                        # If current_price_to_use is None or not positive, we cannot perform price-based SL/TP checks.
+                        if current_price_to_use is None or current_price_to_use <= 0:
+                            logger.warning(f"Skipping price-based sell checks for {mint} (ID: {pos_id}) due to invalid current price: {current_price_to_use}.")
+                            # However, an MCap based SL might still be possible if current_market_cap_sol_for_log is valid
+                            if current_market_cap_sol_for_log is not None and current_market_cap_sol_for_log > 0 and \
+                            (current_market_cap_sol_for_log * sol_price_usd) < self.config['MIN_MARKETCAP_THRESHOLD']:
+                                sell_reason = "Emergency SL (MCap)"
+                                sell_all = True
+                                logger.info(f"🆘 Emergency SL (MCap) for {mint} (ID: {pos_id}) due to low MCap, despite invalid price for other checks. MCap_USD: {(current_market_cap_sol_for_log * sol_price_usd):.2f}, Threshold: {self.config['MIN_MARKETCAP_THRESHOLD']:.2f}")
+                                # Proceed to execute_sell for MCap SL
+                                trigger_values = {"current_market_cap_usd_at_trigger": (current_market_cap_sol_for_log * sol_price_usd), "min_mcap_threshold_config": self.config['MIN_MARKETCAP_THRESHOLD']}
+                                # We need a price for execute_sell. If current_price_to_use is invalid, what should be used?
+                                # This is a tricky case. Selling at an "unknown" or "stale" price is risky.
+                                # For now, let's assume if MCAP SL hits, we try to sell at buy_price as a last resort if current price is bad, or simply log and not execute.
+                                # For simplicity of this response, let's log and skip actual execution if price is bad.
+                                # In a real scenario, you might want a different fallback price for MCap SL.
+                                logger.error(f"Emergency MCap SL for {mint} (ID: {pos_id}) triggered, but current_price_to_use is invalid ({current_price_to_use}). Sell not executed by this logic path to prevent selling at unknown price.")
+                                # To actually sell, you'd need to decide what price to use in execute_sell.
+                                # Example (if you decide to sell at buy_price as fallback for MCap SL):
+                                # profit_from_sell = await self.execute_sell(conn=conn, mint=mint, current_price=float(position['buy_price']), market_cap_sol=current_market_cap_sol_for_log, reason=sell_reason, sell_percentage=1.0, position_id_to_update=pos_id, sell_trigger_values=trigger_values)
+                            continue # Skip other price-based checks if price is invalid
+
 
                         buy_price = float(position['buy_price'])
                         initial_tokens = float(position['initial_tokens'])
@@ -169,80 +198,65 @@ class TradingManager:
                         second_tp_price = float(position['second_tp_price'])
                         first_tp_hit = position['first_tp_hit']
 
-                        if initial_tokens <= 0: # Safety check
+                        if initial_tokens <= 0:
                             continue
 
-                        # --- Update highest price (based on the price used for decisions) ---
                         if current_price_to_use > highest_price_since_buy:
-                            highest_price_since_buy = current_price_to_use # Update local var
+                            highest_price_since_buy = current_price_to_use
                             await self.db.update_portfolio_highest_price(pos_id, current_price_to_use, conn)
 
-                        # --- Calculate Trailing SL Price (only relevant if first TP was hit) ---
                         trailing_sl_price = 0.0
                         if first_tp_hit:
                             trailing_sl_price = highest_price_since_buy * (1 - self.config['TRAILING_STOP_LOSS_PERCENT'] / 100.0)
 
-                        # --- Check Sell Conditions (Order Matters!) ---
                         sell_reason = None
-                        sell_all = False      # Flag to sell all remaining tokens
-                        sell_partial = False  # Flag for first TP partial sell
-                        sell_percentage_of_initial = 0.0 # For First TP
+                        sell_all = False
+                        sell_partial = False
+                        sell_percentage_of_initial = 0.0
 
-                        # 1. Initial Stop Loss / Breakeven Stop Loss
                         if current_price_to_use <= active_stop_loss_price:
                             sell_reason = "Stop Loss" if not first_tp_hit else "Breakeven SL"
                             sell_all = True
                             logger.info(f"🛑 {sell_reason} hit for {mint} (ID: {pos_id}) at price {current_price_to_use:.9f} (SL: {active_stop_loss_price:.9f})")
-
-                        # 2. Second Take Profit (Sell Remaining)
                         elif current_price_to_use >= second_tp_price:
                             sell_reason = "Second TP"
                             sell_all = True
                             logger.info(f"🚀 Second TP hit for {mint} (ID: {pos_id}) at price {current_price_to_use:.9f} (Threshold: {second_tp_price:.9f})")
-
-                        # 3. First Take Profit (Partial Sell, only if not hit before)
                         elif not first_tp_hit and current_price_to_use >= initial_tp_price:
                             sell_reason = "First TP"
                             sell_partial = True
                             sell_percentage_of_initial = self.config['FIRST_SELL_PERCENT'] / 100.0
                             logger.info(f"🎯 First TP hit for {mint} (ID: {pos_id}) at price {current_price_to_use:.9f} (Threshold: {initial_tp_price:.9f}). Selling {sell_percentage_of_initial*100}%.")
-
-                        # 4. Trailing Stop Loss (Only active *after* First TP is hit)
                         elif first_tp_hit and current_price_to_use <= trailing_sl_price:
                             sell_reason = "Trailing SL"
                             sell_all = True
                             logger.info(f"📉 Trailing SL hit for {mint} (ID: {pos_id}) at price {current_price_to_use:.9f} (Trailing SL: {trailing_sl_price:.9f}, Highest: {highest_price_since_buy:.9f})")
-                        
-                        # 5. Emergency Market Cap Stop Loss
-                        # current_market_cap_sol_for_log is from the LATEST trade data. sol_price_usd is the global one.
-                        elif (current_market_cap_sol_for_log * sol_price_usd) < self.config['MIN_MARKETCAP_THRESHOLD']: # Use MIN_MARKETCAP_THRESHOLD from config
+                        elif current_market_cap_sol_for_log is not None and current_market_cap_sol_for_log > 0 and \
+                            (current_market_cap_sol_for_log * sol_price_usd) < self.config['MIN_MARKETCAP_THRESHOLD']:
                             sell_reason = "Emergency SL (MCap)"
                             sell_all = True
                             logger.info(f"🆘 Emergency SL (MCap) for {mint} (ID: {pos_id}). Current MCap_USD: {(current_market_cap_sol_for_log * sol_price_usd):.2f}, Threshold: {self.config['MIN_MARKETCAP_THRESHOLD']:.2f}")
-
-
-                        # --- Execute Sell ---
-                        if sell_reason: # If any sell condition was met
-                            trigger_values = {} # To store specific values that triggered the sell
+                        elif current_market_cap_sol_for_log is None or current_market_cap_sol_for_log <= 0:
+                            # This case is logged if no other price-based SL/TP was hit before it
+                            if not sell_reason: # Only log if no other sell reason was found yet
+                                logger.warning(f"Cannot check Emergency SL (MCap) for {mint} (ID: {pos_id}) due to invalid or zero market cap from latest trade: {current_market_cap_sol_for_log}")
+                        
+                        if sell_reason:
+                            trigger_values = {}
                             profit_from_sell = None
 
-                            if sell_partial: # First TP
+                            if sell_partial:
                                 trigger_values = {"first_tp_price_threshold": initial_tp_price}
                                 profit_from_sell = await self.execute_sell(
-                                    conn=conn,
-                                    mint=mint,
-                                    current_price=current_price_to_use, # Use the determined price
-                                    market_cap_sol=current_market_cap_sol_for_log, # Log the latest MC
-                                    reason=sell_reason,
-                                    sell_percentage=sell_percentage_of_initial, # Pass the percentage of initial tokens
-                                    position_id_to_update=pos_id,
-                                    sell_trigger_values=trigger_values
+                                    conn=conn, mint=mint, current_price=current_price_to_use,
+                                    market_cap_sol=current_market_cap_sol_for_log if current_market_cap_sol_for_log is not None else 0.0, # Pass 0 if None for logging
+                                    reason=sell_reason, sell_percentage=sell_percentage_of_initial,
+                                    position_id_to_update=pos_id, sell_trigger_values=trigger_values
                                 )
-                                if profit_from_sell is not None: # If sell was successful
+                                if profit_from_sell is not None:
                                     await self.db.mark_first_tp_hit_and_adjust_sl(pos_id, buy_price, conn)
                                     logger.info(f"📈 Marked First TP as hit for {mint} (ID: {pos_id}) and adjusted Stop Loss to breakeven ({buy_price:.9f}).")
-
-                            elif sell_all: # SL, Second TP, Trailing SL, Emergency SL
+                            elif sell_all:
                                 if sell_reason == "Stop Loss" or sell_reason == "Breakeven SL":
                                     trigger_values = {"stop_loss_price_threshold": active_stop_loss_price}
                                 elif sell_reason == "Second TP":
@@ -250,26 +264,20 @@ class TradingManager:
                                 elif sell_reason == "Trailing SL":
                                     trigger_values = {"trailing_sl_price_threshold": trailing_sl_price, "highest_price_at_trigger": highest_price_since_buy}
                                 elif sell_reason == "Emergency SL (MCap)":
-                                    trigger_values = {"current_market_cap_usd_at_trigger": (current_market_cap_sol_for_log * sol_price_usd), "min_mcap_threshold_config": self.config['MIN_MARKETCAP_THRESHOLD']}
+                                    trigger_values = {"current_market_cap_usd_at_trigger": (current_market_cap_sol_for_log * sol_price_usd) if current_market_cap_sol_for_log else 0.0,
+                                                    "min_mcap_threshold_config": self.config['MIN_MARKETCAP_THRESHOLD']}
                                 
                                 profit_from_sell = await self.execute_sell(
-                                    conn=conn,
-                                    mint=mint,
-                                    current_price=current_price_to_use, # Use the determined price
-                                    market_cap_sol=current_market_cap_sol_for_log, # Log the latest MC
-                                    reason=sell_reason,
-                                    sell_percentage=1.0, # Indicates selling all remaining for cost basis calculation
-                                    position_id_to_update=pos_id,
-                                    sell_trigger_values=trigger_values
+                                    conn=conn, mint=mint, current_price=current_price_to_use,
+                                    market_cap_sol=current_market_cap_sol_for_log if current_market_cap_sol_for_log is not None else 0.0, # Pass 0 if None for logging
+                                    reason=sell_reason, sell_percentage=1.0,
+                                    position_id_to_update=pos_id, sell_trigger_values=trigger_values
                                 )
-
                             if profit_from_sell is not None:
-                                await asyncio.sleep(0.1) # Small delay if a sell occurred
-
+                                await asyncio.sleep(0.1)
                 except Exception as e:
                     logger.error(f"❌ Error in check_sell_opportunities transaction block: {e}", exc_info=True)
-                    # The transaction will be rolled back automatically due to the exception
-                    raise # Re-raise to ensure rollback
+                    raise
 
     async def execute_sell(self, conn, mint: str, current_price: float, market_cap_sol: float, reason: str, sell_percentage: float, position_id_to_update: int, sell_trigger_values: dict = None) -> float | None:
         """
