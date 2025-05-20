@@ -66,6 +66,12 @@ _LOG_LEVEL_CONSOLE: str = "DEBUG"
 _LOG_LEVEL_FILE: str = "DEBUG"
 _LOG_STORAGE_PATH: str = "log"
 
+# --- Metadata Processor Configuration ---
+_HEARTBEAT_EMIT_INTERVAL_SECONDS = 60  # Interval for emitting heartbeat messages in seconds
+_HEARTBEAT_GAP_THRESHOLD_SECONDS = 300  # Threshold for heartbeat gap in seconds
+_RESTART_GAP_THRESHOLD_SECONDS = 300  # Threshold for restart gap in seconds
+# --- Metadata Processor Configuration ---
+
 # --- Socials Processor Configuration ---
 SOCIALS_CHECK_REFRESH_INTERVAL = 120                  # Timeout for requeing socials check in minutes
 SOCIALS_DISALLOWED_WEBSITE_DOMAINS = {

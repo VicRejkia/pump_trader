@@ -22,6 +22,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional, List, Tuple # Added List, Tuple
 from utils import calculate_volatility
 import inspect 
+from typing import Optional
 
 # Load environment variables from .env file
 load_dotenv()
@@ -487,7 +488,7 @@ class DatabaseClient:
                 SELECT
                     mint,
                     price,
-                    marketCapSol,
+                    marketCapSol, -- This is 'marketcapsol' in your DB schema
                     ROW_NUMBER() OVER (PARTITION BY mint ORDER BY timestamp DESC) as rn
                 FROM trades
                 WHERE mint = ANY($1::text[])
@@ -497,8 +498,28 @@ class DatabaseClient:
         connection = conn or await self.pool.acquire()
         try:
             rows = await connection.fetch(query, mints)
-            return {row['mint']: {'price': float(row['price']), 'market_cap': float(row['marketcapsol'])}
-                    for row in rows if row['price'] is not None and float(row['price']) > 0}
+            results = {}
+            for row in rows:
+                mint = row['mint']
+                price_val = float(row['price']) if row['price'] is not None else None
+                market_cap_val = float(row['marketcapsol']) if row['marketcapsol'] is not None else None # Ensure marketcapsol from DB
+
+                # Store market cap if it's valid, regardless of price for now
+                # Store price only if it's valid and positive
+                current_data = {'price': None, 'market_cap': None}
+
+                if market_cap_val is not None and market_cap_val > 0: # Require positive MC
+                    current_data['market_cap'] = market_cap_val
+                
+                if price_val is not None and price_val > 0:
+                    current_data['price'] = price_val
+                
+                # Only add to results if we have at least a valid market_cap or a valid price
+                if current_data['market_cap'] is not None or current_data['price'] is not None:
+                    results[mint] = current_data
+                else:
+                    logger.warning(f"For mint {mint}, latest trade had invalid price ({row['price']}) AND invalid marketcap ({row['marketcapsol']}). Not returning data.")
+            return results
         finally:
             if not conn and connection:
                 await self.pool.release(connection)
@@ -798,13 +819,36 @@ class DatabaseClient:
 
     async def backup_and_delete_token(self, mint: str, archived_at: datetime, reason: str=None):
         """Backup core table data to a corresponding backup table."""
+        final_reason = reason # Initialize final_reason with the provided reason
+
+        if reason == "rugged_dead":
+                # Get this from your bot's configuration system
+                # Example: RESTART_GAP_THRESHOLD_SECONDS = self.config.get('RESTART_GAP_THRESHOLD_SECONDS', 600)
+                # Ensure self.config is available or pass the value directly.
+                # For this example, let's assume it's accessed via self.config.
+                if not hasattr(self, 'config') or '_RESTART_GAP_THRESHOLD_SECONDS' not in self.config:
+                    logger.warning("RESTART_GAP_THRESHOLD_SECONDS not found in config. Using default of 600s.")
+                    RESTART_GAP_THRESHOLD_SECONDS = 600 # Default to 10 minutes
+                else:
+                    RESTART_GAP_THRESHOLD_SECONDS = self.config['_RESTART_GAP_THRESHOLD_SECONDS']
+
+
+                if await self.check_for_data_gap_on_restart(archived_at, RESTART_GAP_THRESHOLD_SECONDS):
+                    logger.info(f"Token {mint} ({reason}) archived at {archived_at}. Pre-archival data gap detected. "
+                                f"Changing reason to 'interrupted_gap_fill'.")
+                    final_reason = "interrupted_gap_fill"
+                else:
+                    logger.info(f"Token {mint} ({reason}) archived at {archived_at}. No significant pre-archival data gap. Reason remains '{final_reason}'.")
+
+
+
         try:
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
                     try:
                         await conn.execute('''
                             INSERT INTO tokens_backup SELECT *, $1, NOW() FROM tokens WHERE mint = $2
-                        ''', reason, mint)
+                        ''', final_reason, mint)
                         
                         await conn.execute('''
                             INSERT INTO trades_backup SELECT *, NOW() FROM trades WHERE mint = $1
@@ -863,37 +907,6 @@ class DatabaseClient:
             logger.exception(f"Error backing up creator_wallets table: {e}")
             # Decide if we should raise or just log
 
-    # async def restore_creator_wallets(self):
-    #     ## Restore creator_wallets table from backup
-    #     backup_path = os.path.abspath(os.path.join(
-    #         os.path.dirname(__file__), 
-    #         "data", 
-    #         "creator_wallets_backup.json"
-    #     ))
-    #     if os.path.exists(backup_path):
-    #         try:
-    #             with open(backup_path, "r") as f:
-    #                 data = json.load(f)
-                
-    #             # Generate and execute SQL statements dynamically
-    #             for record in data:
-    #                 wallet_address = record["wallet_address"]
-    #                 token_count = record["token_count"]
-    #                 last_token_time_str = f"'{record['last_token_time']}'" if record["last_token_time"] else "NULL"
-                    
-    #                 sql_line = (
-    #                     f"INSERT INTO creator_wallets (wallet_address, token_count, last_token_time) "
-    #                     f"VALUES ('{wallet_address}', {token_count}, {last_token_time_str}) "
-    #                     f"ON CONFLICT (wallet_address) DO UPDATE SET token_count = GREATEST(creator_wallets.token_count, EXCLUDED.token_count), "
-    #                     f"last_token_time = CASE WHEN EXCLUDED.token_count > creator_wallets.token_count THEN EXCLUDED.last_token_time ELSE creator_wallets.last_token_time END;"
-    #                 )
-    #                 async with self.pool.acquire() as conn:
-    #                     await conn.execute(sql_line)
-                
-    #             logger.info("Loaded backup data from %s", backup_path)
-    #         except Exception as e:
-    #             logger.exception("Error loading backup data: %s", e)
-    #             raise
 
     async def restore_creator_wallets(self):
         backup_path = os.path.abspath(os.path.join(
@@ -1023,6 +1036,147 @@ class DatabaseClient:
             except Exception as e:
                 logger.error(f"Error fetching total tracked tokens: {e}", exc_info=True)
                 return 0
+
+    async def insert_heartbeat(self, event_type: str = 'heartbeat', details: Optional[dict] = None):
+        """Insert a new heartbeat or event into the bot_heartbeat table."""
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO bot_heartbeat (event_type, details) VALUES ($1, $2)",
+                    event_type, json.dumps(details) if details else None
+                )
+            # logger.debug(f"Heartbeat event '{event_type}' inserted.") # Optional logging
+        except Exception as e:
+            logger.error(f"Error inserting heartbeat event: {e}", exc_info=True)
+            # Decide if you want to raise, as heartbeat failure could be critical
+
+    async def get_last_heartbeat_before(self, timestamp: datetime) -> Optional[datetime]:
+        """Get the last heartbeat recorded before a given timestamp."""
+        query = "SELECT timestamp FROM bot_heartbeat WHERE timestamp < $1 ORDER BY timestamp DESC LIMIT 1"
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, timestamp)
+            return row['timestamp'] if row else None
+
+    async def get_first_heartbeat_after(self, timestamp: datetime) -> Optional[datetime]:
+        """Get the first heartbeat recorded after a given timestamp."""
+        query = "SELECT timestamp FROM bot_heartbeat WHERE timestamp > $1 ORDER BY timestamp ASC LIMIT 1"
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, timestamp)
+            return row['timestamp'] if row else None
+
+    async def check_for_data_gap_on_restart(self,
+                                            archived_at: datetime,
+                                            gap_detection_threshold_seconds: int) -> bool:
+        """
+        Checks if there was a significant gap in bot operation (missing heartbeats)
+        immediately before the 'archived_at' timestamp.
+        """
+        try:
+            query = """
+                SELECT timestamp FROM bot_heartbeat
+                WHERE timestamp < $1
+                ORDER BY timestamp DESC
+                LIMIT 1;
+            """
+            # Ensure self.pool is the correct way to get a connection
+            # This might be self.db_pool or similar depending on your class structure
+            async with self.pool.acquire() as conn:
+                last_heartbeat_record = await conn.fetchrow(query, archived_at)
+
+            if not last_heartbeat_record:
+                # No heartbeats recorded before this token's archival.
+                # Check if any heartbeats exist at all to distinguish a new bot from a long-dead one.
+                async with self.pool.acquire() as conn: # Re-acquire if needed, or use existing conn if scope allows
+                    first_ever_heartbeat = await conn.fetchval("SELECT MIN(timestamp) FROM bot_heartbeat")
+                
+                if first_ever_heartbeat and first_ever_heartbeat < archived_at:
+                    # Heartbeats exist in the table, but none before the current archival time.
+                    # This implies the bot was down for the entire period leading up to 'archived_at'.
+                    logger.warning(f"No heartbeats found before {archived_at}, but older heartbeats exist. Gap detected.")
+                    return True
+                elif not first_ever_heartbeat:
+                    logger.info(f"No heartbeats found in bot_heartbeat table. Cannot determine gap for token archived at {archived_at}. Assuming no gap for safety.")
+                    return False # Cannot determine, conservatively assume no gap.
+                else: # Should not happen if archived_at is current time and heartbeats exist after.
+                    logger.debug(f"First heartbeat {first_ever_heartbeat} is after {archived_at}. No gap determined.")
+                    return False
+
+            last_heartbeat_ts = last_heartbeat_record['timestamp']
+            # Ensure archived_at is offset-aware if last_heartbeat_ts is, or vice-versa.
+            # If one is naive and the other is aware, comparison will raise an error.
+            # Assuming both are consistently offset-aware (e.g., UTC from TIMESTAMPTZ).
+            time_since_last_heartbeat_seconds = (archived_at - last_heartbeat_ts).total_seconds()
+
+            logger.debug(f"Token archived_at: {archived_at}, Last heartbeat: {last_heartbeat_ts}, "
+                        f"Duration since last heartbeat: {time_since_last_heartbeat_seconds:.2f}s, "
+                        f"Gap threshold: {gap_detection_threshold_seconds}s")
+
+            if time_since_last_heartbeat_seconds > gap_detection_threshold_seconds:
+                logger.info(f"Data gap detected: Last heartbeat was {time_since_last_heartbeat_seconds:.2f}s ago "
+                            f"(threshold: {gap_detection_threshold_seconds}s). Token lifecycle likely interrupted.")
+                return True
+            
+            logger.debug("No significant pre-archival data gap detected based on heartbeats.")
+            return False
+
+        except Exception as e:
+            logger.error(f"Error in check_for_data_gap_on_restart: {e}", exc_info=True)
+            return False # Fail safe
+
+    async def check_for_data_gap(self, token_start_time: datetime, token_end_time: datetime, gap_threshold_seconds: int = 300) -> bool:
+        """
+        Checks for significant data gaps in bot_heartbeat table during the token's active period.
+        A gap is significant if the time between two consecutive heartbeats exceeds gap_threshold_seconds.
+        """
+        last_hb_before_token_end = await self.get_last_heartbeat_before(token_end_time)
+        first_hb_after_token_start = await self.get_first_heartbeat_after(token_start_time)
+
+        if not last_hb_before_token_end or not first_hb_after_token_start:
+            # If no heartbeats surround the token's activity, assume a potential gap (conservative approach)
+            # This might happen if the token's entire lifecycle was during a bot downtime.
+            logger.warning(f"Heartbeat data missing around token activity ({token_start_time} - {token_end_time}). Assuming potential data gap.")
+            return True
+
+        # Check gap between the heartbeat just before the token died (or script stopped)
+        # and the heartbeat just after the script restarted (which would be after the token_start_time if it was an existing token)
+
+        # Scenario 1: Gap *during* the token's recorded lifecycle
+        # This requires iterating heartbeats within the token_start_time and token_end_time,
+        # but a simpler proxy is to check the continuity around the point of potential script failure.
+
+        # Let's refine: We are interested if the bot was down for a period that *ended*
+        # shortly before token_end_time (when it was marked dead).
+        # And this downtime started *after* token_start_time.
+
+        query_heartbeats_in_range = """
+            SELECT timestamp FROM bot_heartbeat
+            WHERE timestamp >= $1 AND timestamp <= $2
+            ORDER BY timestamp ASC;
+        """
+        async with self.pool.acquire() as conn:
+            heartbeats = await conn.fetch(query_heartbeats_in_range, token_start_time, token_end_time)
+
+        if not heartbeats: # No heartbeats during the token's entire active period
+            logger.debug(f"No bot heartbeats found during token {token_start_time} - {token_end_time} lifecycle. Likely a gap.")
+            return True
+
+        previous_hb_ts = None
+        for record in heartbeats:
+            current_hb_ts = record['timestamp']
+            if previous_hb_ts:
+                if (current_hb_ts - previous_hb_ts).total_seconds() > gap_threshold_seconds:
+                    logger.info(f"Data gap detected for token: {previous_hb_ts} to {current_hb_ts} ({(current_hb_ts - previous_hb_ts).total_seconds()}s)")
+                    return True
+            previous_hb_ts = current_hb_ts
+
+        # Also check the gap between the last known heartbeat *before* the token ended its lifecycle
+        # and the token's end time. This covers the case where the bot stopped *while* this token was live.
+        if previous_hb_ts and (token_end_time - previous_hb_ts).total_seconds() > gap_threshold_seconds:
+            logger.info(f"Data gap detected leading up to token end: last heartbeat at {previous_hb_ts}, token ended at {token_end_time}")
+            return True
+
+
+        return False
 
     async def cleanup_db(self, cleanup_flag: bool):
         """Drop all application tables if cleanup_flag is True."""
