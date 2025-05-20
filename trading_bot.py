@@ -893,7 +893,7 @@ class TradingBot:
 
     async def run_heartbeat_emitter(self): # Add this as a new async method in TradingBot
         log_debug("❤️ Heartbeat emitter started.")
-        HEARTBEAT_INTERVAL_SECONDS = self.config.get('_HEARTBEAT_EMIT_INTERVAL_SECONDS', 60) # e.g., every 60 seconds, make configurable
+        HEARTBEAT_INTERVAL_SECONDS = self.config.get('HEARTBEAT_EMIT_INTERVAL_SECONDS', 60) # e.g., every 60 seconds, make configurable
         while not self.state.shutdown_event.is_set():
             try:
                 if self.db_client: # Ensure db_client is available

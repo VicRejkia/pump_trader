@@ -7,6 +7,7 @@ import time
 import json
 from datetime import datetime, timezone
 from logger import setup_logging, log_info, log_debug, log_error, log_warning, log_critical
+from config import TELEGRAM_INTERACTION
 
 # --- Project Setup ---
 CURRENT_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -127,9 +128,10 @@ async def main_controller(args):
         # 1. Start the Telegram Interface
         try:
             log_info("Attempting to start Telegram Interface...")
-            telegram_interface_process = start_script_in_new_console(TELEGRAM_SCRIPT_PATH, PROJECT_ROOT_DIR)
-            if not telegram_interface_process:
-                log_warning("Failed to start Telegram Interface, but controller will continue.")
+            if TELEGRAM_INTERACTION:
+                telegram_interface_process = start_script_in_new_console(TELEGRAM_SCRIPT_PATH, PROJECT_ROOT_DIR)
+                if not telegram_interface_process:
+                    log_warning("Failed to start Telegram Interface, but controller will continue.")
         except Exception as e:
             log_error(f"Error during Telegram Interface startup: {e}")
 
