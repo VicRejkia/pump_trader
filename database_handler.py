@@ -19,7 +19,7 @@ from state_manager import GlobalState
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Optional, List, Tuple # Added List, Tuple
+from typing import Dict, Optional, List, Tuple, Any
 from utils import calculate_volatility
 import inspect 
 from typing import Optional
@@ -250,7 +250,7 @@ class DatabaseClient:
                     # The transaction will be rolled back automatically
                     raise # Re-raise the exception so the caller knows about the failure
 
-    async def get_tokens_to_unsubscribe(self, mc_drop_threshold, inactivity_period):
+    async def get_tokens_to_unsubscribe(self, mc_drop_threshold, inactivity_period, min_token_age):
         """Fetch tokens to unsubscribe based on market cap drop and inactivity."""
         query = """
             SELECT t.mint
@@ -266,14 +266,14 @@ class DatabaseClient:
                     OR
                     latest.timestamp <= NOW() - (INTERVAL '1 minute' * $2)
                 )
-                AND t.timestamp <= NOW() - INTERVAL '15 minutes'
+                AND t.timestamp <= NOW() - (INTERVAL '1 minute' * $3)
                 AND t.mint NOT IN (SELECT mint FROM portfolio WHERE status = 'active')
             ORDER BY t.timestamp DESC;
         """
         async with self.pool.acquire() as conn:
-            return await conn.fetch(query, mc_drop_threshold, inactivity_period)
+            return await conn.fetch(query, mc_drop_threshold, inactivity_period, min_token_age)
 
-    async def get_active_tokens(self, limit: int = 1000):
+    async def get_active_tokens(self, limit: int = 10000):
         """Fetch active tokens from the database."""
         query = """
             SELECT mint FROM tokens WHERE is_active = True
@@ -959,104 +959,204 @@ class DatabaseClient:
             logger.exception("Error loading backup data: %s", e)
             raise
 
-    async def get_median_price(self, mint: str, window_minutes: int, conn=None) -> float | None:
-        async with self.pool.acquire() as conn:
-            try:
-                query = """
-                    SELECT (sol_amount / token_amount) AS price
-                    FROM trades
-                    WHERE mint = $1
-                    AND timestamp >= NOW() - ($2 || ' minutes')::interval
-                    AND token_amount > 0;
-                """
-                records = await conn.fetch(query, mint, str(window_minutes))
-                if not records:
-                    logger.debug(f"No trades found for {mint} in the last {window_minutes} minutes.")
-                    return None
-
-                prices = [float(record['price']) for record in records if record['price'] is not None]
-                if not prices:
-                    logger.warning(f"No valid prices for {mint} after filtering.")
-                    return None
-
-                # IQR Outlier Filtering
-                q1 = np.percentile(prices, 25)
-                q3 = np.percentile(prices, 75)
-                iqr = q3 - q1
-                lower_bound = q1 - 1.5 * iqr
-                upper_bound = q3 + 1.5 * iqr
-
-                filtered_prices = [p for p in prices if lower_bound <= p <= upper_bound]
-                if not filtered_prices:
-                    logger.warning(f"All prices for {mint} filtered out as outliers. Falling back to unfiltered median.")
-                    return statistics.median(prices)  # Fallback to unfiltered median
-
-                return statistics.median(filtered_prices)
-            except Exception as e:
-                logger.error(f"Error calculating median price for {mint}: {e}", exc_info=True)
-                return None
-
-    async def get_vwap_price(self, mint: str, window_minutes: int, conn=None) -> float | None:
+    # --- START: Refactored Price Calculation Logic ---
+    async def _get_raw_trades_for_window(self, mint: str, window_minutes: int, conn) -> List[Dict[str, Any]]:
+        """Fetches raw trades (timestamp, sol_amount, token_amount) for a given window."""
         query = """
-            SELECT SUM(td.sol_amount) / SUM(td.token_amount) AS vwap
-            FROM trades td
-            WHERE td.mint = $1
-            AND td.timestamp >= NOW() - ($2 || ' minutes')::interval
-            AND td.token_amount > 0;
-        """
-        connection = conn or await self.pool.acquire()
-        try:
-            result = await connection.fetchval(query, mint, str(window_minutes))
-            return float(result) if result is not None else None
-        except Exception as e:
-            logger.error(f"Error calculating VWAP for {mint}: {e}", exc_info=True)
-            return None
-        finally:
-            if not conn and connection:
-                await self.pool.release(connection)
-
-    # TWAP would be more involved, potentially fetching rows and processing in Python
-    async def get_twap_price(self, mint: str, window_minutes: int, interval_seconds: int, conn=None) -> float | None:
-        # 1. Fetch trades for the window
-        query_trades = """
-            SELECT timestamp, price  -- price is sol_amount / token_amount
+            SELECT timestamp, sol_amount, token_amount
             FROM trades
             WHERE mint = $1
             AND timestamp >= NOW() - ($2 || ' minutes')::interval
-            AND token_amount > 0 -- ensure valid price calculation
+            AND token_amount > 0 AND sol_amount > 0 -- Ensure valid amounts for price calculation
             ORDER BY timestamp ASC;
         """
-        async with self.pool.acquire() as conn:
+        return await conn.fetch(query, mint, str(window_minutes))
+
+    def _apply_iqr_to_trades(self, trade_records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Calculates prices for trades and applies IQR filtering.
+        Returns a list of trade records that are considered inliers.
+        """
+        if not trade_records:
+            return []
+
+        prices = []
+        for r in trade_records:
             try:
-                trade_records = await conn.fetch(query_trades, mint, str(window_minutes))
-                if not trade_records:
-                    return None
+                price = float(r['sol_amount']) / float(r['token_amount'])
+                prices.append(price)
+            except (TypeError, ValueError, ZeroDivisionError):
+                prices.append(None) # Mark invalid prices
 
-                # 2. Process in Python (example using pandas for simplicity)
-                import pandas as pd # Make sure pandas is available
-                df = pd.DataFrame(trade_records, columns=['timestamp', 'price'])
-                df['price'] = pd.to_numeric(df['price'])
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
-                df = df.set_index('timestamp')
+        # Filter out None prices before IQR
+        valid_prices_for_iqr = [p for p in prices if p is not None]
+        if not valid_prices_for_iqr:
+            logger.warning("No valid prices to apply IQR filtering.")
+            return [] # Return all trades if no valid prices for IQR
 
-                if df.empty:
-                    return None
+        q1 = np.percentile(valid_prices_for_iqr, 25)
+        q3 = np.percentile(valid_prices_for_iqr, 75)
+        iqr_val = q3 - q1
+        lower_bound = q1 - 1.5 * iqr_val
+        upper_bound = q3 + 1.5 * iqr_val
 
-                # Resample into intervals and take the median price of each interval
-                # 'L' offset for 'last' value in interval, 'min_count=1' ensures NaN if no trades
-                interval_prices = df['price'].resample(f'{interval_seconds}S').median(numeric_only=True)
-                
-                # Drop intervals with no trades (NaNs) and calculate the mean of the interval medians
-                valid_interval_prices = interval_prices.dropna()
-                if valid_interval_prices.empty:
-                    return None
-                    
-                twap = valid_interval_prices.mean()
-                return float(twap) if pd.notnull(twap) else None
+        inlier_trades = []
+        for i, r in enumerate(trade_records):
+            price = prices[i]
+            if price is not None and lower_bound <= price <= upper_bound:
+                # Add the calculated price to the trade record for convenience
+                r_copy = dict(r) # Create a copy to avoid modifying the original record list
+                r_copy['price'] = price
+                inlier_trades.append(r_copy)
 
-            except Exception as e:
-                logger.error(f"Error calculating TWAP for {mint}: {e}", exc_info=True)
-                return None
+        if not inlier_trades:
+            logger.warning("All trades filtered out as outliers by IQR. No inlier trades to use.")
+            # Fallback: could return unfiltered trades or a subset based on other criteria
+            # For now, returning empty list, forcing price calculation to fail or use other fallbacks.
+            return []
+        return inlier_trades
+
+    async def _calculate_median_price_with_iqr(self, mint: str, window_minutes: int, conn) -> float | None:
+        """Calculates median price with IQR filtering."""
+        trade_records = await self._get_raw_trades_for_window(mint, window_minutes, conn)
+        if not trade_records:
+            logger.debug(f"No trades found for {mint} in the last {window_minutes} minutes for median calculation.")
+            return None
+
+        # Prices are calculated and IQR applied within _apply_iqr_to_trades
+        # Here, we just need the prices from the inlier trades
+        inlier_trades = self._apply_iqr_to_trades(trade_records) # this adds 'price' key
+        if not inlier_trades:
+            # Attempt fallback to unfiltered median if all were outliers
+            all_prices = [float(r['sol_amount'])/float(r['token_amount']) for r in trade_records if r['token_amount'] and r['sol_amount']]
+            if all_prices:
+                 logger.warning(f"All prices for {mint} filtered out as outliers. Falling back to unfiltered median for median calculation.")
+                 return statistics.median(all_prices)
+            logger.warning(f"No inlier trades for {mint} after IQR for median calculation, and no fallback possible.")
+            return None
+
+        inlier_prices = [float(trade['price']) for trade in inlier_trades]
+        return statistics.median(inlier_prices) if inlier_prices else None
+
+    async def _calculate_vwap_price_with_iqr(self, mint: str, window_minutes: int, conn) -> float | None:
+        """Calculates VWAP with IQR filtering on individual trade prices."""
+        trade_records = await self._get_raw_trades_for_window(mint, window_minutes, conn)
+        if not trade_records:
+            logger.debug(f"No trades found for {mint} in the last {window_minutes} minutes for VWAP calculation.")
+            return None
+
+        inlier_trades = self._apply_iqr_to_trades(trade_records)
+        if not inlier_trades:
+            logger.warning(f"No inlier trades for {mint} after IQR for VWAP calculation.")
+            return None # Or implement fallback to unfiltered VWAP
+
+        total_sol_inliers = sum(float(trade['sol_amount']) for trade in inlier_trades)
+        total_tokens_inliers = sum(float(trade['token_amount']) for trade in inlier_trades)
+
+        if total_tokens_inliers == 0:
+            logger.warning(f"Total token amount for inliers is zero for {mint}. Cannot calculate VWAP.")
+            return None
+        return total_sol_inliers / total_tokens_inliers
+
+    async def _calculate_twap_price_with_iqr(self, mint: str, window_minutes: int, interval_seconds: int, conn) -> float | None:
+        """Calculates TWAP with IQR filtering on individual trade prices before resampling."""
+        trade_records = await self._get_raw_trades_for_window(mint, window_minutes, conn)
+        if not trade_records:
+            logger.debug(f"No trades found for {mint} in the last {window_minutes} minutes for TWAP calculation.")
+            return None
+
+        inlier_trades_with_price = self._apply_iqr_to_trades(trade_records) # This adds 'price' to each dict
+        if not inlier_trades_with_price:
+            logger.warning(f"No inlier trades for {mint} after IQR for TWAP calculation.")
+            return None
+
+        # Create DataFrame from inlier trades with their calculated (inlier) prices and original timestamps
+        df_data = [{'timestamp': pd.to_datetime(trade['timestamp']), 'price': float(trade['price'])} for trade in inlier_trades_with_price]
+        df = pd.DataFrame(df_data)
+
+        if df.empty:
+            return None
+
+        df = df.set_index('timestamp')
+        # Resample into intervals and take the median price of each interval (using inlier prices)
+        interval_prices = df['price'].resample(f'{interval_seconds}S').median(numeric_only=True)
+        valid_interval_prices = interval_prices.dropna()
+
+        if valid_interval_prices.empty:
+            return None
+
+        twap = valid_interval_prices.mean()
+        return float(twap) if pd.notnull(twap) else None
+
+    async def get_price_and_market_cap_for_decision(self, mint: str, config: dict, conn) -> Dict[str, Optional[float]]:
+        """
+        Centralized function to get the decision price and latest market cap for a token.
+        The decision price is determined by PRICE_DETERMINATION_METHOD.
+        The market cap is always from the single latest trade.
+        """
+        decision_price: Optional[float] = None
+        latest_market_cap_sol: Optional[float] = None
+        raw_latest_price: Optional[float] = None
+
+        # 1. Fetch the absolute latest trade for market_cap and raw_latest_price
+        latest_trade_query = """
+            SELECT price, marketCapSol
+            FROM trades
+            WHERE mint = $1
+            ORDER BY timestamp DESC
+            LIMIT 1;
+        """
+        latest_trade_record = await conn.fetchrow(latest_trade_query, mint)
+
+        if latest_trade_record:
+            raw_latest_price = float(latest_trade_record['price']) if latest_trade_record['price'] is not None else None
+            latest_market_cap_sol = float(latest_trade_record['marketcapsol']) if latest_trade_record['marketcapsol'] is not None else None
+            # Ensure market_cap is positive, otherwise treat as None for safety
+            if latest_market_cap_sol is not None and latest_market_cap_sol <= 0:
+                latest_market_cap_sol = None
+            if raw_latest_price is not None and raw_latest_price <=0:
+                raw_latest_price = None # Don't use non-positive as raw latest price
+        else:
+            logger.warning(f"No trades found at all for {mint} to determine latest market cap or price.")
+            return {'price': None, 'market_cap': None}
+
+        # 2. Determine the decision_price based on the configured method
+        method = config.get("PRICE_DETERMINATION_METHOD", "LATEST")
+        window_minutes = config.get("PRICE_AVG_WINDOW_MINUTES", 3) # Default to 3 mins from config.py
+
+        try:
+            if method == "LATEST":
+                decision_price = raw_latest_price
+            elif method == "MEDIAN":
+                decision_price = await self._calculate_median_price_with_iqr(mint, window_minutes, conn)
+            elif method == "VWAP":
+                decision_price = await self._calculate_vwap_price_with_iqr(mint, window_minutes, conn)
+            elif method == "TWAP":
+                interval_seconds = config.get("TWAP_SUB_INTERVAL_SECONDS", 60)
+                decision_price = await self._calculate_twap_price_with_iqr(mint, window_minutes, interval_seconds, conn)
+            else:
+                logger.warning(f"Unknown PRICE_DETERMINATION_METHOD: {method}. Defaulting to LATEST.")
+                decision_price = raw_latest_price
+
+            # Fallback: If chosen method fails to return a price, but raw_latest_price is available, use it.
+            if decision_price is None and raw_latest_price is not None:
+                logger.warning(f"Price determination method '{method}' for {mint} resulted in None. Falling back to raw latest price: {raw_latest_price}.")
+                decision_price = raw_latest_price
+            elif decision_price is not None and decision_price <= 0:
+                 logger.warning(f"Price determination method '{method}' for {mint} resulted in non-positive price: {decision_price}. Attempting fallback to raw_latest_price.")
+                 decision_price = raw_latest_price if raw_latest_price is not None and raw_latest_price > 0 else None
+
+
+        except Exception as e:
+            logger.error(f"Error during price determination for {mint} with method {method}: {e}", exc_info=True)
+            decision_price = raw_latest_price # Fallback to raw latest on error if available
+
+        if decision_price is None:
+            logger.error(f"Could not determine a valid price for {mint} using method '{method}' and fallback failed.")
+
+
+        logger.debug(f"Price decision for {mint}: Method='{method}', DecidedPrice={decision_price}, LatestMC={latest_market_cap_sol}, RawLatestPrice={raw_latest_price}")
+        return {'price': decision_price, 'market_cap': latest_market_cap_sol}
 
     async def get_total_tracked_tokens(self, backedup=False):
         """Fetches the total number of tracked tokens from the database."""

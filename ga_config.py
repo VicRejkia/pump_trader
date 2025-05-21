@@ -81,12 +81,6 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
     #     "values": list(range(10, 61, 10)),
     #     "type": int
     # },
-    # Add MIN_MARKET_CAP (emergency sell threshold) if desired
-    # {
-    #     "name": "MIN_MARKET_CAP", # Emergency sell trigger USD market cap
-    #     "values": list(range(3000, 5001, 500)), # 1k to 5k USD in steps of 500
-    #     "type": int
-    # },
 ]
 
 # --- GA Settings ---

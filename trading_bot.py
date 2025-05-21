@@ -10,6 +10,7 @@ import json # Ensure json is imported
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone, timedelta
+import httpx
 
 # Assuming these imports are correct for your project structure
 import config as config_module
@@ -31,9 +32,18 @@ try:
     import stable_baselines3
     # Import the specific algorithm class you trained (e.g., PPO)
     from stable_baselines3 import PPO # Or SAC, TD3, etc.
+    from stable_baselines3.common.vec_env import VecNormalize # Import VecNormalize
     RL_AVAILABLE = True
 except ImportError:
     RL_AVAILABLE = False
+    # Define a dummy VecNormalize if SB3 is not available
+    class VecNormalize:
+        def __init__(self, *args, **kwargs):
+            pass
+        def normalize_obs(self, obs):
+            return obs
+        def load(self, *args, **kwargs):
+            pass
 # Import RL config to know parameter names and observation details
 import rl_config
 # --- End RL Imports ---
@@ -62,6 +72,7 @@ class TradingBot:
         self.params_file = params_file
         self.rl_agent_path = rl_agent_path
         self.rl_agent = None
+        self.vec_normalize = None # Add attribute for VecNormalize
         self.db_client = None
         self.ws_handler = None
         self.tasks = []
@@ -77,6 +88,42 @@ class TradingBot:
 
         # Initialize status file with an "INITIALIZING" state
         self._write_status({"bot_process_status": "INITIALIZING", "timestamp": datetime.now(timezone.utc).isoformat()})
+
+    async def _fetch_initial_sol_price(self) -> bool:
+        """
+        Fetches the SOL price once at startup and updates state and DB.
+        Returns True if successful, False otherwise.
+        """
+        try:
+            async with httpx.AsyncClient() as client:
+                log_debug(f"Fetching initial SOL price from {config_module._SOL_PRICE_API_URL}") # Use log_debug if available
+                response = await client.get(config_module._SOL_PRICE_API_URL, timeout=10.0) # 10-second timeout
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    new_price = data.get("solana", {}).get("usd")
+                    
+                    if new_price is None or not isinstance(new_price, (int, float)):
+                        log_error("Invalid or missing SOL price in initial API response.") # Use log_error
+                        return False
+
+                    await self.state.set_sol_price(new_price)
+                    # Ensure db_client is connected and initialized before calling this
+                    await self.db_client.insert_sol_price(new_price) 
+                    log_info(f"✅ Initial SOL price successfully fetched and set: {new_price} USD") # Use log_info
+                    return True
+                else:
+                    log_error(f"⚠ Error fetching initial SOL price. Status: {response.status_code}, Response: {response.text}")
+                    return False
+        except httpx.TimeoutException:
+            log_error("⏳ Timeout fetching initial SOL price.")
+            return False
+        except httpx.RequestError as req_err:
+            log_error(f"❌ HTTP Request Error fetching initial SOL price: {req_err}")
+            return False
+        except Exception as e:
+            log_error(f"❌ Exception fetching initial SOL price: {e}", exc_info=True)
+            return False
 
     def _filter_serializable_config(self, config_dict):
         serializable_config = {}
@@ -375,22 +422,6 @@ class TradingBot:
         except asyncio.CancelledError:
             log_info(":stop_sign: Monitor task shutting down")
 
-    # async def status_updater(self):
-    #     """Periodically writes 'RUNNING' status to the status file."""
-    #     try:
-    #         while not self.state.shutdown_event.is_set():
-    #             self._write_status("RUNNING")
-    #             await asyncio.sleep(15) # Update status every 15 seconds
-    #     except asyncio.CancelledError:
-    #         log_info(":stop_sign: Status updater task shutting down.")
-    #     except Exception as e:
-    #         log_error(f":x: Error in status updater: {e}", exc_info=True)
-    #         self._write_status("ERROR") # Write error status if updater fails
-    #     finally:
-    #         # Attempt to write STOPPED status when task ends, unless shutdown already happened
-    #          if not self.state.shutdown_event.is_set():
-    #               self._write_status("STOPPED") # Or maybe ERROR?
-
     async def command_listener(self):
         """Periodically checks the command file for STOP command."""
         last_command_content = None
@@ -638,24 +669,80 @@ class TradingBot:
         norm_steps_held = np.clip(steps_holding / (rl_config.MAX_STEPS_PER_EPISODE * 0.5), 0, 1) # Or use normalized time held
         norm_sol_balance = np.clip(obs_data['sol_balance'] / (rl_config.RL_INITIAL_CAPITAL * 2.0), 0, 1)
 
-        # --- Construct Observation Vector ---
-        try:
-            observation = np.array([
-                norm_price_change_1, norm_price_change_5, norm_price_change_10,
-                norm_volatility, norm_market_cap, norm_volume,
-                norm_rugcheck, norm_socials, norm_time_creation,
-                obs_data['is_holding'], norm_pos_pnl, norm_steps_held, norm_sol_balance
-            ], dtype=np.float32)
+        # --- Calculate Time Features ---
+        current_timestamp = datetime.now(timezone.utc)
+        # Weekday: Monday=0, Sunday=6. Normalize to [0, 1].
+        weekday = current_timestamp.weekday()
+        norm_weekday = weekday / 6.0 if 6.0 > 0 else 0.0 # Avoid division by zero
 
+        # Daytime: Hour of the day (0-23). Normalize to [0, 1].
+        hour = current_timestamp.hour
+        norm_daytime = hour / 23.0 if 23.0 > 0 else 0.0 # Avoid division by zero
+
+        # --- Normalize Tunable Parameters ---
+        norm_tunable_params = []
+        epsilon = 1e-9 # Use a small epsilon for division by zero avoidance
+        for param_name, low, high, p_type in rl_config.RL_TUNABLE_PARAMETERS:
+            # Get current value from bot's config, use midpoint if not found
+            current_val = self.config.get(param_name.upper(), (low + high) / 2.0)
+
+            # Ensure current_val is the correct type for normalization
+            if p_type == int:
+                 current_val = int(current_val)
+            else:
+                 current_val = float(current_val)
+
+            # Min-Max Normalization: (value - min) / (max - min)
+            if high - low > epsilon: # Avoid division by zero
+                norm_val = (current_val - low) / (high - low)
+            else:
+                norm_val = 0.0 # Or 0.5 if min == max, depending on desired behavior
+
+            # Clip to ensure it's within [0, 1] after normalization
+            norm_tunable_params.append(np.clip(norm_val, 0.0, 1.0))
+
+
+        # --- Construct Raw Observation Vector (Order MUST match rl_config.OBSERVATION_FEATURES) ---
+        # Ensure the order matches the list in rl_config.py
+        raw_observation_list = [
+            norm_price_change_1, norm_price_change_5, norm_price_change_10,
+            norm_volatility, norm_market_cap, norm_volume,
+            norm_rugcheck, norm_socials, norm_time_creation,
+            obs_data['is_holding'], norm_pos_pnl, norm_steps_held, norm_sol_balance,
+            norm_weekday, norm_daytime # Add new time features
+        ]
+        # Add normalized tunable parameters
+        raw_observation_list.extend(norm_tunable_params)
+
+        try:
+            raw_observation = np.array(raw_observation_list, dtype=np.float32)
+
+            # --- Apply VecNormalize (CRITICAL for live deployment) ---
+            if self.vec_normalize:
+                # VecNormalize expects a batch, so reshape the single observation
+                normalized_observation = self.vec_normalize.normalize_obs(raw_observation.reshape(1, -1))
+                observation = normalized_observation[0] # Extract the single observation from the batch
+                log_debug(f"Generated and normalized live observation: {observation}")
+            else:
+                log_warning("VecNormalize not loaded. Live observations will NOT be normalized.")
+                observation = raw_observation # Use raw observation if normalization is not available
+
+            # --- Final Validation ---
             if observation.shape != (rl_config.OBSERVATION_SPACE_DIM,) or not np.all(np.isfinite(observation)):
-                log_error(f"Live observation generation failed! Shape: {observation.shape}, Finite: {np.all(np.isfinite(observation))}")
+                log_error(f"Live observation generation failed after normalization! Shape: {observation.shape}, Expected: {(rl_config.OBSERVATION_SPACE_DIM,)}, Finite: {np.all(np.isfinite(observation))}")
+                # Log the observation list and its length for debugging
+                log_error(f"Observation list length: {len(raw_observation_list)}, Expected: {rl_config.OBSERVATION_SPACE_DIM}")
+                log_error(f"Observation list content (first 20): {raw_observation_list[:20]}")
                 return None
 
-            log_debug(f"Generated live observation: {observation}")
+            # Clip the final observation to the defined bounds [-1, 1]
+            observation = np.clip(observation, rl_config.OBSERVATION_LOW, rl_config.OBSERVATION_HIGH)
+
+
             return observation
 
         except Exception as e:
-            log_error(f"Error constructing live observation array: {e}")
+            log_error(f"Error constructing or normalizing live observation array: {e}", exc_info=True)
             return None
 
     async def run_rl_agent_updates(self):
@@ -764,7 +851,7 @@ class TradingBot:
             else:
                  log_warning(f":warning: GA Parameter file not found: {self.params_file}. Using base/default config.")
 
-        # --- Load RL Agent (if provided) ---
+        # --- Load RL Agent and VecNormalize (if provided) ---
         if self.rl_agent_path:
             if not RL_AVAILABLE:
                 log_error(":x: RL Agent path specified, but Stable Baselines3 library is not installed!")
@@ -775,15 +862,39 @@ class TradingBot:
                         AgentClass = PPO # Or determine from rl_config.RL_ALGORITHM
                         self.rl_agent = AgentClass.load(self.rl_agent_path, device='cpu') # Specify device
                         log_info(f":white_check_mark: Successfully loaded RL agent: {self.rl_agent_path}")
+
+                        # Attempt to load corresponding VecNormalize stats
+                        vec_normalize_path = self.rl_agent_path.replace('_final.zip', '_vecnormalize.pkl').replace('.zip', '_vecnormalize.pkl') # Infer path
+                        if os.path.exists(vec_normalize_path):
+                            try:
+                                # Create a dummy environment to load stats into
+                                from rl_environment import TradingEnv # Import TradingEnv
+                                # Need dummy env with correct observation space shape
+                                # The actual data doesn't matter, only the observation space structure
+                                dummy_env = TradingEnv(historical_data_dict={'dummy_mint': pd.DataFrame(np.zeros((1, len(['Open', 'High', 'Low', 'Close', 'Volume', 'market_cap_calculated', 'rugcheck_score', 'socials_score', 'token_creation_time']))), columns=['Open', 'High', 'Low', 'Close', 'Volume', 'market_cap_calculated', 'rugcheck_score', 'socials_score', 'token_creation_time'], index=pd.DatetimeIndex([datetime.now(timezone.utc)], tz=timezone.utc))}, token_lifespans={'dummy_mint': {'start_ts': datetime.now(timezone.utc), 'end_ts': datetime.now(timezone.utc) + timedelta(days=1)}}, initial_capital=rl_config.RL_INITIAL_CAPITAL, max_steps=rl_config.MAX_STEPS_PER_EPISODE)
+
+                                self.vec_normalize = VecNormalize.load(vec_normalize_path, venv=DummyVecEnv([lambda: dummy_env])) # Load stats into dummy VecEnv
+                                self.vec_normalize.training = False # Set to evaluation mode
+                                self.vec_normalize.norm_reward = False # Do not normalize rewards in live bot
+                                log_info(f":white_check_mark: Successfully loaded VecNormalize stats from: {vec_normalize_path}")
+                            except Exception as vn_load_err:
+                                log_error(f":x: Failed to load VecNormalize stats from {vec_normalize_path}: {vn_load_err}", exc_info=True)
+                                self.vec_normalize = None # Ensure it's None if loading fails
+                        else:
+                            log_warning(f":warning: VecNormalize stats file not found: {vec_normalize_path}. Live observations will NOT be normalized.")
+                            self.vec_normalize = None
+
                         if self.params_file:
                             log_warning(":information_source: RL agent loaded, GA parameters file will be ignored for initial config (RL will override).")
                     except Exception as e:
                         log_error(f":x: Failed to load RL agent from {self.rl_agent_path}: {e}", exc_info=True)
                         self.rl_agent = None
+                        self.vec_normalize = None # Also set VecNormalize to None if agent fails to load
                 else:
                     log_warning(f":warning: RL Agent file not found: {self.rl_agent_path}. Cannot use RL agent.")
                     self.rl_agent = None
-        
+                    self.vec_normalize = None # Also set VecNormalize to None if agent file not found
+
         # --- Initialize DYNAMIC_CONFIG_FILE ---
         try:
             if not os.path.exists(DYNAMIC_CONFIG_FILE):
@@ -825,7 +936,22 @@ class TradingBot:
         except Exception as db_setup_err:
             log_critical(f"CRITICAL: Failed database setup: {db_setup_err}", exc_info=True)
             self._write_status({"bot_process_status": "ERROR_DB_SETUP", "error_message": str(db_setup_err), "timestamp": datetime.now(timezone.utc).isoformat()})
-            return
+            return        
+
+        # *** ADD INITIAL SOL PRICE FETCH HERE ***
+        log_info("Attempting to fetch initial SOL price before starting other tasks...")
+        try:
+            initial_price_fetched = await self._fetch_initial_sol_price()
+            if not initial_price_fetched:
+                log_critical("🔴 Failed to fetch initial SOL price. The bot will rely on the hourly updater. Some functionalities might be delayed or impacted until the price is available.")
+                # Consider if you want to halt bot startup if initial price fetch fails.
+                # For now, it logs a critical error and proceeds.
+            else:
+                log_info("🟢 Initial SOL price fetched and set.")
+        except Exception as e:
+            log_critical(f"💥 Error during initial SOL price fetch: {e}. The bot will rely on the hourly updater.", exc_info=True)
+            # Similar consideration for halting startup.
+        # *** END OF INITIAL SOL PRICE FETCH ***
 
         # --- Initialize Core Components (pass self.config) ---
         self.ws_handler = WebSocketHandler(db_client=self.db_client, config_dict=self.config, state_manager=self.state)
@@ -893,6 +1019,12 @@ class TradingBot:
 
     async def run_heartbeat_emitter(self): # Add this as a new async method in TradingBot
         log_debug("❤️ Heartbeat emitter started.")
+        try:
+            if self.db_client: # Ensure db_client is available
+                await self.db_client.insert_heartbeat(event_type="STARTUP")
+        except Exception as e:
+            log_error(f"Error in heartbeat emitter: {e}", exc_info=True)
+            
         HEARTBEAT_INTERVAL_SECONDS = self.config.get('HEARTBEAT_EMIT_INTERVAL_SECONDS', 60) # e.g., every 60 seconds, make configurable
         while not self.state.shutdown_event.is_set():
             try:

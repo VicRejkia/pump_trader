@@ -55,6 +55,7 @@ class TradingEnv(gym.Env):
                                   Expected columns: 'Open', 'High', 'Low', 'Close', 'Volume',
                                                     'market_cap_calculated', 'rugcheck_score', 'socials_score',
                                                     'token_creation_time'.
+                                  Note: Assumes a fixed step interval (e.g., 5 seconds) based on data frequency.
             token_lifespans: Dictionary mapping mints to their {'start_ts', 'end_ts'} (UTC).
             initial_capital: Starting SOL balance for each episode.
             max_steps: Maximum number of steps allowed per episode (truncation).
@@ -139,7 +140,8 @@ class TradingEnv(gym.Env):
 
     def _get_observation(self) -> np.ndarray:
         """
-        Calculates and returns the normalized observation vector using OHLCV data.
+        Calculates and returns the raw observation vector using OHLCV data.
+        Normalization is handled by the VecNormalize wrapper.
         """
         default_obs = np.zeros(self.observation_space.shape, dtype=np.float32)
         if self.current_data_df is None or self._last_step_processed_index < 0 or self._last_step_processed_index >= len(self.current_data_df):
@@ -212,46 +214,55 @@ class TradingEnv(gym.Env):
             if entry_timestamp:
                 time_holding_seconds = max(0.0, (current_timestamp - entry_timestamp).total_seconds())
 
-        # --- Normalization (Same logic as before, but using OHLCV-derived features) ---
-        epsilon = 1e-9
-        norm_price_change_1 = np.clip(price_change_1 * 20, -1, 1)
-        norm_price_change_5 = np.clip(price_change_5 * 10, -1, 1)
-        norm_price_change_10 = np.clip(price_change_10 * 5, -1, 1)
-        norm_volatility = np.clip(volatility, 0, 1) # Assuming volatility is already 0-1
-        norm_market_cap = np.clip(np.log10(market_cap_sol + epsilon) / 7, 0, 1)
-        norm_volume = np.clip(np.log10(volume + epsilon) / 5, 0, 1) # Use OHLCV Volume
-        norm_rugcheck = np.clip(1.0 - (float(rugcheck_score) / 10000.0), 0, 1)
-        norm_socials = np.clip(1.0 - (float(socials_score) / 100.0), 0, 1)
-        norm_time_creation = np.clip(np.log10(time_since_creation_seconds + 1) / 6, 0, 1)
-        norm_pos_pnl = np.clip(position_pnl_current_unrealized / (total_investment if self.active_position else 1.0), -1, 5)
-        max_duration_seconds = self._max_episode_steps * 5
-        norm_time_held = np.clip(time_holding_seconds / (max_duration_seconds + epsilon), 0, 1)
-        norm_sol_balance = np.clip(self.current_sol / (self.initial_capital * 2.0), 0, 1)
+        # --- Calculate Time Features ---
+        # Weekday: Monday=0, Sunday=6.
+        weekday = float(current_timestamp.weekday())
 
-        # --- Construct Observation Vector (Order MUST match rl_config.OBSERVATION_FEATURES) ---
-        observation = np.array([
-            norm_price_change_1, norm_price_change_5, norm_price_change_10,
-            norm_volatility, norm_market_cap, norm_volume, # Use norm_volume from OHLCV
-            norm_rugcheck, norm_socials, norm_time_creation,
-            is_holding, norm_pos_pnl, norm_time_held, norm_sol_balance
-        ], dtype=np.float32)
+        # Daytime: Hour of the day (0-23).
+        hour = float(current_timestamp.hour)
+
+        # --- Include Tunable Parameters ---
+        tunable_params_values = []
+        for param_name, _, _, p_type in rl_config.RL_TUNABLE_PARAMETERS:
+             # Get current value from environment's parameters, use midpoint if not set
+            # Find the index of the current parameter in RL_TUNABLE_PARAMETERS
+            try:
+                param_index = [j for j, p in enumerate(rl_config.RL_TUNABLE_PARAMETERS) if p[0] == param_name][0]
+                current_val = self.current_parameters.get(param_name, (rl_config.ACTION_LOW[param_index] + rl_config.ACTION_HIGH[param_index]) / 2.0)
+            except IndexError:
+                logger.error(f"Parameter '{param_name}' not found in RL_TUNABLE_PARAMETERS. Cannot get default value.")
+                current_val = 0.0 # Default to 0.0 or handle appropriately
+            if p_type == int:
+                 tunable_params_values.append(float(int(current_val)))
+            else:
+                 tunable_params_values.append(float(current_val))
+
+
+        # --- Construct Raw Observation Vector (Order MUST match rl_config.OBSERVATION_FEATURES) ---
+        observation_list = [
+            price_change_1, price_change_5, price_change_10,
+            volatility, market_cap_sol, volume,
+            float(rugcheck_score), float(socials_score), time_since_creation_seconds,
+            is_holding, position_pnl_current_unrealized, time_holding_seconds, self.current_sol,
+            weekday, hour # Add raw time features
+        ]
+        # Add raw tunable parameters
+        observation = np.array(observation_list, dtype=np.float32)
 
         # --- Final Validation ---
         if not np.all(np.isfinite(observation)):
-            logger.warning(f"NaN/inf in OHLCV observation @ Index {self._last_step_processed_index}, Mint {self.current_mint}. Replacing with zeros. Raw Obs: {observation}")
+            logger.warning(f"NaN/inf in raw OHLCV observation @ Index {self._last_step_processed_index}, Mint {self.current_mint}. Replacing with zeros. Raw Obs: {observation}")
             observation = default_obs
         elif observation.shape != self.observation_space.shape:
-            logger.error(f"OHLCV Observation shape mismatch! Expected {self.observation_space.shape}, got {observation.shape}. Returning zeros.")
+            logger.error(f"Raw OHLCV Observation shape mismatch! Expected {self.observation_space.shape}, got {observation.shape}. Returning zeros.")
             observation = default_obs
-        else:
-            observation = np.clip(observation, rl_config.OBSERVATION_LOW, rl_config.OBSERVATION_HIGH)
 
-        self.last_observation = observation
+        self.last_observation = observation # Store raw observation
         self._previous_unrealized_pnl = position_pnl_current_unrealized
         return observation
 
     def _apply_action(self, action: np.ndarray):
-        """Applies the agent's action (Same as before)."""
+        """Applies the agent's action."""
         new_params = {}
         clipped_action = np.clip(action, rl_config.ACTION_LOW, rl_config.ACTION_HIGH)
         for i, param_config in enumerate(rl_config.RL_TUNABLE_PARAMETERS):
@@ -278,7 +289,7 @@ class TradingEnv(gym.Env):
 
         try:
             current_row = self.current_data_df.iloc[current_data_index]
-            current_timestamp = self.current_data_df.index[current_data_index]
+            current_timestamp = self.current_data_df.index[self._last_step_processed_index]
             # Use OHLCV columns
             price = float(current_row.get('Close', 0.0))
             volume = float(current_row.get('Volume', 0.0))
@@ -306,18 +317,12 @@ class TradingEnv(gym.Env):
             buy_amount_sol = agent_params.get('SOL_TO_BUY', 0.1)
             second_tp_margin = agent_params.get('SECOND_TAKE_PROFIT_PERCENT', 550.0) / 100.0
 
-            # Fixed simulation parameters
+            # Fixed simulation parameters (matching rl_config defaults)
             buy_fee = rl_config.DEFAULT_BUY_FEE
             buy_tip = rl_config.DEFAULT_BUY_TIP
             sell_fee = rl_config.DEFAULT_SELL_FEE
             sell_tip = rl_config.DEFAULT_SELL_TIP
-            # buy_amount_sol = rl_config.DEFAULT_BUY_SOL_AMOUNT
-            # volume_thresh = rl_config.DEFAULT_VOLUME_THRESHOLD
-            # mcap_thresh_buy = rl_config.DEFAULT_MARKETCAP_THRESHOLD
-            # rug_thresh = rl_config.DEFAULT_RUGCHECK_SCORE_THRESHOLD
-            # social_thresh = rl_config.DEFAULT_SOCIAL_SCORE_THRESHOLD
-            # volatility_thresh = rl_config.MIN_VOLATILITY
-            min_mcap_sell_usd = rl_config.MIN_MARKET_CAP
+            min_mcap_sell_usd = rl_config.MIN_MARKET_CAP # Use the uncommented value
 
         except (KeyError, ValueError, TypeError) as e:
             logger.error(f"Error getting data/params in trading logic at index {current_data_index}: {e}", exc_info=True)
@@ -336,14 +341,14 @@ class TradingEnv(gym.Env):
             first_tp_hit = pos['first_tp_hit']
 
             current_trailing_sl_price = 0.0
-            if first_tp_hit:
+            if first_tp_hit: # Trailing SL is active only AFTER first TP
                 current_trailing_sl_price = hp * (1.0 - trailing_sl_percent / 100.0)
 
             sell_reason = None
             sell_all = False; sell_partial = False
             sell_percentage = 0.0
 
-            # Check conditions using Close price
+            # Order of checks: SL > Second TP > First TP > Trailing SL > MCap SL (Matching trading_logic.py)
             if price <= current_stop_loss_price:
                 sell_reason = "Stop Loss" if not first_tp_hit else "Breakeven SL"; sell_all = True; sell_percentage = 1.0
                 reward_bonus_penalty += rl_config.REWARD_SL_HIT_PENALTY
@@ -353,13 +358,14 @@ class TradingEnv(gym.Env):
             elif not first_tp_hit and price >= initial_tp_price:
                 sell_reason = "First TP"; sell_partial = True; sell_percentage = first_sell_perc
                 reward_bonus_penalty += rl_config.REWARD_TP_HIT_BONUS
-            elif first_tp_hit and price <= current_trailing_sl_price:
+            elif first_tp_hit and price <= current_trailing_sl_price: # Trailing SL checked only if first TP hit
                 sell_reason = "Trailing SL"; sell_all = True; sell_percentage = 1.0
                 reward_bonus_penalty += rl_config.REWARD_SL_HIT_PENALTY
-            # Emergency SL (Simplified)
-            # elif (market_cap_sol * 1.0) < min_mcap_sell_usd:
-            #     sell_reason = "Emergency SL"; sell_all = True; sell_percentage = 1.0
-            #     reward_bonus_penalty += rl_config.REWARD_SL_HIT_PENALTY
+            # Emergency SL (MCap) - Added to match trading_logic.py
+            elif market_cap_sol > 0 and (market_cap_sol * (self.current_sol / self.initial_capital)) < min_mcap_sell_usd: # Approximate USD MCap
+                 sell_reason = "Emergency SL (MCap)"; sell_all = True; sell_percentage = 1.0
+                 reward_bonus_penalty += rl_config.REWARD_SL_HIT_PENALTY
+
 
             if sell_reason:
                 initial_tokens = pos['initial_tokens']
@@ -390,14 +396,17 @@ class TradingEnv(gym.Env):
 
                     if sell_partial:
                         pos['first_tp_hit'] = True
+                        # In trading_logic.py, SL is adjusted to buy_price after TP1. Replicate this.
                         pos['stop_loss_price'] = pos['buy_price']
 
                     if pos['remaining_tokens'] < 1e-9:
                         self.active_position = None
 
         # --- Buy Logic (using OHLCV Volume) ---
+        # The environment decides *when* a token is available (based on data).
+        # The agent's parameters determine *if* the bot buys when presented with an opportunity.
+        # The buy criteria here should match the thresholds used in trading_logic.py's find_trading_opportunities.
         if not self.active_position and self.current_sol >= (buy_amount_sol + buy_fee + buy_tip):
-            # Check fixed buy criteria using OHLCV Volume
             rugcheck_score = int(current_row.get('rugcheck_score', 10000))
             socials_score = int(current_row.get('socials_score', 100))
             volatility = float(current_row.get('volatility', 0.0))
@@ -423,14 +432,35 @@ class TradingEnv(gym.Env):
 
                     # Calculate initial SL/TPs using agent's CURRENT parameters and Close price
                     initial_sl_price = price * (1.0 - initial_sl_percent / 100.0)
+
+                    # First Take Profit (TP1) Price Calculation (Net Income Approach - Matching trading_logic.py)
                     sell_fee_tp1 = float(rl_config.DEFAULT_SELL_FEE)
                     sell_tip_tp1 = float(rl_config.DEFAULT_SELL_TIP)
-                    total_cost_base_tp1 = total_investment + sell_fee_tp1 + sell_tip_tp1
-                    target_net_sol_return_tp1 = total_cost_base_tp1 * (1.0 + first_profit_margin)
-                    target_gross_sol_return_tp1 = target_net_sol_return_tp1 + sell_fee_tp1 + sell_tip_tp1
-                    tokens_to_sell_tp1 = tokens_bought * first_sell_perc
-                    initial_tp_price = (target_gross_sol_return_tp1 / tokens_to_sell_tp1) if tokens_to_sell_tp1 > 1e-9 else float('inf')
-                    second_tp_price = price * (1.0 + second_tp_margin)
+                    fees_for_tp1_sell = sell_fee_tp1 + sell_tip_tp1
+
+                    profit_margin_tp1_fraction = float(agent_params.get('FIRST_SELL_PROFIT_MARGIN', 100.0)) / 100.0 # Use agent's param
+                    sell_percent_tp1_fraction = float(agent_params.get('FIRST_SELL_PERCENT', 75.0)) / 100.0 # Use agent's param
+
+                    tokens_to_sell_tp1 = tokens_bought * sell_percent_tp1_fraction
+                    if tokens_to_sell_tp1 <= 1e-9:
+                         # This case should ideally not happen if tokens_bought > 0 and sell_percent_tp1_fraction > 0
+                         # but handle defensively.
+                         initial_tp_price = float('inf') # Set TP1 very high if sell amount is negligible
+                         logger.warning(f"Calculated tokens to sell at TP1 ({tokens_to_sell_tp1}) is negligible for mint {self.current_mint}. Setting TP1 price to infinity.")
+                    else:
+                        # Cost basis of the portion of tokens sold at TP1
+                        cost_of_tp1_tokens_sold = total_investment * sell_percent_tp1_fraction
+                        # Desired profit on this portion
+                        desired_profit_on_tp1_tokens = cost_of_tp1_tokens_sold * profit_margin_tp1_fraction
+                        # Total SOL needed from the gross sale at TP1 price
+                        gross_sol_needed_from_tp1_sale = cost_of_tp1_tokens_sold + desired_profit_on_tp1_tokens + fees_for_tp1_sell
+                        # TP1 Price calculation
+                        initial_tp_price = gross_sol_needed_from_tp1_sale / tokens_to_sell_tp1
+
+
+                    # Second Take Profit Price Calculation (Matching trading_logic.py)
+                    second_tp_price = price * (1 + float(agent_params.get('SECOND_TAKE_PROFIT_PERCENT', 550.0)) / 100.0) # Use agent's param
+
 
                     self.active_position = {
                         'buy_price': price, 'initial_tokens': tokens_bought,

@@ -38,7 +38,7 @@
 
 Here’s Pump Trader doing its thing — scraping WebSockets, ducking rugs, and making trades like a caffeinated Wall Street intern:
 
-![Pump Trader Demo - Dark Mode](https://github.com/yourusername/pump-trader/blob/main/assets/demo_dark.gif)
+![Pump Trader Demo - Dark Mode](https://via.placeholder.com/600x400.gif?text=Pump+Trader+Demo)
 
 > ⚠️ Replace this URL with your actual dark-mode GIF (e.g., `/assets/demo_dark.gif`). Transparent background = extra points.
 

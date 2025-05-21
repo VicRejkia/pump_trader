@@ -109,35 +109,40 @@ def analyze_feature_importance(model, env, num_samples=1000):
         feature_names=rl_config.OBSERVATION_FEATURES
     )
     
-    # Calculate SHAP values in batches to manage memory
-    shap_values = explainer(samples[:100])  # Use smaller subset for demonstration
+    # Calculate SHAP values
+    # Use a reasonable subset of samples for SHAP to manage memory and computation
+    shap_samples = samples[:500] # Increased samples for SHAP
+    shap_values = explainer(shap_samples)
     
     # Plot summary
     plt.figure()
-    shap.summary_plot(shap_values, samples[:100], show=False)
+    shap.summary_plot(shap_values, shap_samples, show=False, feature_names=rl_config.OBSERVATION_FEATURES) # Pass feature_names explicitly
     plt.savefig(os.path.join(rl_config.MODEL_SAVE_DIR, "feature_importance_shap.png"))
     plt.close()
 
     # Permutation Importance
-    # def score_fn(X):
-    #     return np.array([model.predict(x)[0] for x in X])
+    # Use a reasonable subset of samples for permutation importance
+    perm_samples = samples[:500] # Increased samples for permutation importance
+    def score_fn(X):
+        # Ensure the input X is treated as a batch for prediction
+        return np.array([model.predict(x.reshape(1, -1))[0] for x in X])
 
-    # result = permutation_importance(
-    #     score_fn, 
-    #     samples[:100], 
-    #     n_repeats=5, 
-    #     random_state=42,
-    #     n_jobs=-1
-    # )
+    result = permutation_importance(
+        score_fn,
+        perm_samples,
+        n_repeats=5,
+        random_state=42,
+        n_jobs=-1
+    )
     
-    # # Save results
-    # importance_df = pd.DataFrame({
-    #     'feature': rl_config.OBSERVATION_FEATURES,
-    #     'importance_mean': result.importances_mean(axis=1),
-    #     'importance_std': result.importances_std(axis=1)
-    # }).sort_values('importance_mean', ascending=False)
+    # Save results
+    importance_df = pd.DataFrame({
+        'feature': rl_config.OBSERVATION_FEATURES,
+        'importance_mean': result.importances_mean, # Access mean directly
+        'importance_std': result.importances_std # Access std directly
+    }).sort_values('importance_mean', ascending=False)
     
-    # importance_df.to_csv(os.path.join(rl_config.MODEL_SAVE_DIR, "feature_importance_permutation.csv"), index=False)
+    importance_df.to_csv(os.path.join(rl_config.MODEL_SAVE_DIR, "feature_importance_permutation.csv"), index=False)
     
     logger.info("Feature importance analysis completed")
 
@@ -201,7 +206,6 @@ async def train_rl_agent():
         return
 
     # --- Database Connection ---
-    # (Connect DB - same as before)
     if not db_client_global:
         db_client_global = DatabaseClient()
         try:
@@ -211,7 +215,7 @@ async def train_rl_agent():
             logger.critical(f"Failed to connect database for RL Trainer: {e}")
             return
 
-    # --- Load and Prepare Data (Receives data AND lifespans) ---
+    # --- Load and Prepare Data ---
     start_date = rl_config.RL_HISTORICAL_DATA_START_TS
     end_date = rl_config.RL_HISTORICAL_DATA_END_TS
     data_split_config = rl_config.DATA_SPLIT_RL
@@ -219,30 +223,22 @@ async def train_rl_agent():
     logger.info(f"Loading and splitting data from {start_date.isoformat()} to {end_date.isoformat()}...")
     loaded_results: Optional[Tuple[Dict, Dict]] = await load_and_split_data(db_client_global, start_date, end_date, data_split_config)
 
-    if loaded_results is None:
+    if not loaded_results:
         logger.critical("Failed to load or split data. Exiting.")
-        if db_client_global: await db_client_global.close()
+        await db_client_global.close() if db_client_global else None
         return
 
-    loaded_data_sets, token_lifespans = loaded_results # Unpack
-
-    # Create an output directory for the datasets
-    # output_dir = os.path.join("data", "exported_datasets", datetime.now().strftime("%Y%m%d_%H%M%S"))
-
-    # # Export the datasets and token lifespans
-    # export_to_csv(loaded_data_sets, output_dir, token_lifespans)
-    # logger.info(f"Exported datasets and token lifespans to {output_dir}")
+    loaded_data_sets, token_lifespans = loaded_results
 
     training_data = loaded_data_sets.get(rl_config.DATA_SET_KEY_TRAIN)
     eval_data = loaded_data_sets.get(rl_config.DATA_SET_KEY_EVAL)
-    # Filter lifespans to match the data splits
+
     train_lifespans = {k: v for k, v in token_lifespans.items() if k in training_data} if training_data else {}
     eval_lifespans = {k: v for k, v in token_lifespans.items() if k in eval_data} if eval_data else {}
 
-
     if not training_data or not train_lifespans:
-        logger.critical("No training data or corresponding lifespans available after loading/splitting. Exiting.")
-        if db_client_global: await db_client_global.close()
+        logger.critical("No training data or corresponding lifespans available. Exiting.")
+        await db_client_global.close() if db_client_global else None
         return
 
     logger.info(f"Training data loaded for {len(training_data)} tokens with lifespan info.")
@@ -250,7 +246,7 @@ async def train_rl_agent():
         logger.info(f"Evaluation data loaded for {len(eval_data)} tokens with lifespan info.")
     else:
         logger.warning("No evaluation data/lifespans found. Evaluation callback will not function correctly.")
-        eval_data = None # Ensure eval_data is None if lifespans are missing
+        eval_data = None
         eval_lifespans = {}
 
     # --- Create Vectorized Environments ---

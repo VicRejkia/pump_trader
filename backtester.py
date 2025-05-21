@@ -258,7 +258,6 @@ async def run_backtest(
     rugcheck_threshold = parameters.get('DEFAULT_RUGCHECK_SCORE_THRESHOLD', 801)
     socials_threshold = parameters.get('DEFAULT_SOCIAL_SCORE_THRESHOLD', 50)
     min_volatility = parameters.get('MIN_VOLATILITY', 0.1)
-    min_market_cap_usd = parameters.get('_MIN_MARKET_CAP', 3600) # Emergency sell
     buy_fee = parameters.get('DEFAULT_BUY_FEE', 0.001)
     buy_tip = parameters.get('DEFAULT_BUY_TIP', 0.001)
     sell_fee = parameters.get('DEFAULT_SELL_FEE', 0.001)
