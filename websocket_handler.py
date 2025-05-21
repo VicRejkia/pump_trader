@@ -101,9 +101,9 @@ class WebSocketHandler:
         try:
             async for message in self.websocket:
                 sol_price = await self.state.get_sol_price()
-                if sol_price is None or sol_price <= 0:
-                    logger.warning(f"⚠ Invalid SOL_PRICE ({sol_price}); skipping connection to PumpPortal WebSocket.")
-                    sol_price = None
+                # if sol_price is None or sol_price <= 0:
+                #     logger.warning(f"⚠ Invalid SOL_PRICE ({sol_price}); skipping connection to PumpPortal WebSocket.")
+                #     sol_price = None
 
                 try:
                     data = json.loads(message)
@@ -228,7 +228,7 @@ class WebSocketHandler:
                 continue
 
             try:
-                rows = await self.db_client.get_tokens_to_unsubscribe(self.config['MC_DROP_THRESHOLD'], self.config['INACTIVITY_PERIOD'])
+                rows = await self.db_client.get_tokens_to_unsubscribe(self.config['MC_DROP_THRESHOLD'], self.config['INACTIVITY_PERIOD'], self.config['MIN_TOKEN_AGE'])
 
                 # Identify candidate mints from DB
                 candidate_mints = [row['mint'] for row in rows]

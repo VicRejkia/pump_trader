@@ -15,8 +15,8 @@ from typing import List, Dict, Any, Tuple, Union
 # --- General Configuration ---
 # NOTE: THESE DATES ARE EXAMPLES - ADJUST TO YOUR ACTUAL DATA RANGE
 # Use the same extended range as GA for consistency?
-RL_HISTORICAL_DATA_START_TS: datetime = datetime(2025, 5, 1, 15, 0, 0, tzinfo=timezone.utc)
-RL_HISTORICAL_DATA_END_TS: datetime = datetime(2025, 5, 3, 23, 59, 0, tzinfo=timezone.utc)
+RL_HISTORICAL_DATA_START_TS: datetime = datetime(2025, 5, 20, 15, 0, 0, tzinfo=timezone.utc)
+RL_HISTORICAL_DATA_END_TS: datetime = datetime(2025, 5, 21, 19, 15, 0, tzinfo=timezone.utc)
 
 # --- Environment Configuration ---
 DATA_SET_KEY_TRAIN: str = 'train'       # Data used for agent training episodes.
@@ -50,13 +50,19 @@ OBSERVATION_FEATURES: List[str] = [
     'is_holding',           # Binary flag (0 or 1)
     'position_pnl_norm',    # Unrealized PnL of current position, normalized (-1 to N)
     'time_holding_norm',    # Time the current position has been held, normalized (0-1)
-    'sol_balance_norm'      # Current SOL balance, normalized (0-1 relative to initial capital * factor)
+    'sol_balance_norm',     # Current SOL balance, normalized (0-1 relative to initial capital * factor)
+
+    # Time Features (Normalized)
+    'weekday',              # Day of the week (e.g., normalized 0-1 or one-hot)
+    'daytime'               # Time of day (e.g., normalized 0-1 or cyclical)
 ]
 OBSERVATION_SPACE_DIM: int = len(OBSERVATION_FEATURES)
 
-# Expected bounds of the observation space *after* normalization. [-1, 1] is common.
-OBSERVATION_LOW: float = -1.0
-OBSERVATION_HIGH: float = 1.0
+# Note: Observation normalization is handled by Stable Baselines3's VecNormalize.
+# The bounds defined here are the *expected* range after normalization,
+# but the Box space itself is defined by the shape only.
+OBSERVATION_LOW: float = -1.0 # Removed as normalization is external
+OBSERVATION_HIGH: float = 1.0 # Removed as normalization is external
 
 # --- Action Space Configuration (Continuous Parameter Tuning) ---
 # Parameters controlled by the RL agent.
@@ -68,12 +74,11 @@ RL_TUNABLE_PARAMETERS: List[Tuple[str, float, float, type]] = [
     ('TRAILING_STOP_LOSS_PERCENT', 5.0, 50.0, float),   # 5% to 50% TSL
     ('FIRST_SELL_PROFIT_MARGIN', 10.0, 200.0, float),   # 10% to 200% margin for TP1
     ('SECOND_TAKE_PROFIT_PERCENT', 100.0, 1000.0, float), # 100% to 1000% TP2
-    ('FIRST_SELL_PROFIT_MARGIN', 10.0, 200.0, float),   # 10% to 200% margin for TP1
-    ('DEFAULT_VOLUME_THRESHOLD', 10000, 50000, int),     # 5k to 50k USD volume threshold
-    ('DEFAULT_MARKETCAP_THRESHOLD', 6000, 100000, int), # 10k to 100k USD market cap threshold
+    ('DEFAULT_VOLUME_THRESHOLD', 5000, 50000, int),     # 5k to 50k USD volume threshold
+    ('DEFAULT_MARKETCAP_THRESHOLD', 10000, 100000, int), # 10k to 100k USD market cap threshold
     ('MIN_VOLATILITY', 0.1, 1.0, float),                # 0.1% to 1% volatility threshold
     ('DEFAULT_RUGCHECK_SCORE_THRESHOLD', 500, 1002, int), # 1 to 1000 score threshold
-    ('DEFAULT_SOCIAL_SCORE_THRESHOLD', 40, 80, int),  # 1 to 100 score threshold
+    ('DEFAULT_SOCIAL_SCORE_THRESHOLD', 40, 100, int),  # 1 to 100 score threshold
     # ('DEFAULT_TIME_INTERVALL', 1, 60, int),
     ('SOL_TO_BUY', 0.1, 0.5, float), # Add buy amount later if needed
 ]

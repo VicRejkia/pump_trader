@@ -5,9 +5,10 @@ import json
 from config import _SOL_PRICE_API_URL
 from logger import logger
 from database_handler import DatabaseClient
+from state_manager import GlobalState
 
 
-async def update_sol_price(state, db_client: DatabaseClient):
+async def update_sol_price(state: GlobalState, db_client: DatabaseClient):
     """Periodically fetches and updates the global SOL price from an external API."""
     logger.info("🚀 Starting update_sol_price task...")
 

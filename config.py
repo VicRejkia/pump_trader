@@ -3,8 +3,8 @@ Configuration constants and settings for the trading bot.
 """
 
 # Trading configuration
+_INITIAL_SOL_BALANCE = 100.0                # Starting SOL balance for PnL tracking
 SOL_TO_BUY = 0.5                            # Amount of SOL to spend on each buy
-_INITIAL_SOL_BALANCE = 100.0                  # Starting SOL balance for PnL tracking
 PLAY_BUY_SOUND = False                      # Play the buy sound when a buy is made
 PLAY_SELL_SOUND = False                     # Play the sell sound when a sell is made
 
@@ -22,9 +22,9 @@ DEFAULT_SELL_FEE = 0.001                    # Fee for selling in SOL
 DEFAULT_SELL_TIP = 0.001                    # Tip for selling in SOL
 
 # Price determination strategy
-PRICE_DETERMINATION_METHOD = "MEDIAN"  # Options: "VWAP", "TWAP", "LATEST", "MEDIAN"
-PRICE_AVG_WINDOW_MINUTES = 3         # Lookback window for VWAP/TWAP in minutes
-TWAP_SUB_INTERVAL_SECONDS = 60       # Sub-interval for TWAP calculation (if TWAP is used) in seconds
+PRICE_DETERMINATION_METHOD = "MEDIAN"       # Options: "VWAP", "TWAP", "LATEST", "MEDIAN"
+PRICE_AVG_WINDOW_MINUTES = 1                # Lookback window for VWAP/TWAP in minutes
+TWAP_SUB_INTERVAL_SECONDS = 60              # Sub-interval for TWAP calculation (if TWAP is used) in seconds
 
 # Trading thresholds
 DEFAULT_RUGCHECK_SCORE_THRESHOLD = 401      # No trading if Rugcheck score is equal or above this threshold
@@ -33,18 +33,12 @@ DEFAULT_VOLUME_THRESHOLD = 40000            # Minimum volume threshold in USD
 MIN_MARKETCAP_THRESHOLD = 3600              # Minimum market cap threshold in USD to make emergency sell
 DEFAULT_MARKETCAP_THRESHOLD = 45000         # Minimum market cap threshold in USD to search for buy opportunities
 MIN_VOLATILITY = 0.18                       # Minimum volatility threshold in % to search for buy opportunities
-DEFAULT_TIME_INTERVALL = 30                 # Time interval for checking volatility, volume and marketcap in minutes
-#MAX_DRAWDOWN_SOL = 10                       # Maximum allowed 24h loss in SOL (not integrated)
-#DRAWDOWN_CHECK_INTERVAL = 3600              # Drawdown check interval (seconds) (not integrated)
+DEFAULT_TIME_INTERVALL = 10                 # Time interval for checking volatility, volume and marketcap in minutes
 
 # UNSUBSCRIBING CONDITIONS
-INACTIVITY_PERIOD = 30                      # Inactivity period in minutes before unsubscribing & backup
-MIN_MARKET_CAP = 3600                       # Minimum market cap (in USD) - for unsubscription & backup
+INACTIVITY_PERIOD = 60                      # Inactivity period in minutes before unsubscribing & backup
 MC_DROP_THRESHOLD = 5                       # Market cap drop threshold (in %) - for unsubscription & backup
-
-# Subscription tracking
-#ACTIVE_SUBSCRIPTIONS = set()                # leave it alone ... can be deleted?
-#NEW_TOKEN_SUBSCRIPTION = False              # leave it alone ... can be deleted?
+MIN_TOKEN_AGE = 30                          # Minimum token age in minutes before unsubscription & backup
 
 # PumpPortal
 _MAX_SUBSCRIPTION_BATCH: int = 100           # For batch unsubscription ... can be deleted?

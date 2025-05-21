@@ -257,7 +257,9 @@ async def load_and_split_data(
                 mc.trade_count
             FROM MintCounts mc
             JOIN RankedTrades rt ON mc.mint = rt.mint
-            WHERE rt.rn_asc = 1 OR rt.rn_desc = 1 -- Optimization to only join needed rows
+            LEFT JOIN v_tokens AS vt ON mc.mint = vt.mint
+            WHERE (rt.rn_asc = 1 OR rt.rn_desc = 1) -- Optimization to only join needed rows
+                AND (vt.backup_reason = 'rugged_dead' OR vt.backup_reason = '')
             GROUP BY mc.mint, mc.trade_count;
         """
         candidate_records = await db_client.pool.fetch(query_mints_lifespans, start_date, end_date, min_data_points)

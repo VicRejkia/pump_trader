@@ -8,9 +8,11 @@ from collections import deque
 import config # Import config to access INITIAL_SOL_BALANCE
 import json # Added for file writing
 from logger import logger
+import os
 
 # Define the path for the shared SOL price file
 SOL_PRICE_FILE = 'data/sol_price.json'
+SUBSCRIPTIONS_FILE = 'data/current_subscriptions.json'
 
 class GlobalState:
     """Thread-safe Singleton class to store global state variables."""
@@ -42,6 +44,26 @@ class GlobalState:
         # Concurrency control
         self.lock = asyncio.Lock()  # General state lock
         self.db_write_lock = asyncio.Lock()  # Database write lock
+
+    def _load_subscriptions_from_file(self):
+        """Load active token subscriptions from file if it exists."""
+        try:
+            if os.path.exists(SUBSCRIPTIONS_FILE):
+                with open(SUBSCRIPTIONS_FILE, 'r') as f:
+                    return set(json.load(f))
+            else:
+                return set()
+        except Exception as e:
+            logger.error(f"Error loading subscriptions from file: {e}")
+            return set()
+
+    def _save_subscriptions_to_file(self):
+        """Save current active token subscriptions to file."""
+        try:
+            with open(SUBSCRIPTIONS_FILE, 'w') as f:
+                json.dump(list(self.active_token_subscriptions), f, indent=2)
+        except Exception as e:
+            logger.error(f"Error saving subscriptions to file: {e}")
 
     @classmethod
     def get_instance(cls):
@@ -100,10 +122,12 @@ class GlobalState:
     async def add_token_subscription(self, mint: str):
         async with self.lock:
             self.active_token_subscriptions.add(mint)
+            self._save_subscriptions_to_file()
 
     async def remove_token_subscription(self, mint: str):
         async with self.lock:
             self.active_token_subscriptions.discard(mint)
+            self._save_subscriptions_to_file()
 
     async def get_token_subscriptions(self):
         async with self.lock:
