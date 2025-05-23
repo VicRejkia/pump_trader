@@ -201,19 +201,60 @@ class WebSocketHandler:
             return
 
         try:
-            rows = await self.db_client.get_active_tokens()
-            for row in rows:
+            startup_time = datetime.now(timezone.utc)
+            last_bot_activity_time = await self.db_client.get_last_heartbeat_before(startup_time)
+            
+            # Get the gap threshold from config, default to 10 minutes if not found
+            RESTART_GAP_THRESHOLD_SECONDS = self.config.get('RESTART_GAP_THRESHOLD_SECONDS', 600)
+
+            active_tokens_from_db = await self.db_client.get_active_tokens()
+            mints_to_subscribe = []
+
+            for row in active_tokens_from_db:
                 mint = row['mint']
-                if mint not in await self.state.get_token_subscriptions():
+                last_trade_timestamp = await self.db_client.get_last_trade_timestamp(mint)
+
+                is_gap_filled_candidate = False
+                if last_trade_timestamp is not None and last_bot_activity_time is not None:
+                    gap_duration = startup_time - last_bot_activity_time
+                    if last_trade_timestamp < last_bot_activity_time and gap_duration.total_seconds() > RESTART_GAP_THRESHOLD_SECONDS:
+                        is_gap_filled_candidate = True
+
+                if is_gap_filled_candidate:
+                    logger.info(f"Detected potential gap-filled token {mint}. Last trade: {last_trade_timestamp}, Last bot activity: {last_bot_activity_time}. Backing up with 'interrupted_gap_fill' reason.")
+                    try:
+                        await self.db_client.backup_and_delete_token(mint=mint, archived_at=startup_time, reason="interrupted_gap_fill")
+                    except Exception as e:
+                        logger.error(f"Error backing up gap-filled token {mint}: {e}", exc_info=True)
+                        # If backup/delete fails, we still don't want to subscribe to it.
+                else:
+                    # Only add to subscribe list if it's not a gap-filled candidate
+                    mints_to_subscribe.append(mint)
+
+            if mints_to_subscribe:
+                logger.info(f"Attempting to resubscribe to {len(mints_to_subscribe)} active tokens.")
+                # Send batch subscribe message
+                try:
                     await self.websocket.send(json.dumps({
                         "method": "subscribeTokenTrade",
-                        "keys": [mint]
+                        "keys": mints_to_subscribe
                     }))
-                    await self.state.add_token_subscription(mint)
-                    logger.debug(f"🔄 Resubscribed to {mint}")
+                    # Update state with the tokens we successfully attempted to subscribe to
+                    async with self.state.lock:
+                         for mint in mints_to_subscribe:
+                              self.state.active_token_subscriptions.add(mint)
+                    logger.debug(f"🔄 Resubscribed to {len(mints_to_subscribe)} tokens.")
+                except Exception as e:
+                    logger.error(f"❌ Failed to send batch resubscribe message: {e}", exc_info=True)
+                    # If sending fails, the state might be out of sync, but we can't do much more here.
+            else:
+                logger.info("No active tokens found in DB to resubscribe to.")
+
         except Exception as e:
             logger.error(f"❌ Failed to resume subscriptions: {e}", exc_info=True)
-            raise  # Let the task fail visibly for debugging
+            # Depending on severity, you might want to trigger shutdown here.
+            # For now, just log and let the bot continue with potentially no subscriptions.
+            # raise # Re-raise if critical for bot operation
 
     async def unsubscribe_checker(self):
         """Periodically checks for inactive or risky tokens."""
@@ -265,6 +306,7 @@ class WebSocketHandler:
                     deleted_count = 0
                     for mint in mints_to_process_batch:
                         try:
+                            # Use "rugged_dead" reason here, as this is the standard unsubscribe checker logic
                             await self.db_client.backup_and_delete_token(mint=mint, archived_at=datetime.now(timezone.utc), reason="rugged_dead")
                             deleted_count += 1
                         except Exception as e:
