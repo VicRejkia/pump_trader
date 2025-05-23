@@ -75,6 +75,7 @@ SOCIALS_DISALLOWED_WEBSITE_DOMAINS = {
     "discord.com", "discord.gg", "medium.com", "substack.com", "linktr.ee",
     "t.me", "twitter.com", "x.com", "facebook.com", "instagram.com",
     "linkedin.com", "reddit.com", "twitch.tv", "kick.com", "google.com",
+    "example.com",
 }
 SOCIALS_ALLOWED_NEWS_DOMAINS = {
     "bbc.com", "cnn.com", "reuters.com", "apnews.com", "nytimes.com",

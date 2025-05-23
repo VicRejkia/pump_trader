@@ -52,9 +52,15 @@ def _config_module_to_dict(module) -> dict:
     logger.debug(f"Converted config module to dict: {list(config_dict.keys())}")
     return config_dict
 
+# --- Helper Function to Sanitize Strings ---
+def _sanitize_string(value: Any) -> Optional[str]:
+    """Removes null bytes from strings and ensures the value is a string or None."""
+    if isinstance(value, str):
+        return value.replace('\x00', '')
+    return None if value is None else str(value) # Convert other types to string, handle None
 class DatabaseClient:
     """Client to manage database connections and operations."""
-
+ 
     _DEFAULT_CONFIG = _config_module_to_dict(base_config_module)
     
     def __init__(self, config_dict: Optional[dict] = None):
@@ -183,9 +189,9 @@ class DatabaseClient:
                         data.get('vTokensInBondingCurve'),
                         data.get('vSolInBondingCurve'), 
                         data.get('marketCapSol'), 
-                        data.get('name'),
-                        data.get('symbol'), 
-                        data.get('uri'),
+                        _sanitize_string(data.get('name')),
++                       _sanitize_string(data.get('symbol')), 
++                       _sanitize_string(data.get('uri')),
                         sol_price
                     )
                     logger.debug("Inserted/Updated token %s", data.get('mint'))
@@ -632,6 +638,13 @@ class DatabaseClient:
             if not conn and connection:
                 await self.pool.release(connection)
 
+    async def get_last_trade_timestamp(self, mint: str) -> Optional[datetime]:
+        """Get the timestamp of the last trade for a given mint."""
+        query = "SELECT timestamp FROM trades WHERE mint = $1 ORDER BY timestamp DESC LIMIT 1"
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, mint)
+            return row['timestamp'] if row else None
+
     async def get_trade_history(self, mints: list[str]):
         """Fetches price and timestamp for given mints from trades and trades_backup."""
         if not mints:
@@ -821,28 +834,7 @@ class DatabaseClient:
     async def backup_and_delete_token(self, mint: str, archived_at: datetime, reason: str=None):
         """Backup core table data to a corresponding backup table."""
         final_reason = reason # Initialize final_reason with the provided reason
-
-        if reason == "rugged_dead":
-                # Get this from your bot's configuration system
-                # Example: RESTART_GAP_THRESHOLD_SECONDS = self.config.get('RESTART_GAP_THRESHOLD_SECONDS', 600)
-                # Ensure self.config is available or pass the value directly.
-                # For this example, let's assume it's accessed via self.config.
-                if not hasattr(self, 'config') or 'RESTART_GAP_THRESHOLD_SECONDS' not in self.config:
-                    logger.warning("RESTART_GAP_THRESHOLD_SECONDS not found in config. Using default of 600s.")
-                    RESTART_GAP_THRESHOLD_SECONDS = 600 # Default to 10 minutes
-                else:
-                    RESTART_GAP_THRESHOLD_SECONDS = self.config['RESTART_GAP_THRESHOLD_SECONDS']
-
-
-                if await self.check_for_data_gap_on_restart(archived_at, RESTART_GAP_THRESHOLD_SECONDS):
-                    logger.info(f"Token {mint} ({reason}) archived at {archived_at}. Pre-archival data gap detected. "
-                                f"Changing reason to 'interrupted_gap_fill'.")
-                    final_reason = "interrupted_gap_fill"
-                else:
-                    logger.info(f"Token {mint} ({reason}) archived at {archived_at}. No significant pre-archival data gap. Reason remains '{final_reason}'.")
-
-
-
+ 
         try:
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
@@ -854,24 +846,24 @@ class DatabaseClient:
                         await conn.execute('''
                             INSERT INTO trades_backup SELECT *, NOW() FROM trades WHERE mint = $1
                         ''', mint)
-
+ 
                         await conn.execute('''
                             INSERT INTO rugcheck_backup SELECT *, NOW() FROM rugcheck WHERE mint = $1
                         ''', mint)
-
+ 
                         # Backup migrations, ignoring conflicts on the primary key
                         await conn.execute('''
                             INSERT INTO migrations_backup SELECT *, NOW() FROM migrations WHERE mint = $1
                             ON CONFLICT (signature) DO NOTHING -- Conflict check on signature
                         ''', mint)
-
+ 
                         await conn.execute("DELETE FROM tokens WHERE mint = $1", mint)
                         await conn.execute("DELETE FROM trades WHERE mint = $1", mint)
                         await conn.execute("DELETE FROM rugcheck WHERE mint = $1", mint)
                         await conn.execute("DELETE FROM migrations WHERE mint = $1", mint)
-
+ 
                         logger.debug(f"🧹 Backup & deletion completed for {mint}")
-
+ 
                     except Exception as e:
                         logger.error(f"❌ Backup failed for {mint}: {e}", exc_info=True)
                         raise

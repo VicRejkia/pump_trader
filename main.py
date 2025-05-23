@@ -184,7 +184,13 @@ async def main_controller(args):
                 if restart_attempts < MAX_RESTART_ATTEMPTS:
                     restart_attempts += 1
                     log_info(f"Attempting to restart Trading Bot (Attempt {restart_attempts}/{MAX_RESTART_ATTEMPTS})...")
-                    if not await start_trading_bot(trading_bot_cli_args):
+
+                    # Prepare restart arguments: exclude --cleanup and --backup
+                    restart_args = [arg for arg in trading_bot_cli_args if arg not in ["--cleanup", "--backup"]]
+                    # Ensure --params-file and --rl-agent-path are included if they were in the original args
+                    # This is already handled by the list comprehension if they were in trading_bot_cli_args
+
+                    if not await start_trading_bot(restart_args):
                         log_error(f"Failed to restart Trading Bot on attempt {restart_attempts}. Will retry after interval.")
                     else:
                         log_info("Trading Bot restarted successfully.")
