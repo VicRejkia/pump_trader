@@ -1442,48 +1442,40 @@ class DatabaseClient:
                 logger.error(f"Error fetching token lifespan for {mint}: {e}", exc_info=True)
                 return None
 
-    def ohlcv_sql_like(self, df):
-        """Aggregates trade data into OHLCV format, using pre-calculated rolling metrics."""
-        # Ensure data is sorted by time within the group
-        df = df.sort_values('timestamp')
+    def ohlcv_sql_like(self, df_group: pd.DataFrame) -> pd.Series:
+        df = df_group 
         if df.empty:
-            # Return a Series with expected columns and NaN/0 values if the group is empty
             return pd.Series({
                 'Open': np.nan, 'High': np.nan, 'Low': np.nan, 'Close': np.nan,
-                'Volume': 0.0, # Use the rolling volume name
-                'market_cap_calculated': np.nan,
-                'volatility': 0.0 # Use the rolling volatility name
+                'Volume': 0.0,
+                'market_cap_calculated': np.nan, 
+                'marketCapSol': np.nan,          
+                'volatility': 0.0
             })
 
-        # Use .iloc[-1] to safely get the last value, handling potential index issues
-        # Use .fillna(0.0) or other appropriate defaults if iloc[-1] could be NaN
-        last_rolling_volume = df['rolling_volume_sql'].iloc[-1] if not df['rolling_volume_sql'].empty else 0.0
-        last_rolling_volatility = df['rolling_volatility_sql'].iloc[-1] if not df['rolling_volatility_sql'].empty else 0.0
-        last_market_cap = df['market_cap_calculated'].iloc[-1] if not df['market_cap_calculated'].isnull().all() else np.nan
+        last_rolling_volume = df['rolling_volume_sql'].iloc[-1] if 'rolling_volume_sql' in df.columns and not df['rolling_volume_sql'].empty else 0.0
+        last_rolling_volatility = df['rolling_volatility_sql'].iloc[-1] if 'rolling_volatility_sql' in df.columns and not df['rolling_volatility_sql'].empty else 0.0
+        
+        last_market_cap_usd = df['market_cap_calculated'].iloc[-1] if 'market_cap_calculated' in df.columns and not df['market_cap_calculated'].isnull().all() else np.nan
+        last_market_cap_sol_live = df['marketcapsol'].iloc[-1] if 'marketcapsol' in df.columns and not df['marketcapsol'].empty and pd.notna(df['marketcapsol'].iloc[-1]) else np.nan
 
         return pd.Series({
-            'Open': df['price'].iloc[0] if not df['price'].empty else np.nan,
-            'High': df['price'].max() if not df['price'].empty else np.nan,
-            'Low': df['price'].min() if not df['price'].empty else np.nan,
-            'Close': df['price'].iloc[-1] if not df['price'].empty else np.nan,
-            # --- MODIFIED LINES ---
-            'Volume': last_rolling_volume,         # Take the LAST rolling volume in the interval
-            'market_cap_calculated': last_market_cap,
-            'volatility': last_rolling_volatility   # Take the LAST rolling volatility in the interval
-            # --- END MODIFIED LINES ---
+            'Open': df['price'].iloc[0] if 'price' in df.columns and not df['price'].empty else np.nan,
+            'High': df['price'].max() if 'price' in df.columns and not df['price'].empty else np.nan,
+            'Low': df['price'].min() if 'price' in df.columns and not df['price'].empty else np.nan,
+            'Close': df['price'].iloc[-1] if 'price' in df.columns and not df['price'].empty else np.nan,
+            'Volume': last_rolling_volume,
+            'market_cap_calculated': last_market_cap_usd,
+            'marketCapSol': last_market_cap_sol_live, 
+            'volatility': last_rolling_volatility
         })
 
     async def get_historical_data_for_backtesting(
-            self, # Assuming this is part of the DatabaseClient class
+            self,
             mints: List[str],
             start_date: datetime,
             end_date: datetime
         ) -> Dict[str, pd.DataFrame]:
-            """
-            Fetches comprehensive historical data for specified tokens within a date range,
-            structured as 5-second OHLCV candles for backtesting.
-            Calculates rolling volume and volatility similar to the SQL trading logic.
-            """
             if not mints:
                 logger.warning("get_historical_data_for_backtesting called with empty mints list.")
                 return {}
@@ -1491,350 +1483,260 @@ class DatabaseClient:
                 logger.error("Database pool not initialized.")
                 return {}
 
-            if start_date.tzinfo is None: start_date = start_date.replace(tzinfo=timezone.utc)
-            if end_date.tzinfo is None: end_date = end_date.replace(tzinfo=timezone.utc)
+            start_date = start_date.replace(tzinfo=timezone.utc) if start_date.tzinfo is None else start_date.astimezone(timezone.utc)
+            end_date = end_date.replace(tzinfo=timezone.utc) if end_date.tzinfo is None else end_date.astimezone(timezone.utc)
 
             logger.info(f"Fetching historical data for {len(mints)} tokens from {start_date.isoformat()} to {end_date.isoformat()}...")
 
-            # Fetch all necessary data within the time range
+            # Note on SQL column names: PostgreSQL typically folds unquoted identifiers to lowercase.
+            # If your view v_trades has "marketCapSol" (camelCase) because it was created with quotes,
+            # asyncpg will return it as such. If not quoted in view creation, it's likely lowercase.
+            # The code below will convert all fetched column names to lowercase for consistent processing.
             trade_query = """
                 SELECT
-                    mint, timestamp, price, (sol_amount*sol_price_usd) AS volume, market_cap_calculated
+                    mint, timestamp, price, (sol_amount*sol_price_usd) AS volume, 
+                    market_cap_calculated, -- Expected to be live USD MC from trades
+                    marketCapSol AS live_market_cap_sol -- Explicitly alias live SOL MC from trades for clarity
                 FROM v_trades
                 WHERE mint = ANY($1::text[])
                 AND timestamp >= $2 AND timestamp < $3
                 AND price > 0 AND sol_amount IS NOT NULL AND price IS NOT NULL
                 ORDER BY mint, timestamp;
             """
+            
             rugcheck_query = """
                 WITH RankedRugcheck AS (
-                    SELECT
-                        mint, last_checked AS timestamp, score AS rugcheck_score,
-                        ROW_NUMBER() OVER (PARTITION BY mint ORDER BY last_checked DESC) as rn
-                    FROM v_rugcheck
-                    WHERE mint = ANY($1::text[])
-                    AND last_checked < $3 -- Get checks before the period end
+                    SELECT mint, last_checked AS timestamp, score AS rugcheck_score,
+                           ROW_NUMBER() OVER (PARTITION BY mint ORDER BY last_checked DESC) as rn
+                    FROM v_rugcheck WHERE mint = ANY($1::text[]) AND last_checked < $3
                 )
-                -- Select the latest check before the period OR any check within the period
-                SELECT mint, timestamp, rugcheck_score
-                FROM RankedRugcheck
-                WHERE rn = 1 OR timestamp >= $2;
+                SELECT mint, timestamp, rugcheck_score FROM RankedRugcheck WHERE rn = 1 OR timestamp >= $2;
             """
+            
             token_info_query = """
-                WITH LatestTokenInfo AS (
+                WITH TokenCreationData AS (
                     SELECT
-                        mint,
-                        socials_score,
-                        timestamp AS token_creation_time,
-                        ROW_NUMBER() OVER (PARTITION BY mint ORDER BY timestamp DESC) as rn
-                    FROM v_tokens
-                    WHERE mint = ANY($1::text[])
-                    AND timestamp < $2 -- Get info created before the end_date
+                        mint, socials_score, timestamp AS token_creation_time,
+                        marketCapSol AS creation_init_market_cap_sol, -- Initial SOL MC from v_tokens
+                        ROW_NUMBER() OVER (PARTITION BY mint ORDER BY timestamp ASC) as rn
+                    FROM v_tokens vt WHERE mint = ANY($1::text[])
                 )
-                SELECT mint, token_creation_time, socials_score
-                FROM LatestTokenInfo
-                WHERE rn = 1;
+                SELECT mint, token_creation_time, socials_score, creation_init_market_cap_sol
+                FROM TokenCreationData WHERE rn = 1;
             """
 
             results_dict = {}
             async with self.pool.acquire() as conn:
                 try:
-                    logger.debug("Fetching trade data...")
                     trade_records_raw = await conn.fetch(trade_query, mints, start_date, end_date)
-                    logger.debug(f"Fetched {len(trade_records_raw)} raw trades.")
-
-                    logger.debug("Fetching rugcheck data...")
                     rugcheck_records_raw = await conn.fetch(rugcheck_query, mints, start_date, end_date)
-                    logger.debug(f"Fetched {len(rugcheck_records_raw)} rugchecks.")
-
-                    logger.debug("Fetching token info data...")
-                    token_info_records_raw = await conn.fetch(token_info_query, mints, end_date)
-                    logger.debug(f"Fetched {len(token_info_records_raw)} token infos.")
+                    token_info_records_raw = await conn.fetch(token_info_query, mints)
 
                     if not trade_records_raw:
                         logger.warning("No trade records found for the specified mints and period.")
                         return {}
 
-                    # --- Process Trade Data ---
-                    trades_df = pd.DataFrame(trade_records_raw, columns=['mint', 'timestamp', 'price', 'volume', 'market_cap_calculated'])
+                    # Convert records to list of dicts to ensure pandas gets string column names
+                    trade_records_list_of_dicts = [dict(rec) for rec in trade_records_raw]
+                    trades_df = pd.DataFrame(trade_records_list_of_dicts)
+                    
+                    # Standardize column names from trades_df to lowercase for internal processing
+                    trades_df.columns = [str(col).lower() for col in trades_df.columns]
+                    logger.debug(f"Processed trade_df columns (lowercase): {list(trades_df.columns)}")
+
+
                     trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'], errors='coerce', utc=True)
-                    trades_df.dropna(subset=['timestamp'], inplace=True) # Drop rows where timestamp couldn't be parsed
-
-                    # Convert relevant columns to numeric early, handling errors
-                    trades_df['price'] = pd.to_numeric(trades_df['price'], errors='coerce')
-                    trades_df['volume'] = pd.to_numeric(trades_df['volume'], errors='coerce') # This is sol_amount
-                    trades_df['market_cap_calculated'] = pd.to_numeric(trades_df['market_cap_calculated'], errors='coerce')
-                    trades_df.dropna(subset=['price', 'volume'], inplace=True) # Drop rows essential for calcs if invalid
-
-                    # --- Calculate SQL-like Rolling Volume & Volatility per Mint ---
-                    logger.info("Calculating rolling volume and volatility per mint...")
-                    all_processed_trades = []
-                    time_interval_minutes = self.config['DEFAULT_TIME_INTERVALL'] # Get from config
-                    time_interval_minutes = self.config['DEFAULT_TIME_INTERVALL'] # Get from config
-                    window_duration = f"{time_interval_minutes}min"
-                    logger.debug(f"Using rolling window duration: {window_duration}")
-
-                    for mint_name, mint_df in trades_df.groupby('mint'):
-                        if mint_df.empty:
-                            continue
-
-                        mint_df = mint_df.sort_values('timestamp').copy() # Sort and copy to avoid SettingWithCopyWarning
-
-                        # Set timestamp as index for rolling calculations
-                        mint_df_indexed = mint_df.set_index('timestamp')
-
-                        # Calculate Rolling Volume (SQL-like)
-                        mint_df['rolling_volume_sql'] = mint_df_indexed['volume']\
-                                                        .rolling(window_duration, closed='left')\
-                                                        .sum().values
-                        mint_df['rolling_volume_sql'] = mint_df['rolling_volume_sql'].fillna(0.0)
-
-                        # Calculate Rolling Volatility (SQL-like)
-                        prices = mint_df['price']
-                        if len(prices) > 1:
-                            # Calculate log returns, handle potential division by zero or invalid values
-                            log_returns = np.log(prices / prices.shift(1)).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
-                            # Use rolling window on log_returns indexed by time
-                            rolling_obj = log_returns.set_axis(mint_df['timestamp'])\
-                                                    .rolling(window_duration, closed='left')
-
-                            # Calculate rolling std deviation and count
-                            rolling_std = rolling_obj.std()
-                            rolling_count = rolling_obj.count()
-
-                            # Apply the SQL logic: std * sqrt(count), handle count <= 5
-                            # Ensure intermediate arrays are float for sqrt
-                            rolling_std_float = rolling_std.fillna(0.0).astype(float)
-                            rolling_count_float = rolling_count.fillna(0.0).astype(float)
-
-                            volatility_sql = rolling_std_float * np.sqrt(np.maximum(rolling_count_float, 1.0)) # Use maximum to avoid sqrt(0)
-                            mint_df['rolling_volatility_sql'] = volatility_sql.where(rolling_count > 5, 0.0).values # Set to 0 if count <= 5
+                    trades_df.dropna(subset=['timestamp'], inplace=True)
+                    
+                    # Use lowercase names for processing
+                    numeric_cols_from_trades = ['price', 'volume', 'market_cap_calculated', 'live_market_cap_sol']
+                    for col in numeric_cols_from_trades:
+                        if col in trades_df.columns:
+                            trades_df[col] = pd.to_numeric(trades_df[col], errors='coerce')
                         else:
-                            mint_df['rolling_volatility_sql'] = 0.0 # Not enough data for log returns
+                            logger.error(f"Critical: Column '{col}' expected from trades query but missing after lowercasing. DataFrame columns: {list(trades_df.columns)}")
+                            trades_df[col] = 0.0 # Default to prevent crash, but indicates an issue
+                    trades_df.dropna(subset=['price', 'volume'], inplace=True)
 
-                        mint_df['rolling_volatility_sql'] = mint_df['rolling_volatility_sql'].fillna(0.0) # Fill any remaining NaNs
 
+                    all_processed_trades = []
+                    time_interval_minutes = self.config.get('DEFAULT_TIME_INTERVALL', 10)
+                    window_duration = f"{time_interval_minutes}min"
+
+                    for mint_name, mint_df_group in trades_df.groupby('mint'):
+                        mint_df = mint_df_group.sort_values('timestamp').copy()
+                        mint_df_indexed = mint_df.set_index('timestamp')
+                        mint_df['rolling_volume_sql'] = mint_df_indexed['volume'].rolling(window_duration, closed='left').sum().fillna(0.0).values
+                        
+                        # Rename live_market_cap_sol to marketcapsol for ohlcv_sql_like if it expects that
+                        if 'live_market_cap_sol' in mint_df.columns:
+                           mint_df.rename(columns={'live_market_cap_sol': 'marketcapsol'}, inplace=True)
+
+                        prices_series = mint_df['price']
+                        if len(prices_series) > 1:
+                            log_returns = np.log(prices_series / prices_series.shift(1)).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+                            rolling_obj = log_returns.set_axis(mint_df['timestamp']).rolling(window_duration, closed='left')
+                            rolling_std = rolling_obj.std().fillna(0.0)
+                            rolling_count = rolling_obj.count().fillna(0.0)
+                            volatility_sql = rolling_std.astype(float) * np.sqrt(np.maximum(rolling_count.astype(float), 1.0))
+                            mint_df['rolling_volatility_sql'] = volatility_sql.where(rolling_count > 5, 0.0).values
+                        else:
+                            mint_df['rolling_volatility_sql'] = 0.0
+                        mint_df['rolling_volatility_sql'] = mint_df['rolling_volatility_sql'].fillna(0.0)
                         all_processed_trades.append(mint_df)
 
-                    if not all_processed_trades:
-                        logger.warning("No trades remained after processing rolling metrics.")
-                        return {}
-
+                    if not all_processed_trades: return {}
                     processed_trades_df = pd.concat(all_processed_trades)
 
-                    # --- Resample to 5-second OHLCV using SQL-like metrics ---
-                    logger.info("Resampling trades to 5-second OHLCV intervals...")
-                    # Apply the modified aggregation function
+                    # self.ohlcv_sql_like expects lowercase 'marketcapsol' and 'market_cap_calculated'
+                    # and outputs camelCase 'marketCapSol' and 'market_cap_calculated'
                     ohlcv_df = processed_trades_df.groupby(['mint', pd.Grouper(key='timestamp', freq='5s')])\
                                                 .apply(self.ohlcv_sql_like).reset_index()
-
-                    # Handle potential NaNs from empty groups BEFORE setting index
-                    ohlcv_df.dropna(subset=['mint', 'timestamp'], inplace=True) # Drop rows if group keys are NaN
-                    # Fill NaNs in OHLC columns resulting from empty groups (e.g., with ffill/bfill or 0)
+                    
+                    ohlcv_df.dropna(subset=['mint', 'timestamp'], inplace=True)
                     ohlc_cols = ['Open', 'High', 'Low', 'Close']
-                    # Forward fill first, then backfill to handle NaNs at the start/end
-                    ohlcv_df[ohlc_cols] = ohlcv_df.groupby('mint')[ohlc_cols].ffill().bfill()
-                    # Fill remaining NaNs (if entire mint group was NaN) with 0 or a suitable value
-                    ohlcv_df[ohlc_cols] = ohlcv_df[ohlc_cols].fillna(0.0)
-                    # Also fill Volume/Volatility/MarketCap NaNs that resulted from empty intervals
-                    ohlcv_df[['Volume', 'volatility', 'market_cap_calculated']] = ohlcv_df[['Volume', 'volatility', 'market_cap_calculated']].fillna(0.0)
-
-
+                    ohlcv_df[ohlc_cols] = ohlcv_df.groupby('mint')[ohlc_cols].ffill().bfill().fillna(0.0)
+                    
+                    # Columns from ohlcv_sql_like are camelCase
+                    cols_to_fill_ohlcv = ['Volume', 'volatility', 'market_cap_calculated', 'marketCapSol']
+                    for col in cols_to_fill_ohlcv:
+                        if col in ohlcv_df.columns: ohlcv_df[col] = ohlcv_df[col].fillna(0.0)
+                        else: ohlcv_df[col] = 0.0 # Add if missing
+                    
                     ohlcv_df = ohlcv_df.set_index('timestamp')
-
-                    # ---> FIX: Handle duplicate index before resampling <---
-                    # This should ideally happen *after* groupby.apply but *before* resample
-                    # Check if duplicates exist after setting the index
-                    if ohlcv_df.index.has_duplicates:
-                        logger.warning(f"Duplicate timestamps found in aggregated OHLCV index before resampling. Keeping last entry.")
-                        # Group by mint *and* timestamp, take the last row within each duplicate group
-                        ohlcv_df = ohlcv_df.loc[~ohlcv_df.index.duplicated(keep='last')]
-                    # ---> END FIX <---
-
-                    # Resample to ensure continuous 5s intervals and interpolate missing values (if any remain)
-                    # Group by mint *before* resampling to resample each token independently
+                    if ohlcv_df.index.has_duplicates: ohlcv_df = ohlcv_df.loc[~ohlcv_df.index.duplicated(keep='last')]
+                    
                     resampled_ohlcv_list = []
                     for mint_name, group_df in ohlcv_df.groupby('mint'):
-                        # Ensure index is unique within the group before resampling
-                        if group_df.index.has_duplicates:
-                            logger.warning(f"Duplicate timestamps found for mint {mint_name} before resampling. Keeping last.")
-                            group_df = group_df.loc[~group_df.index.duplicated(keep='last')]
-
-                        # Define the full time range for this mint based on its first/last resampled point
-                        # This ensures resampling covers the actual activity period for the mint
-                        min_ts = group_df.index.min()
-                        max_ts = group_df.index.max()
+                        # ... (resampling logic as in previous response)
+                        if group_df.index.has_duplicates: group_df = group_df.loc[~group_df.index.duplicated(keep='last')]
+                        min_ts, max_ts = group_df.index.min(), group_df.index.max()
+                        if pd.isna(min_ts) or pd.isna(max_ts): continue
                         full_range = pd.date_range(start=min_ts, end=max_ts, freq='5s', tz='UTC')
-
-                        # ---> FIX: Call infer_objects() before interpolating <---
-                        # group_resampled = group_df.reindex(full_range).interpolate(method='time')
-                        # Reindex first, creating the DataFrame that might have object dtypes due to NaNs
                         group_reindexed = group_df.reindex(full_range)
-
-                        try:
-                            # Attempt to convert columns to more specific dtypes (e.g., float, int)
-                            # copy=False modifies inplace if possible, potentially saving memory
-                            group_reindexed = group_reindexed.infer_objects(copy=False)
-                        except Exception as e:
-                            # Log if infer_objects fails, but proceed cautiously
-                            logger.warning(f"Failed to infer objects for {mint_name} before interpolation: {e}")
-
-                        # Reindex and interpolate within the group's actual range
-                        # Now interpolate. This should operate on more appropriate dtypes.
+                        try: group_reindexed = group_reindexed.infer_objects(copy=False)
+                        except: pass 
                         group_resampled = group_reindexed.interpolate(method='time')
-                        # ---> END FIX <---
-                        
-                       
-                       
-                        # Add the mint column back after reindexing
                         group_resampled['mint'] = mint_name
                         resampled_ohlcv_list.append(group_resampled)
 
-                    if not resampled_ohlcv_list:
-                        logger.warning("No data remained after resampling OHLCV data.")
-                        return {}
-
+                    if not resampled_ohlcv_list: return {}
                     resampled_ohlcv_df = pd.concat(resampled_ohlcv_list)
-                    resampled_ohlcv_df.index.name = 'timestamp' # Ensure index has a name
+                    if resampled_ohlcv_df.index.name != 'timestamp': resampled_ohlcv_df.index.name = 'timestamp'
 
-                    # --- Process RugCheck Data ---
-                    # (Same as before)
+                    # Process RugCheck Data (convert keys to lowercase from DB record)
                     if rugcheck_records_raw:
-                        rugcheck_df = pd.DataFrame(rugcheck_records_raw, columns=['mint', 'timestamp', 'rugcheck_score'])
-                        rugcheck_df['timestamp'] = pd.to_datetime(rugcheck_df['timestamp'], errors='coerce', utc=True)
-                        rugcheck_df.dropna(subset=['timestamp'], inplace=True)
-                        # Set index AFTER sorting and dropping duplicates
-                        rugcheck_df = rugcheck_df.sort_values(['mint', 'timestamp'])
-                        # Keep the last score for duplicate timestamps within the same mint
-                        rugcheck_df = rugcheck_df.drop_duplicates(subset=['mint', 'timestamp'], keep='last')
-                        rugcheck_df.set_index('timestamp', inplace=True)
-                        rugcheck_df['rugcheck_score'] = pd.to_numeric(rugcheck_df['rugcheck_score'], errors='coerce')
-                        rugcheck_df = rugcheck_df[['mint', 'rugcheck_score']] # Keep mint for merge_asof
+                        rugcheck_list_of_dicts = [dict(rec) for rec in rugcheck_records_raw]
+                        rugcheck_df = pd.DataFrame(rugcheck_list_of_dicts)
+                        rugcheck_df.columns = [str(col).lower() for col in rugcheck_df.columns]
+                        if 'timestamp' in rugcheck_df.columns: # check if timestamp col exists
+                            rugcheck_df['timestamp'] = pd.to_datetime(rugcheck_df['timestamp'], errors='coerce', utc=True)
+                            rugcheck_df.dropna(subset=['timestamp'], inplace=True)
+                            rugcheck_df = rugcheck_df.sort_values(['mint', 'timestamp']).drop_duplicates(subset=['mint', 'timestamp'], keep='last')
+                            rugcheck_df.set_index('timestamp', inplace=True)
+                            rugcheck_df['rugcheck_score'] = pd.to_numeric(rugcheck_df.get('rugcheck_score'), errors='coerce') # Use .get()
+                            rugcheck_df = rugcheck_df[['mint', 'rugcheck_score']]
+                        else: # Handle missing timestamp
+                            logger.warning("Rugcheck data missing 'timestamp' column after converting to DataFrame.")
+                            rugcheck_df = pd.DataFrame(columns=['mint', 'rugcheck_score']).set_index(pd.DatetimeIndex([], name='timestamp', tz='UTC'))
                     else:
-                        # Create an empty DataFrame with the correct columns and index type
                         rugcheck_df = pd.DataFrame(columns=['mint', 'rugcheck_score']).set_index(pd.DatetimeIndex([], name='timestamp', tz='UTC'))
 
-
-                    # --- Process Token Info ---
-                    # (Same as before)
-                    token_info = {}
+                    # Process Token Info (convert keys to lowercase from DB record)
+                    token_info_map = {}
                     if token_info_records_raw:
-                        for r in token_info_records_raw:
-                            mint = r['mint']
-                            # Use pd.to_datetime which handles NaT gracefully
-                            creation_time = pd.to_datetime(r['token_creation_time'], errors='coerce', utc=True)
-                            socials = pd.to_numeric(r['socials_score'], errors='coerce')
-                            if pd.notna(creation_time): # Check if creation_time is valid
-                                token_info[mint] = {'creation_time': creation_time, 'socials_score': socials}
+                        for r_rec in token_info_records_raw:
+                            r_dict = dict(r_rec) # Convert Record to dict
+                            mint_val = r_dict.get('mint')
+                            creation_time_val = r_dict.get('token_creation_time')
+                            socials_val = r_dict.get('socials_score')
+                            creation_mc_sol_val = r_dict.get('creation_init_market_cap_sol') # This is from SQL alias
 
+                            creation_time = pd.to_datetime(creation_time_val, errors='coerce', utc=True)
+                            socials = pd.to_numeric(socials_val, errors='coerce')
+                            creation_mc_sol = pd.to_numeric(creation_mc_sol_val, errors='coerce')
+                            
+                            if mint_val and pd.notna(creation_time):
+                                token_info_map[mint_val] = {
+                                    'creation_time': creation_time, 
+                                    'socials_score': socials,
+                                    'creation_init_market_cap_sol': creation_mc_sol
+                                }
+                    
+                    required_final_cols = [
+                        'Open', 'High', 'Low', 'Close', 'Volume', 
+                        'market_cap_calculated',     # Live USD MC
+                        'marketCapSol',              # Live SOL MC (camelCase output from ohlcv_sql_like)
+                        'creation_init_market_cap_sol', # Creation SOL MC
+                        'volatility', 'rugcheck_score', 'socials_score', 
+                        'token_creation_time'
+                    ]
 
-                    # --- Combine data per mint ---
-                    logger.info("Combining OHLCV, RugCheck, and Token Info data per mint...")
-                    required_final_cols = ['Open', 'High', 'Low', 'Close', 'Volume', 'market_cap_calculated', 'volatility', 'rugcheck_score', 'socials_score', 'token_creation_time']
-
-                    # Process each mint group from the resampled data
                     grouped_ohlcv = resampled_ohlcv_df.groupby('mint')
-
                     for mint_name in grouped_ohlcv.groups:
-                        # Select the mint's OHLCV data
-                        mint_ohlcv = grouped_ohlcv.get_group(mint_name)[['Open', 'High', 'Low', 'Close', 'Volume', 'market_cap_calculated', 'volatility']]
+                        mint_ohlcv_group = grouped_ohlcv.get_group(mint_name)
+                        
+                        # These cols are camelCase from ohlcv_sql_like
+                        cols_to_select_from_ohlcv = ['Open', 'High', 'Low', 'Close', 'Volume', 
+                                                     'market_cap_calculated', 'marketCapSol', 'volatility']
+                        
+                        existing_cols_in_group = [col for col in cols_to_select_from_ohlcv if col in mint_ohlcv_group.columns]
+                        if not all(c in existing_cols_in_group for c in ['market_cap_calculated', 'marketCapSol']):
+                            logger.warning(f"Mint {mint_name} group missing essential live market cap columns. Columns present: {list(mint_ohlcv_group.columns)}. Skipping.")
+                            continue
+                            
+                        combined_df = mint_ohlcv_group[existing_cols_in_group].copy()
 
-                        # Prepare mint-specific rugcheck data for merge_asof
-                        mint_rugcheck_data = rugcheck_df[rugcheck_df['mint'] == mint_name][['rugcheck_score']] if not rugcheck_df.empty else None
-
-                        # Create the combined DataFrame starting with OHLCV data
-                        combined_df = mint_ohlcv.copy()
-
-                        # Merge RugCheck data using merge_asof
+                        # Merge RugCheck
+                        mint_rugcheck_data = rugcheck_df[rugcheck_df['mint'] == mint_name][['rugcheck_score']] if not rugcheck_df.empty else None # Check if rugcheck_df is empty overall
                         if mint_rugcheck_data is not None and not mint_rugcheck_data.empty:
-                            # Ensure both sides are sorted by index for merge_asof
                             combined_df = combined_df.sort_index()
                             mint_rugcheck_data = mint_rugcheck_data.sort_index()
-                            # Handle potential duplicates in rugcheck index before merging
-                            if mint_rugcheck_data.index.has_duplicates:
-                                logger.warning(f"Duplicate timestamps found in RugCheck data for {mint_name}. Keeping last.")
-                                mint_rugcheck_data = mint_rugcheck_data.loc[~mint_rugcheck_data.index.duplicated(keep='last')]
+                            if mint_rugcheck_data.index.has_duplicates: mint_rugcheck_data = mint_rugcheck_data.loc[~mint_rugcheck_data.index.duplicated(keep='last')]
+                            combined_df = pd.merge_asof(combined_df, mint_rugcheck_data, left_index=True, right_index=True, direction='backward', tolerance=pd.Timedelta('1d'))
+                        else: combined_df['rugcheck_score'] = np.nan
 
-                            combined_df = pd.merge_asof(
-                                combined_df,
-                                mint_rugcheck_data,
-                                left_index=True,
-                                right_index=True,
-                                direction='backward', # Find the latest rugcheck score at or before the OHLCV timestamp
-                                tolerance=pd.Timedelta('1d') # Allow matching recent score
-                            )
+                        # Add Token Info
+                        mint_specific_info = token_info_map.get(mint_name)
+                        if mint_specific_info:
+                            combined_df['token_creation_time'] = mint_specific_info['creation_time']
+                            combined_df['socials_score'] = mint_specific_info['socials_score']
+                            combined_df['creation_init_market_cap_sol'] = mint_specific_info.get('creation_init_market_cap_sol', np.nan)
                         else:
-                            combined_df['rugcheck_score'] = np.nan # Add column if no rugcheck data
+                            combined_df['token_creation_time'] = pd.NaT
+                            combined_df['socials_score'] = 100
+                            combined_df['creation_init_market_cap_sol'] = np.nan
+                        
+                        # Fill and ensure types
+                        for r_col in required_final_cols:
+                            if r_col not in combined_df.columns: combined_df[r_col] = np.nan 
 
-                        # Add Token Info (Creation Time, Socials Score)
-                        mint_info_data = token_info.get(mint_name)
-                        if mint_info_data:
-                            combined_df['token_creation_time'] = mint_info_data['creation_time']
-                            combined_df['socials_score'] = mint_info_data['socials_score']
-                        else:
-                            logger.warning(f"Missing token info for {mint_name}. Using defaults.")
-                            combined_df['token_creation_time'] = pd.NaT # Use NaT for missing dates
-                            combined_df['socials_score'] = 100 # Default high risk score
-
-                        # --- Final Fill and Type Conversion ---
-                        # Forward fill scores and creation time
-                        fill_cols = ['rugcheck_score', 'socials_score', 'token_creation_time']
-                        combined_df[fill_cols] = combined_df[fill_cols].ffill()
-                        # Backfill only if needed (e.g., if NaNs remain at the beginning)
-                        combined_df[fill_cols] = combined_df[fill_cols].bfill()
-
-
-                        # Convert score columns to integer types after filling NaNs
-                        # Fill NaN scores with default high-risk values before converting to int
+                        cols_to_ffill_bfill = ['rugcheck_score', 'socials_score', 'token_creation_time', 'creation_init_market_cap_sol']
+                        for col in cols_to_ffill_bfill: combined_df[col] = combined_df[col].ffill().bfill()
+                        
                         combined_df['rugcheck_score'] = combined_df['rugcheck_score'].fillna(10000).astype(int)
                         combined_df['socials_score'] = combined_df['socials_score'].fillna(100).astype(int)
+                        combined_df['creation_init_market_cap_sol'] = pd.to_numeric(combined_df['creation_init_market_cap_sol'], errors='coerce').fillna(0.0)
 
-                        # Ensure other numeric columns are floats, fill NaNs with 0.0 AFTER interpolation/ffill
-                        numeric_cols_to_zero = ['Open', 'High', 'Low', 'Close', 'Volume', 'market_cap_calculated', 'volatility']
-                        for col in numeric_cols_to_zero:
-                            if col in combined_df.columns:
-                                combined_df[col] = pd.to_numeric(combined_df[col], errors='coerce').fillna(0.0)
-                            else:
-                                # Add the column if completely missing after merges (shouldn't happen ideally)
-                                logger.warning(f"Column '{col}' missing for {mint_name} after merge. Adding default 0.0.")
-                                combined_df[col] = 0.0
+                        numeric_cols_to_zero_if_nan = ['Open', 'High', 'Low', 'Close', 'Volume', 'market_cap_calculated', 'marketCapSol', 'volatility']
+                        for col in numeric_cols_to_zero_if_nan:
+                            combined_df[col] = pd.to_numeric(combined_df[col], errors='coerce').fillna(0.0)
+                        
+                        final_df = combined_df[(combined_df.index >= start_date) & (combined_df.index < end_date)].copy()
 
-
-                        # Ensure all required columns exist, adding defaults if somehow missing
-                        for r_col in required_final_cols:
-                            if r_col not in combined_df.columns:
-                                logger.warning(f"Required column '{r_col}' missing for {mint_name} at final stage. Adding default.")
-                                if r_col == 'token_creation_time': combined_df[r_col] = pd.NaT
-                                elif r_col in ['rugcheck_score', 'socials_score']: combined_df[r_col] = 100 if r_col == 'socials_score' else 10000
-                                else: combined_df[r_col] = 0.0
-
-                        # --- Final Filtering and Validation ---
-                        # Filter final DataFrame to the originally requested date range
-                        # This ensures we don't include data outside the requested bounds introduced by resampling/filling
-                        final_df = combined_df[(combined_df.index >= start_date) & (combined_df.index < end_date)].copy() # Use .copy()
-
-                        # Final check for validity before adding to results
                         if not final_df.empty and all(col in final_df.columns for col in required_final_cols):
-                            # Select and ensure correct dtypes before returning
-                            final_df = final_df[required_final_cols].astype({
+                            astype_dict = {
                                 'Open': float, 'High': float, 'Low': float, 'Close': float, 'Volume': float,
-                                'market_cap_calculated': float, 'volatility': float, 'rugcheck_score': int, 'socials_score': int
-                                # Keep token_creation_time as datetime
-                            })
-                            # Ensure the index is still a DatetimeIndex and timezone-aware
+                                'market_cap_calculated': float, 'marketCapSol': float, 
+                                'creation_init_market_cap_sol': float, 'volatility': float,
+                                'rugcheck_score': int, 'socials_score': int
+                            }
+                            final_df = final_df[required_final_cols].astype(astype_dict)
                             final_df.index = pd.to_datetime(final_df.index, utc=True)
                             results_dict[mint_name] = final_df
                         else:
-                            logger.warning(f"No valid data remained for {mint_name} after final processing/filtering. Skipping.")
-
-
-                    logger.info(f"Finished processing data for {len(results_dict)} tokens.")
-
-                except asyncpg.exceptions.InterfaceError as iface_err:
-                    logger.error(f"InterfaceError during historical data processing: {iface_err}", exc_info=True)
-                    # Consider connection recovery logic or re-raising
-                    return {}
+                            logger.warning(f"No valid data or missing columns for {mint_name} after final processing. Skipping.")
+                
                 except Exception as e:
                     logger.error(f"Error processing historical data ({type(e).__name__}): {e}", exc_info=True)
                     return {}

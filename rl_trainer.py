@@ -3,11 +3,17 @@
 """
 Reinforcement Learning Agent Training Script.
 
-Orchestrates the training process for an RL agent using Stable Baselines3
-to learn optimal trading parameters for the custom TradingEnv environment.
+This module orchestrates the training process for a Reinforcement Learning (RL) agent 
+using Stable Baselines3 to learn optimal trading parameters within a custom TradingEnv environment.
 
-to see training details use:
-tensorboard --logdir ./rl_tensorboard_logs/ --port 6006      
+Key Features:
+- Trains an RL agent for trading strategy optimization
+- Supports visualization of training progress via TensorBoard
+- Configurable environment and agent parameters
+
+TensorBoard Visualization:
+To monitor training details, run:
+    tensorboard --logdir ./rl_tensorboard_logs/ --port 6006
 """
 
 import os
@@ -93,27 +99,39 @@ class SaveVecNormalizeCallback(BaseCallback):
         return True
 
 def analyze_feature_importance(model, env, num_samples=1000):
-    """Analyzes feature importance using SHAP with proper output handling."""
+    """Analyzes feature importance using SHAP and Permutation Importance."""
     # Generate properly structured samples
     samples = np.array([env.observation_space.sample() for _ in range(num_samples)])
-    
-    # Create wrapper function that returns proper numpy array
-    def model_predict_wrapper(x):
-        # Stable Baselines3 returns (action, state) tuple
-        return np.array([model.predict(sample)[0] for sample in x])
+
+    # Create a simple wrapper class for the model to be used as an estimator
+    class ModelPredictor:
+        def __init__(self, model):
+            self.model = model
+
+        def predict(self, X):
+            # Ensure the input X is treated as a batch for prediction
+            # Stable Baselines3 returns (action, state) tuple
+            return np.array([self.model.predict(sample)[0] for sample in X])
+
+        # Add a dummy fit method to satisfy permutation_importance's check
+        def fit(self, X, y=None):
+            return self
+
+    model_predictor = ModelPredictor(model)
 
     # SHAP Analysis
+    # Use the ModelPredictor instance as the model for SHAP
     explainer = shap.Explainer(
-        model_predict_wrapper, 
+        model_predictor.predict, # Pass the predict method
         samples,
         feature_names=rl_config.OBSERVATION_FEATURES
     )
-    
+
     # Calculate SHAP values
     # Use a reasonable subset of samples for SHAP to manage memory and computation
     shap_samples = samples[:500] # Increased samples for SHAP
     shap_values = explainer(shap_samples)
-    
+
     # Plot summary
     plt.figure()
     shap.summary_plot(shap_values, shap_samples, show=False, feature_names=rl_config.OBSERVATION_FEATURES) # Pass feature_names explicitly
@@ -123,27 +141,36 @@ def analyze_feature_importance(model, env, num_samples=1000):
     # Permutation Importance
     # Use a reasonable subset of samples for permutation importance
     perm_samples = samples[:500] # Increased samples for permutation importance
-    def score_fn(X):
-        # Ensure the input X is treated as a batch for prediction
-        return np.array([model.predict(x.reshape(1, -1))[0] for x in X])
+
+    # Define a scoring function for permutation_importance that accepts X and y but only uses X
+    def mean_prediction_magnitude_score(estimator, X, y):
+        # Estimator here is our ModelPredictor instance
+        predictions = estimator.predict(X)
+        # For a continuous action space, predictions is an array of actions.
+        # We can take the mean of the sum of squares of actions to measure the magnitude.
+        # Use negative because permutation_importance expects a score where higher is better,
+        # and we want features that *decrease* the score (change the prediction) to be important.
+        return -np.mean(np.sum(predictions**2, axis=-1))
 
     result = permutation_importance(
-        score_fn,
-        perm_samples,
+        model_predictor, # Pass the ModelPredictor instance as the estimator
+        perm_samples, # This is X
+        y=None, # Explicitly pass y=None
+        scoring=mean_prediction_magnitude_score, # Provide custom scoring
         n_repeats=5,
         random_state=42,
-        n_jobs=-1
+        n_jobs=1
     )
-    
+
     # Save results
     importance_df = pd.DataFrame({
         'feature': rl_config.OBSERVATION_FEATURES,
         'importance_mean': result.importances_mean, # Access mean directly
         'importance_std': result.importances_std # Access std directly
     }).sort_values('importance_mean', ascending=False)
-    
+
     importance_df.to_csv(os.path.join(rl_config.MODEL_SAVE_DIR, "feature_importance_permutation.csv"), index=False)
-    
+
     logger.info("Feature importance analysis completed")
 
 # --- Environment Creation Helper ---

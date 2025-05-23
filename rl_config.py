@@ -16,7 +16,7 @@ from typing import List, Dict, Any, Tuple, Union
 # NOTE: THESE DATES ARE EXAMPLES - ADJUST TO YOUR ACTUAL DATA RANGE
 # Use the same extended range as GA for consistency?
 RL_HISTORICAL_DATA_START_TS: datetime = datetime(2025, 5, 20, 15, 0, 0, tzinfo=timezone.utc)
-RL_HISTORICAL_DATA_END_TS: datetime = datetime(2025, 5, 21, 19, 15, 0, tzinfo=timezone.utc)
+RL_HISTORICAL_DATA_END_TS: datetime = datetime(2025, 5, 20, 20, 59, 0, tzinfo=timezone.utc)
 
 # --- Environment Configuration ---
 DATA_SET_KEY_TRAIN: str = 'train'       # Data used for agent training episodes.
@@ -40,7 +40,8 @@ OBSERVATION_FEATURES: List[str] = [
 
     # Market Indicators (Normalized)
     'volatility',           # Rolling volatility (e.g., normalized 0-1)
-    'market_cap_sol_norm',  # Market cap in SOL (e.g., log-normalized)
+    'live_market_cap_sol_norm',  # Normalized LIVE SOL market cap
+    'live_market_cap_usd_norm',  # Normalized LIVE USD market cap
     'volume_sol_norm',      # Trade volume in SOL (e.g., log-normalized)
     'rugcheck_score_norm',  # RugCheck score (normalized 0-1, where 1=low risk)
     'socials_score_norm',   # Socials score (normalized 0-1, where 1=low risk)
@@ -61,8 +62,10 @@ OBSERVATION_SPACE_DIM: int = len(OBSERVATION_FEATURES)
 # Note: Observation normalization is handled by Stable Baselines3's VecNormalize.
 # The bounds defined here are the *expected* range after normalization,
 # but the Box space itself is defined by the shape only.
-OBSERVATION_LOW: float = -1.0 # Removed as normalization is external
-OBSERVATION_HIGH: float = 1.0 # Removed as normalization is external
+# OBSERVATION_LOW: float = -1.0 # Removed as normalization is external
+# OBSERVATION_HIGH: float = 1.0 # Removed as normalization is external
+OBSERVATION_LOW: float = -np.inf 
+OBSERVATION_HIGH: float = np.inf 
 
 # --- Action Space Configuration (Continuous Parameter Tuning) ---
 # Parameters controlled by the RL agent.
@@ -76,11 +79,12 @@ RL_TUNABLE_PARAMETERS: List[Tuple[str, float, float, type]] = [
     ('SECOND_TAKE_PROFIT_PERCENT', 100.0, 1000.0, float), # 100% to 1000% TP2
     ('DEFAULT_VOLUME_THRESHOLD', 5000, 50000, int),     # 5k to 50k USD volume threshold
     ('DEFAULT_MARKETCAP_THRESHOLD', 10000, 100000, int), # 10k to 100k USD market cap threshold
-    ('MIN_VOLATILITY', 0.1, 1.0, float),                # 0.1% to 1% volatility threshold
-    ('DEFAULT_RUGCHECK_SCORE_THRESHOLD', 500, 1002, int), # 1 to 1000 score threshold
-    ('DEFAULT_SOCIAL_SCORE_THRESHOLD', 40, 100, int),  # 1 to 100 score threshold
+    ('MIN_VOLATILITY', 0.01, 1.0, float),                # 0.01% to 1% volatility threshold
+    ('DEFAULT_RUGCHECK_SCORE_THRESHOLD', 1, 1002, int), # 1 to 1000 score threshold
+    ('DEFAULT_SOCIAL_SCORE_THRESHOLD', 1, 100, int),  # 1 to 100 score threshold
     # ('DEFAULT_TIME_INTERVALL', 1, 60, int),
     ('SOL_TO_BUY', 0.1, 0.5, float), # Add buy amount later if needed
+    ('MC_DROP_THRESHOLD_RL', 5.0, 95.0, float), # 5% to 70% market cap drop threshold
 ]
 ACTION_SPACE_DIM: int = len(RL_TUNABLE_PARAMETERS)
 
@@ -113,12 +117,8 @@ DEFAULT_SELL_TIP: float = 0.001
 # SECOND_TAKE_PROFIT_PERCENT: float = 550.0 # Fixed second TP target
 
 # Fixed thresholds for the *simulated* buy decision (agent learns parameters, not timing)
-# DEFAULT_VOLUME_THRESHOLD: int = 19000
-# DEFAULT_MARKETCAP_THRESHOLD: int = 10000
-# DEFAULT_RUGCHECK_SCORE_THRESHOLD: int = 801
-# DEFAULT_SOCIAL_SCORE_THRESHOLD: int = 50
-# MIN_VOLATILITY: float = 0.1
-MIN_MARKET_CAP: int = 3600 # Emergency sell market cap threshold (USD)
+# MIN_MARKET_CAP is an absolute USD threshold, used as a fallback if MC_DROP_THRESHOLD logic doesn't trigger
+MIN_MARKET_CAP_USD_FALLBACK: int = 3500 # Renamed for clarity
 
 VOLATILITY_WINDOW: int = 120 # Window size (steps) for volatility calculation in env
 
