@@ -44,7 +44,8 @@ class TradingEnv(gym.Env):
         historical_data_dict: Dict[str, pd.DataFrame], # Expects OHLCV data per mint
         token_lifespans: Dict[str, Dict[str, datetime]],
         initial_capital: float = rl_config.RL_INITIAL_CAPITAL,
-        max_steps: int = rl_config.MAX_STEPS_PER_EPISODE
+        max_steps: int = rl_config.MAX_STEPS_PER_EPISODE,
+        render_mode: Optional[str] = None
     ):
         """
         Initializes the Trading Environment with OHLCV data.
@@ -556,3 +557,7 @@ class TradingEnv(gym.Env):
     def close(self):
         """Cleans up environment resources."""
         pass
+
+    def set_render_mode(self, render_mode: Optional[str]):
+        """Sets the render mode for the environment."""
+        self.render_mode = render_mode

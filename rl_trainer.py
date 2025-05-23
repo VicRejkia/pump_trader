@@ -180,7 +180,8 @@ def make_env_func(
     initial_capital: float,
     max_steps: int,
     rank: int = 0,
-    seed: int = 0
+    seed: int = 0,
+    render_mode: Optional[str] = None # Added render_mode parameter
 ):
     """
     Utility function for creating and wrapping the environment for VecEnv.
@@ -212,7 +213,8 @@ def make_env_func(
             historical_data_dict=valid_data,
             token_lifespans=valid_lifespans, # Pass lifespans
             initial_capital=initial_capital,
-            max_steps=max_steps
+            max_steps=max_steps,
+            render_mode=render_mode # Pass render_mode to TradingEnv
         )
         env.reset(seed=seed + rank) # Seed the environment
         log_dir_monitor = os.path.join(rl_config.MODEL_SAVE_DIR, f"monitor_logs_{rank}")
@@ -222,8 +224,14 @@ def make_env_func(
     return _init
 
 # --- Main Training Function ---
-async def train_rl_agent():
-    """Sets up the RL environment, agent, callbacks, and starts training."""
+async def train_rl_agent(render_mode: Optional[str] = None):
+    """
+    Sets up the RL environment, agent, callbacks, and starts training.
+
+    Args:
+        render_mode: The render mode for the training environment (e.g., 'human', 'ansi').
+                     Set to None to disable rendering.
+    """
     global db_client_global
     setup_logging(logger_name="rl_trainer") # Initialize logger for this module
     logger.info("--- Starting RL Agent Training ---")
@@ -288,9 +296,12 @@ async def train_rl_agent():
         VecEnvClass = SubprocVecEnv if rl_config.N_ENVS > 1 else DummyVecEnv
 
         # Create training environments, passing lifespans
-        env_fns = [make_env_func(training_data, train_lifespans, rl_config.RL_INITIAL_CAPITAL, rl_config.MAX_STEPS_PER_EPISODE, rank=i)
+        env_fns = [make_env_func(training_data, train_lifespans, rl_config.RL_INITIAL_CAPITAL, rl_config.MAX_STEPS_PER_EPISODE, rank=i, render_mode=render_mode)
                    for i in range(rl_config.N_ENVS)]
-        train_env_raw = VecEnvClass(env_fns)
+        train_env_raw = VecEnvClass(env_fns) # Revert passing render_mode to SubprocVecEnv constructor
+        # Explicitly set render_mode on the VecEnv instance after creation
+        if render_mode is not None:
+             train_env_raw.render_mode = render_mode
         logger.info(f"Created Training VecEnv ({VecEnvClass.__name__}) with {rl_config.N_ENVS} environments.")
 
         # --- Environment Checker ---
@@ -307,7 +318,10 @@ async def train_rl_agent():
         # Create evaluation environment
         if eval_data and eval_lifespans:
             eval_env_fn = make_env_func(eval_data, eval_lifespans, rl_config.RL_INITIAL_CAPITAL, rl_config.MAX_STEPS_PER_EPISODE, rank=100)
-            eval_env_raw = DummyVecEnv([eval_env_fn])
+            eval_env_raw = DummyVecEnv([eval_env_fn]) # Revert passing render_mode to DummyVecEnv constructor
+            # Explicitly set render_mode on the VecEnv instance after creation
+            if render_mode is not None:
+                 eval_env_raw.render_mode = render_mode
             logger.info("Created Evaluation VecEnv (DummyVecEnv).")
         else:
              eval_env_raw = None
@@ -315,9 +329,11 @@ async def train_rl_agent():
         # --- Apply VecNormalize ---
         normalize_kwargs = {'norm_obs': True, 'norm_reward': False, 'gamma': 0.99}
         train_env = VecNormalize(train_env_raw, **normalize_kwargs)
+        # Remove explicit render_mode setting on VecNormalize
         logger.info("Applied VecNormalize to training environment.")
         if eval_env_raw:
             eval_env = VecNormalize(eval_env_raw, training=False, **normalize_kwargs)
+            # Remove explicit render_mode setting on VecNormalize
             # Load the SAME stats as the training env for consistent evaluation
             eval_env.obs_rms = train_env.obs_rms
             eval_env.ret_rms = train_env.ret_rms # If normalizing rewards (norm_reward=True)
@@ -426,7 +442,7 @@ async def train_rl_agent():
             eval_freq=max(rl_config.EVAL_FREQ // rl_config.N_ENVS, 1),
             n_eval_episodes=rl_config.N_EVAL_EPISODES,
             deterministic=True,
-            render=False,
+            render=True,
             verbose=1,
             callback_on_new_best=save_vec_normalize_callback  # Use the new callback class
         )
@@ -506,6 +522,8 @@ if __name__ == "__main__":
          freeze_support()
 
     try:
-        asyncio.run(train_rl_agent())
+        # To enable rendering during debugging, change render_mode to 'human' or 'ansi'
+        # Be aware that rendering can significantly slow down training, especially with N_ENVS > 1.
+        asyncio.run(train_rl_agent(render_mode=None)) # Set render_mode here for training envs
     except Exception as main_err:
          logger.critical(f"Critical error in RL trainer entry point: {main_err}", exc_info=True)
