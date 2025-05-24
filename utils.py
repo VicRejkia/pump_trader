@@ -73,23 +73,39 @@ async def play_sell_tp_sound_async():
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, play_sell_tp_sound)
 
-def format_buy_order_log(state, name: str, mint: str, price_per_token: float, tokens_bought: float, market_cap: float, sol_price: float, total_investment: float) -> str:
-    """Formats the log message for a buy order."""
+def format_buy_order_log(state, name: str, mint: str, price_per_token: float, tokens_bought: float, market_cap: float, sol_price: float, total_investment: float, for_telegram: bool = False) -> str:
+    """Formats the log message for a buy order with platform-specific links."""
+    # URL construction
+    base_url = "https://neo.bullx.io/terminal?chainId=1399811149&address="
+    url = f"{base_url}{mint}"
+
+    # Handle different platforms
+    if for_telegram:
+        formatted_mint = f'<a href="{url}">{mint}</a>'
+    else:
+        # Use Rich markup for console hyperlinks
+        # This requires `markup=True` in the RichHandler, which you have.
+        formatted_mint = f"[link={url}]{mint}[/link]"
+
+    # Handle name display with formatted mint
+    token_display = f"{name} - {formatted_mint}" if name else formatted_mint
     if sol_price:
         price_usd = price_per_token * sol_price
         market_cap_usd = market_cap * sol_price
+        total_usd = total_investment * sol_price
         return (
             f"★★★ 💲 BUY Order 💲 ★★★\n"
-            f"│ Token: {name} - {mint}\n"
+            f"│ Token: {token_display}\n"
             f"│ Price: {price_per_token:.8f} SOL (${price_usd:.8f} USD)\n"
             f"│ Market Cap: {market_cap:,.2f} SOL (${market_cap_usd:,.2f} USD)\n"
             f"│ Tokens Bought: {tokens_bought}\n"
-            f"│ Total Investment: {total_investment}\n"
+            f"│ Total Investment: {total_investment} SOL (${total_usd:.2f} USD)\n"
+            f"\n"
         )
     else:
         return (
             f"★★★ BUY Order ★★★\n"
-            f"│ Token: {mint}\n"
+            f"│ Token: {token_display}\n"
             f"│ Price: {price_per_token:.8f} SOL\n"
             f"│ Market Cap: {market_cap:,.2f} SOL\n"
             f"│ Tokens Bought: {tokens_bought}\n"
@@ -97,10 +113,22 @@ def format_buy_order_log(state, name: str, mint: str, price_per_token: float, to
         )
     
 
-def format_sell_order_log(mint: str, token_name: str, market_cap_sol: float, profit: float, reason: str, sol_price: float | None) -> str:
+def format_sell_order_log(mint: str, token_name: str, market_cap_sol: float, profit: float, reason: str, sol_price: float | None, for_telegram: bool = False) -> str:
     """Formats the log message for a sell order."""
     profit_sign = "📈" if profit >= 0 else "📉"
     profit_text = f"{profit:+.6f} SOL" # Always show sign
+
+    # URL construction
+    base_url = "https://neo.bullx.io/terminal?chainId=1399811149&address="
+    url = f"{base_url}{mint}"
+
+    # Handle different platforms
+    if for_telegram:
+        formatted_mint = f'<a href="{url}">{mint}</a>'
+    else:
+        ## Use Rich markup for console hyperlinks
+        # This requires `markup=True` in the RichHandler, which you have.
+        formatted_mint = f"[link={url}]{mint}[/link]"
 
     if sol_price and sol_price > 0:
         market_cap_usd = market_cap_sol * sol_price
@@ -114,7 +142,8 @@ def format_sell_order_log(mint: str, token_name: str, market_cap_sol: float, pro
 
 
     # Use token_name if available, otherwise just mint
-    display_name = f"{token_name} ({mint})" if token_name else mint
+    # https://neo.bullx.io/terminal?chainId=1399811149&address=3bgtCbZuXgFuHATFZmGcxKyyA6qtT8feEZV9gDSwpump
+    display_name = f"{token_name} ({formatted_mint})" if token_name else mint
 
     return (
         f"*** {profit_sign} SELL Order ({reason}) {profit_sign} ***\n"

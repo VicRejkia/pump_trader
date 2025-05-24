@@ -291,8 +291,14 @@ class TradingManager:
                 profit=profit, reason=reason, sol_price=sol_price_usd_for_log
             )
             logger.info(log_msg)
+
             if self.config['TELEGRAM_INTERACTION']:
-                asyncio.create_task(send_telegram_message(log_msg))
+                telegram_msg = format_sell_order_log(
+                    mint=mint, token_name=token_name,
+                    market_cap_sol=market_cap_sol if market_cap_sol is not None else 0.0,
+                    profit=profit, reason=reason, sol_price=sol_price_usd_for_log, for_telegram=True
+                )
+                asyncio.create_task(send_telegram_message(telegram_msg))
 
             await self.state.update_sol_balance(net_sol_received) # Add net SOL received to balance
 
@@ -450,8 +456,14 @@ class TradingManager:
                         sol_price=sol_price_usd_for_log, total_investment=total_sol_investment
                     )
                     logger.info(log_msg)
+
                     if self.config['TELEGRAM_INTERACTION']:
-                        asyncio.create_task(send_telegram_message(log_msg))
+                        telegram_msg  = format_buy_order_log(
+                            self.state, name=token_name, mint=mint, price_per_token=current_price,
+                            tokens_bought=tokens_bought, market_cap=market_cap_sol,
+                            sol_price=sol_price_usd_for_log, total_investment=total_sol_investment, for_telegram=True
+                        )
+                        asyncio.create_task(send_telegram_message(telegram_msg))
 
                     await self.state.update_sol_balance(-total_sol_investment)
 

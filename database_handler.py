@@ -190,8 +190,8 @@ class DatabaseClient:
                         data.get('vSolInBondingCurve'), 
                         data.get('marketCapSol'), 
                         _sanitize_string(data.get('name')),
-+                       _sanitize_string(data.get('symbol')), 
-+                       _sanitize_string(data.get('uri')),
+                        _sanitize_string(data.get('symbol')), 
+                        _sanitize_string(data.get('uri')),
                         sol_price
                     )
                     logger.debug("Inserted/Updated token %s", data.get('mint'))
