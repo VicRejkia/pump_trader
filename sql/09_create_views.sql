@@ -6,13 +6,17 @@ CREATE OR REPLACE VIEW v_tokens AS
 SELECT
     mint, traderPublicKey, initialBuy, solAmount, bondingCurveKey, vTokensInBondingCurve,
     vSolInBondingCurve, marketCapSol, name, symbol, uri, website, telegram, twitter,
-    socials_score, socials_last_checked, sol_price_usd, is_active, last_trade, '' as backup_reason, timestamp
+    socials_score, socials_last_checked, sol_price_usd, is_active, last_trade,
+    cooldown_until,
+    '' as backup_reason, timestamp
 FROM tokens
 UNION ALL
 SELECT
     mint, traderPublicKey, initialBuy, solAmount, bondingCurveKey, vTokensInBondingCurve,
     vSolInBondingCurve, marketCapSol, name, symbol, uri, website, telegram, twitter,
-    socials_score, socials_last_checked, sol_price_usd, FALSE AS is_active, last_trade, backup_reason, timestamp -- Treat backed up as inactive
+    socials_score, socials_last_checked, sol_price_usd, FALSE AS is_active, last_trade,
+    cooldown_until,
+    backup_reason, timestamp
 FROM tokens_backup tb
 WHERE NOT EXISTS (SELECT 1 FROM tokens t WHERE t.mint = tb.mint);
 

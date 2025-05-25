@@ -21,7 +21,7 @@ async def update_sol_price(state: GlobalState, db_client: DatabaseClient):
             try:
                 # Fetch the SOL price from an external API
                 async with httpx.AsyncClient() as client:
-                    response = await client.get(_SOL_PRICE_API_URL)
+                    response = await client.get(_SOL_PRICE_API_URL, timeout=10.0)
                     if response.status_code == 200:
                         data = response.json()
                         new_price = data.get("solana", {}).get("usd")

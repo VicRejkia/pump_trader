@@ -716,7 +716,7 @@ class SocialsProcessor:
                 # Avoid busy-looping on persistent errors
                 await self.state.wait_or_interrupt(timeout=10)
 
-        logger.info("🛑 Socials heck worker shutting down.")
+        logger.info("🛑 Socials check worker shutting down.")
 
     def start(self) -> asyncio.Task:
         """Creates and returns the asyncio task for the Socials Check worker."""

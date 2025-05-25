@@ -35,6 +35,22 @@ DEFAULT_MARKETCAP_THRESHOLD = 45000         # Minimum market cap threshold in US
 MIN_VOLATILITY = 0.18                       # Minimum volatility threshold in % to search for buy opportunities
 DEFAULT_TIME_INTERVALL = 10                 # Time interval for checking volatility, volume and marketcap in minutes
 
+# --- Re-Buy Logic Configuration ---
+USE_TREND_REVERSAL_CONFIRMATION = True      # Master switch to enable/disable this feature
+STOP_LOSS_COOLDOWN_MINUTES = 1              # How long a token is ignored after a Stop Loss
+MIN_CANDLE_DATA_FOR_INDICATORS = 30         # Min 5-second data points required to calculate indicators
+TREND_REVERSAL_RECENCY_HOURS = 6 
+TREND_REVERSAL_RSI_NEUTRAL_LEVEL = 45.0     # RSI level considered neutral for trend reversal
+INDICATOR_LOOKBACK_HOURS = 1                # Lookback period for indicators in hours
+
+# Indicator Time Periods
+APPLY_TREND_REVERSAL_ON_SELL_REASONS = ["🛑 Stop Loss", "🆘 Emergency SL (MCap)", "↘️ Trailing SL", "🛡️ Breakeven SL"]
+RSI_PERIOD = 14
+BBANDS_PERIOD = 20
+BBANDS_STD_DEV = 2.0
+FAST_EMA_PERIOD = 9
+SLOW_EMA_PERIOD = 21
+
 # UNSUBSCRIBING CONDITIONS
 INACTIVITY_PERIOD = 60                      # Inactivity period in minutes before unsubscribing & backup
 MC_DROP_THRESHOLD = 5                       # Market cap drop threshold (in %) - for unsubscription & backup

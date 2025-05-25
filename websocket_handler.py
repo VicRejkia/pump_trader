@@ -100,7 +100,7 @@ class WebSocketHandler:
         """Processes incoming WebSocket messages."""
         try:
             async for message in self.websocket:
-                sol_price = await self.state.get_sol_price()
+                #sol_price = await self.state.get_sol_price()
                 # if sol_price is None or sol_price <= 0:
                 #     logger.warning(f"⚠ Invalid SOL_PRICE ({sol_price}); skipping connection to PumpPortal WebSocket.")
                 #     sol_price = None
@@ -213,6 +213,7 @@ class WebSocketHandler:
             for row in active_tokens_from_db:
                 mint = row['mint']
                 last_trade_timestamp = await self.db_client.get_last_trade_timestamp(mint)
+                has_active_buy_order = await self.db_client.has_active_buy_order(mint)
 
                 is_gap_filled_candidate = False
                 if last_trade_timestamp is not None and last_bot_activity_time is not None:
@@ -220,7 +221,7 @@ class WebSocketHandler:
                     if last_trade_timestamp < last_bot_activity_time and gap_duration.total_seconds() > RESTART_GAP_THRESHOLD_SECONDS:
                         is_gap_filled_candidate = True
 
-                if is_gap_filled_candidate:
+                if is_gap_filled_candidate and not has_active_buy_order:
                     logger.info(f"Detected potential gap-filled token {mint}. Last trade: {last_trade_timestamp}, Last bot activity: {last_bot_activity_time}. Backing up with 'interrupted_gap_fill' reason.")
                     try:
                         await self.db_client.backup_and_delete_token(mint=mint, archived_at=startup_time, reason="interrupted_gap_fill")
@@ -241,8 +242,10 @@ class WebSocketHandler:
                     }))
                     # Update state with the tokens we successfully attempted to subscribe to
                     async with self.state.lock:
-                         for mint in mints_to_subscribe:
-                              self.state.active_token_subscriptions.add(mint)
+                        for mint in mints_to_subscribe:
+                            self.state.active_token_subscriptions.add(mint)
+                        
+                    self.state._save_subscriptions_to_file()
                     logger.debug(f"🔄 Resubscribed to {len(mints_to_subscribe)} tokens.")
                 except Exception as e:
                     logger.error(f"❌ Failed to send batch resubscribe message: {e}", exc_info=True)
@@ -295,6 +298,9 @@ class WebSocketHandler:
                                 "method": "unsubscribeTokenTrade",
                                 "keys": mints_to_process_batch
                             }))
+                            async with self.state.lock:
+                                self.state._save_subscriptions_to_file()
+                            logger.debug(f"Saved subscriptions to file after processing {len(mints_to_process_batch)} unsubscriptions by checker.")
                         else:
                             logger.warning(f"WebSocket closed, cannot send batch unsubscribe for {len(mints_to_process_batch)} tokens.")
                     except Exception as e:
@@ -435,6 +441,8 @@ class WebSocketHandler:
                 # Clear active subscriptions regardless.
                 async with self.state.lock:
                     self.state.active_token_subscriptions.clear()
+                    self.state._save_subscriptions_to_file() # This will save the now-empty set
+                logger.info(f"Cleared and saved active subscriptions on shutdown in dynamic subscriptions file.")
             else:
                 logger.info("No active token trade subscriptions found.")
         except Exception as e:

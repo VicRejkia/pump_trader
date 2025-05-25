@@ -5,14 +5,14 @@ emergency sell triggers, and portfolio management.
 import asyncio
 import numpy as np # Keep if other parts of your TradingManager might use it
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from database_handler import DatabaseClient # Type hint
 from logger import logger
 from state_manager import GlobalState
 from utils import (
     play_buy_opportunity_sound, play_sell_sl_sound_async, play_sell_tp_sound_async,
-    format_buy_order_log, format_sell_order_log
+    format_buy_order_log, format_sell_order_log, calculate_trend_indicators 
 )
 from telegram_interface import send_telegram_message
 
@@ -21,6 +21,63 @@ class TradingManager:
         self.db = db_client
         self.config = config_dict # config_dict is the active config from TradingBot
         self.state = state
+
+    async def _is_trend_reversal_confirmed(self, mint: str) -> bool:
+        """
+        Checks if a token that was recently stopped out shows strong signs of trend reversal.
+        """
+        # logger.debug(f"Performing trend reversal confirmation for {mint}...")
+        
+        # # 1. Fetch recent data. Let's look at the last 3 hours of data to have enough for indicators.
+        # start_date = datetime.now(timezone.utc) - timedelta(hours=3)
+        # end_date = datetime.now(timezone.utc)
+
+        # # Use the existing function to get data. It returns a dictionary.
+        # historical_data = await self.db.get_historical_data_for_backtesting([mint], start_date, end_date)
+
+        # if not historical_data or mint not in historical_data:
+        #     logger.warning(f"Could not fetch historical data for {mint} to check trend reversal.")
+        #     return False
+
+        # df = historical_data[mint]
+        
+        # # 2. Calculate indicators using our new utility function
+        # df_with_indicators = calculate_trend_indicators(df, self.config)
+
+        # if df_with_indicators.empty:
+        #     logger.warning(f"Indicator calculation failed or returned no data for {mint}. Cannot confirm trend.")
+        #     return False
+
+        # # 3. Get the latest data point for our checks
+        # latest = df_with_indicators.iloc[-1]
+        # previous = df_with_indicators.iloc[-2] # Also get the second-to-last for crossover detection
+
+        # # 4. Implement the two-stage confirmation logic
+        
+        # # --- Stage 1: Potential Bottom Triggers ---
+        # rsi_triggered = latest['RSI'] > 30 and previous['RSI'] <= 30
+        # bb_triggered = latest['Close'] > latest['BBL_20_2.0'] and previous['Close'] <= previous['BBL_20_2.0']
+
+        # if not (rsi_triggered or bb_triggered):
+        #     logger.debug(f"Re-buy for {mint} skipped: No bottom trigger. RSI cross: {rsi_triggered}, BB cross: {bb_triggered}.")
+        #     return False
+        
+        # logger.info(f"✅ Bottom trigger confirmed for {mint}. RSI cross: {rsi_triggered}, BB cross: {bb_triggered}. Checking filters...")
+
+        # # --- Stage 2: Trend and Volume Filters ---
+        # trend_confirmed = latest['Close'] > latest['VWAP']
+        # momentum_confirmed = latest['EMA_fast'] > latest['EMA_slow']
+        
+        # if not (trend_confirmed and momentum_confirmed):
+        #     logger.debug(f"Re-buy for {mint} skipped: Trend/Momentum filter failed. Above VWAP: {trend_confirmed}, EMA Cross: {momentum_confirmed}.")
+        #     return False
+            
+        # logger.info(f"✅ Trend & Momentum filters passed for {mint}. Above VWAP: {trend_confirmed}, EMA Cross: {momentum_confirmed}.")
+        
+        # # If we reach here, all conditions are met
+        # logger.info(f"🚀 Trend Reversal Confirmed for {mint}! Proceeding with buy opportunity.")
+        # return True
+        pass
 
     async def check_trading_opportunities(self):
         """✅ Check for new trading opportunities based on configured criteria."""
@@ -33,35 +90,133 @@ class TradingManager:
                 logger.warning(f"⚠️ Invalid SOL_PRICE ({sol_price}); skipping buy check.")
                 return
 
-            try:
-                time_interval_minutes = self.config['DEFAULT_TIME_INTERVALL']
-                rows = await self.db.find_trading_opportunities(
-                    sol_price=sol_price,
-                    volume_threshold=self.config['DEFAULT_VOLUME_THRESHOLD'],
-                    marketcap_threshold=self.config['DEFAULT_MARKETCAP_THRESHOLD'],
-                    rugcheck_threshold=self.config['DEFAULT_RUGCHECK_SCORE_THRESHOLD'],
-                    social_score_threshold=self.config['DEFAULT_SOCIAL_SCORE_THRESHOLD'],
-                    time_interval_minutes=time_interval_minutes,
-                    min_volatility=self.config['MIN_VOLATILITY']
-                )
+            rows = await self.db.find_trading_opportunities(
+                sol_price=sol_price,
+                volume_threshold=self.config['DEFAULT_VOLUME_THRESHOLD'],
+                marketcap_threshold=self.config['DEFAULT_MARKETCAP_THRESHOLD'],
+                rugcheck_threshold=self.config['DEFAULT_RUGCHECK_SCORE_THRESHOLD'],
+                social_score_threshold=self.config['DEFAULT_SOCIAL_SCORE_THRESHOLD'],
+                time_interval_minutes=self.config['DEFAULT_TIME_INTERVALL'],
+                min_volatility=self.config['MIN_VOLATILITY']
+            )
 
-                logger.debug(f"Found {len(rows)} potential trading opportunities.")
-                for row in rows:
-                    mint = row['mint']
-                    latest_price = float(row['latest_price'])
-                    latest_market_cap_sol = float(row['latest_market_cap_sol'])
+            logger.debug(f"Found {len(rows)} potential trading opportunities after initial DB filter (incl. hard cooldown).")
 
-                    if latest_price <= 0:
-                        logger.warning(f"Skipping buy for {mint} due to invalid latest price: {latest_price}")
-                        continue
-                    await self.execute_buy(mint, latest_price, latest_market_cap_sol)
-                    await asyncio.sleep(0.1) # Small delay
+            for row in rows:
+                mint = row['mint']
+                
+                proceed_to_buy = True # Assume true unless a check fails
 
-            except Exception as e:
-                logger.error(f"❌ Error fetching/processing trading opportunities: {e}", exc_info=True)
+                # --- Trend Reversal Confirmation Logic (Revised with two-pronged Stage 1) ---
+                if self.config.get('USE_TREND_REVERSAL_CONFIRMATION', False):
+                    apply_reversal_on_configured_reasons = self.config.get('APPLY_TREND_REVERSAL_ON_SELL_REASONS', [])
+                    recency_hours = self.config.get('TREND_REVERSAL_RECENCY_HOURS', 6) 
+                    rsi_neutral_level_config = self.config.get('TREND_REVERSAL_RSI_NEUTRAL_LEVEL', 45) # New config
+
+                    last_sell_reason_for_check = None 
+                    requires_reversal_check = False
+
+                    async with self.db.pool.acquire() as conn:
+                        last_sell_record = await conn.fetchrow(
+                            """SELECT reason, timestamp FROM portfolio 
+                               WHERE mint = $1 AND tx_type = 'sell' 
+                               ORDER BY timestamp DESC LIMIT 1""",
+                            mint
+                        )
+                    
+                    if last_sell_record:
+                        reason_from_portfolio = last_sell_record['reason']
+                        timestamp_from_portfolio = last_sell_record['timestamp']
+                        if timestamp_from_portfolio.tzinfo is None:
+                            timestamp_from_portfolio = timestamp_from_portfolio.replace(tzinfo=timezone.utc)
+                        
+                        is_recent_sell = (datetime.now(timezone.utc) - timestamp_from_portfolio) < timedelta(hours=recency_hours)
+
+                        if reason_from_portfolio and is_recent_sell:
+                            for configured_reason_substring in apply_reversal_on_configured_reasons:
+                                if configured_reason_substring in reason_from_portfolio:
+                                    requires_reversal_check = True
+                                    last_sell_reason_for_check = reason_from_portfolio
+                                    break
+                    
+                    if requires_reversal_check:
+                        logger.info(f"Token {mint} recently sold (within {recency_hours}h) due to '{last_sell_reason_for_check}'. Performing trend reversal confirmation...")
+                        
+                        # Fetch historical data for indicators
+                        start_date_hist = datetime.now(timezone.utc) - timedelta(hours=self.config.get('INDICATOR_LOOKBACK_HOURS', 1)) # Configurable lookback
+                        end_date_hist = datetime.now(timezone.utc)
+                        historical_data = await self.db.get_historical_data_for_backtesting([mint], start_date_hist, end_date_hist)
+
+                        if not historical_data or mint not in historical_data:
+                            logger.warning(f"Could not fetch historical data for {mint} for trend reversal. Skipping buy for now.")
+                            proceed_to_buy = False
+                        
+                        if proceed_to_buy:
+                            df = historical_data[mint]
+                            df_with_indicators = calculate_trend_indicators(df, self.config) # from utils.py
+
+                            if df_with_indicators.empty or len(df_with_indicators) < 2:
+                                logger.warning(f"Indicator calculation failed or returned insufficient data for {mint} (rows: {len(df_with_indicators)}). Skipping buy for now.")
+                                proceed_to_buy = False
+                            
+                            if proceed_to_buy:
+                                latest = df_with_indicators.iloc[-1]
+                                previous = df_with_indicators.iloc[-2]
+
+                                # STAGE 1: Potential Bottoming/Recovery Signals
+                                stage1_passed = False
+                                rsi_latest_val = latest.get('RSI', float('nan'))
+                                rsi_previous_val = previous.get('RSI', float('nan'))
+                                close_latest_val = latest.get('Close', float('nan'))
+                                close_previous_val = previous.get('Close', float('nan'))
+                                bb_lower_band_col = f"BBL_{self.config.get('BBANDS_PERIOD', 20)}_{self.config.get('BBANDS_STD_DEV', 2.0)}"
+                                bb_lower_latest_val = latest.get(bb_lower_band_col, float('inf'))
+                                bb_lower_previous_val = previous.get(bb_lower_band_col, float('inf'))
+
+                                # Primary Trigger: Crossovers
+                                rsi_just_crossed_up = rsi_latest_val > 30 and rsi_previous_val <= 30
+                                bb_price_reentered = close_latest_val > bb_lower_latest_val and close_previous_val <= bb_lower_previous_val
+                                
+                                if rsi_just_crossed_up or bb_price_reentered:
+                                    stage1_passed = True
+                                    logger.info(f"Stage 1 for {mint} PASSED (Crossover): RSI_Cross={rsi_just_crossed_up}, BB_Reentry={bb_price_reentered}")
+                                else:
+                                    # Secondary Trigger: If crossover missed, check if RSI is showing some baseline strength
+                                    if rsi_latest_val > rsi_neutral_level_config:
+                                        stage1_passed = True
+                                        logger.info(f"Stage 1 for {mint} PASSED (Alternative): RSI ({rsi_latest_val:.2f}) > Neutral Level ({rsi_neutral_level_config}).")
+                                    else:
+                                        logger.info(f"Stage 1 for {mint} FAILED: No crossover and RSI ({rsi_latest_val:.2f}) not above neutral level ({rsi_neutral_level_config}).")
+
+                                if not stage1_passed:
+                                    proceed_to_buy = False
+                                else:
+                                    # STAGE 2: Confirmation Filters (VWAP & EMA)
+                                    trend_confirmed_vwap = close_latest_val > latest.get('VWAP', float('-inf')) # Treat missing VWAP as price not being above it
+                                    momentum_confirmed_ema = latest.get('EMA_fast', float('-inf')) > latest.get('EMA_slow', float('inf'))
+
+                                    if not (trend_confirmed_vwap and momentum_confirmed_ema):
+                                        logger.info(f"Skipping re-buy for {mint}: Stage 2 (Confirmation) FAILED. VWAP: {trend_confirmed_vwap}, EMA: {momentum_confirmed_ema}.")
+                                        proceed_to_buy = False
+                                    else:
+                                        logger.info(f"🚀 Trend Reversal Fully Confirmed for {mint} (Stage 2 Passed)! VWAP: {trend_confirmed_vwap}, EMA: {momentum_confirmed_ema}.")
+                
+                if not proceed_to_buy:
+                    continue # Skip to the next token in the opportunity list
+
+                # --- Original Buy Logic (if all checks passed or not applicable) ---
+                latest_price = float(row['latest_price'])
+                latest_market_cap_sol = float(row['latest_market_cap_sol'])
+
+                if latest_price <= 0:
+                    logger.warning(f"Skipping buy for {mint} due to invalid latest price: {latest_price}")
+                    continue
+                
+                await self.execute_buy(mint, latest_price, latest_market_cap_sol)
+                await asyncio.sleep(0.1) 
 
         except Exception as e:
-            logger.error(f"❌ Outer error in check_trading_opportunities: {e}", exc_info=True)
+            logger.error(f"❌ Error in check_trading_opportunities: {e}", exc_info=True)
             await asyncio.sleep(5)
 
     async def check_sell_opportunities(self):
@@ -281,6 +436,23 @@ class TradingManager:
                 tokens_sold=tokens_to_sell, sell_fee=sell_fee, sell_tip=sell_tip, profit=profit,
                 reason=reason, timestamp=datetime.now(timezone.utc), settings=sell_settings, conn=conn
             )
+
+            # Determine if a hard cooldown should be set
+            sell_reasons_triggering_hard_cooldown = self.config.get('APPLY_TREND_REVERSAL_ON_SELL_REASONS', []) # Using the same list
+            trigger_hard_cooldown = False
+            for configured_reason_substring in sell_reasons_triggering_hard_cooldown:
+                if configured_reason_substring in reason: # 'reason' is the sell_reason string passed to execute_sell
+                    trigger_hard_cooldown = True
+                    break
+
+            if trigger_hard_cooldown:
+                # Use the existing STOP_LOSS_COOLDOWN_MINUTES or a more generic config if you rename it
+                cooldown_minutes = self.config.get('STOP_LOSS_COOLDOWN_MINUTES', 0) 
+                if cooldown_minutes > 0:
+                    # Call the simplified set_token_cooldown (assuming you've removed last_cooldown_reason from it)
+                    await self.db.set_token_cooldown(mint, cooldown_minutes) 
+                    logger.info(f"Hard cooldown of {cooldown_minutes} min set for {mint} due to sell reason: {reason}")
+
 
             token_name_row = await self.db.get_token_name(mint, conn)
             token_name = token_name_row['name'] if token_name_row else mint
