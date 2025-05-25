@@ -369,7 +369,6 @@ class Rugcheck:
             logger.warning(f"Processing failed for {mint}: Could not fetch/store RugCheck data due to an error (not 404 or timeout).")
             return False # Indicate general failure
 
-        # --- Score Check and Deactivation ---
         # --- Score Check and Deactivation (only if data was fetched successfully) ---
         fetched_data = fetch_result # We know it's a dict here
         score = fetched_data.get("score")
@@ -385,10 +384,13 @@ class Rugcheck:
                 unsubscribed_ws = False
                 if self.websocket_handler.websocket and self.websocket_handler.websocket.open:
                     is_subscribed = False
-                    async with self.state.lock:
-                         is_subscribed = mint in self.state.active_token_subscriptions
-                         if is_subscribed:
-                             self.state.active_token_subscriptions.discard(mint)
+                    #async with self.state.lock:
+                    is_subscribed = mint in self.state.active_token_subscriptions
+                    if is_subscribed:
+                        #self.state.active_token_subscriptions.discard(mint)
+                        await self.state.remove_token_subscription(mint)
+
+                    #self.state._save_subscriptions_to_file() # Ensure subscriptions are saved
 
                     if is_subscribed:
                         try:

@@ -279,7 +279,7 @@ class DatabaseClient:
         async with self.pool.acquire() as conn:
             return await conn.fetch(query, mc_drop_threshold, inactivity_period, min_token_age)
 
-    async def get_active_tokens(self, limit: int = 10000):
+    async def get_active_tokens(self, limit: int = 20000):
         """Fetch active tokens from the database."""
         query = """
             SELECT mint FROM tokens WHERE is_active = True
@@ -461,7 +461,8 @@ class DatabaseClient:
                 (COALESCE(rt.volume_recent, 0) * $1) >= $2 AND
                 (COALESCE(ltd.marketCapSol, t.marketCapSol, 0) * $1) >= $3 AND
                 COALESCE(vd.volatility, 0) >= $7 AND
-                t.mint NOT IN (SELECT mint FROM portfolio WHERE status = 'active')
+                t.mint NOT IN (SELECT mint FROM portfolio WHERE status = 'active') AND
+                (t.cooldown_until IS NULL OR t.cooldown_until < NOW())
             ORDER BY rt.volume_recent DESC;
         """
         async with self.pool.acquire() as conn:
@@ -840,8 +841,22 @@ class DatabaseClient:
                 async with conn.transaction():
                     try:
                         await conn.execute('''
-                            INSERT INTO tokens_backup SELECT *, $1, NOW() FROM tokens WHERE mint = $2
-                        ''', final_reason, mint)
+                                    INSERT INTO tokens_backup (
+                                        mint, traderPublicKey, initialBuy, solAmount, bondingCurveKey, vTokensInBondingCurve,
+                                        vSolInBondingCurve, marketCapSol, name, symbol, uri, website, telegram, twitter,
+                                        socials_score, socials_last_checked, sol_price_usd, is_active, last_trade, timestamp,
+                                        cooldown_until,
+                                        backup_reason, backup_timestamp
+                                    )
+                                    SELECT
+                                        mint, traderPublicKey, initialBuy, solAmount, bondingCurveKey, vTokensInBondingCurve,
+                                        vSolInBondingCurve, marketCapSol, name, symbol, uri, website, telegram, twitter,
+                                        socials_score, socials_last_checked, sol_price_usd, is_active, last_trade, timestamp,
+                                        cooldown_until,
+                                        $1, NOW()
+                                    FROM tokens
+                                    WHERE mint = $2
+                                ''', final_reason, mint)
                         
                         await conn.execute('''
                             INSERT INTO trades_backup SELECT *, NOW() FROM trades WHERE mint = $1
@@ -1302,8 +1317,21 @@ class DatabaseClient:
             logger.info(f"Data gap detected leading up to token end: last heartbeat at {previous_hb_ts}, token ended at {token_end_time}")
             return True
 
-
         return False
+    
+    async def set_token_cooldown(self, mint: str, cooldown_minutes: int):
+        """Sets a cooldown period on a token to prevent immediate re-buys."""
+        if cooldown_minutes <= 0:
+            return # No cooldown to set
+
+        cooldown_until = datetime.now(timezone.utc) + timedelta(minutes=cooldown_minutes)
+        query = "UPDATE tokens SET cooldown_until = $1 WHERE mint = $2"
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(query, cooldown_until, mint)
+            logger.info(f"Token {mint} is on a re-buy cooldown until {cooldown_until.strftime('%Y-%m-%d %H:%M:%S')} UTC.")
+        except Exception as e:
+            logger.error(f"Failed to set cooldown for token {mint}: {e}", exc_info=True)
 
     async def cleanup_db(self, cleanup_flag: bool):
         """Drop all application tables if cleanup_flag is True."""
@@ -1346,45 +1374,48 @@ class DatabaseClient:
                         'tokens', 'trades', 'rugcheck', 'migrations', 'portfolio'
                     ]
                     for table in tables_to_backup:
-                        # Insert into backup table, ignoring rows that already exist based on primary key 'id'
-                        # Determine the correct primary key for conflict resolution based on table schema
-                        if table == 'tokens':
-                            conflict_key = 'mint'
-                        elif table == 'trades':
-                            conflict_key = 'signature'
-                        elif table == 'rugcheck':
-                            conflict_key = 'mint'
-                        elif table == 'migrations':
-                            conflict_key = 'signature'
-                        elif table == 'portfolio':
-                            table_columns = await conn.fetch(f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table}'")
-                            conflict_key = 'id'
-                            columns = ", ".join([col for col in table_columns if col != "id"])
-                            await conn.execute(f"""
-                                INSERT INTO {table}_backup (id, {columns})
-                                SELECT nextval('{table}_backup_id_seq'), {columns}
-                                FROM {table} 
-                                ORDER BY id
-                                ON CONFLICT ({conflict_key}) DO NOTHING;
-                            """)
-                            logger.info("🗄️ Backed up table %s", table)
-                            await conn.execute(f"TRUNCATE TABLE {table} RESTART IDENTITY CASCADE;")
-                            logger.info("🧹 Truncated table %s", table)
-                        else:
-                            # Should not happen with the current list, but add a warning
-                            logger.warning(f"Unexpected table '{table}' in backup_db conflict handling.")
-                            # If other tables are added later, their PK needs to be handled here.
-                            # For now, skip conflict handling for unknown tables to avoid errors.
-                            await conn.execute(f"INSERT INTO {table}_backup SELECT * FROM {table};") # Original insert without ON CONFLICT
-                            logger.info("🗄️ Backed up table %s (without conflict check)", table)
-                            await conn.execute(f"TRUNCATE TABLE {table} RESTART IDENTITY CASCADE;")
-                            continue # Skip the rest of the loop for this table
+                        logger.info("🗄️ Backing up table %s", table)
 
-                        # Execute the INSERT with the correct ON CONFLICT clause
-                        await conn.execute(f"INSERT INTO {table}_backup SELECT * FROM {table} ON CONFLICT ({conflict_key}) DO NOTHING;")
-                        logger.info("🗄️ Backed up table %s", table)
+                        if table == 'tokens':
+                            # Handle the 'tokens' table as a special case with explicit columns
+                            await conn.execute("""
+                                INSERT INTO tokens_backup (
+                                    mint, traderPublicKey, initialBuy, solAmount, bondingCurveKey,
+                                    vTokensInBondingCurve, vSolInBondingCurve, marketCapSol, name, symbol, uri,
+                                    website, telegram, twitter, socials_score, socials_last_checked,
+                                    sol_price_usd, is_active, last_trade, timestamp,
+                                    cooldown_until,
+                                    backup_reason, backup_timestamp
+                                )
+                                SELECT
+                                    mint, traderPublicKey, initialBuy, solAmount, bondingCurveKey,
+                                    vTokensInBondingCurve, vSolInBondingCurve, marketCapSol, name, symbol, uri,
+                                    website, telegram, twitter, socials_score, socials_last_checked,
+                                    sol_price_usd, is_active, last_trade, timestamp,
+                                    cooldown_until,
+                                    'manual_backup', NOW()
+                                FROM tokens
+                                ON CONFLICT (mint) DO NOTHING;
+                            """)
+                        else:
+                            # Original logic for other tables (assuming their backup tables have identical columns)
+                            # NOTE: This generic logic is still fragile. Explicit columns are always better.
+                            conflict_key_map = {
+                                'trades': 'signature',
+                                'rugcheck': 'mint',
+                                'migrations': 'signature',
+                                'portfolio': 'id'
+                            }
+                            conflict_key = conflict_key_map.get(table)
+                            if conflict_key:
+                                await conn.execute(f"INSERT INTO {table}_backup SELECT * FROM {table} ON CONFLICT ({conflict_key}) DO NOTHING;")
+                            else:
+                                logger.warning(f"No conflict key defined for table '{table}' in backup_db. Skipping backup.")
+                                continue
+
+                        logger.info("🧹 Truncating table %s", table)
                         await conn.execute(f"TRUNCATE TABLE {table} RESTART IDENTITY CASCADE;")
-                        logger.info("🧹 Truncated table %s", table)
+
                 except Exception as e:
                     logger.exception("Error during database backup: %s", e)
                     raise
@@ -1478,7 +1509,7 @@ class DatabaseClient:
             start_date = start_date.replace(tzinfo=timezone.utc) if start_date.tzinfo is None else start_date.astimezone(timezone.utc)
             end_date = end_date.replace(tzinfo=timezone.utc) if end_date.tzinfo is None else end_date.astimezone(timezone.utc)
 
-            logger.info(f"Fetching historical data for {len(mints)} tokens from {start_date.isoformat()} to {end_date.isoformat()}...")
+            #logger.info(f"Fetching historical data for {len(mints)} tokens from {start_date.isoformat()} to {end_date.isoformat()}...")
 
             # Note on SQL column names: PostgreSQL typically folds unquoted identifiers to lowercase.
             # If your view v_trades has "marketCapSol" (camelCase) because it was created with quotes,
@@ -1534,7 +1565,7 @@ class DatabaseClient:
                     
                     # Standardize column names from trades_df to lowercase for internal processing
                     trades_df.columns = [str(col).lower() for col in trades_df.columns]
-                    logger.debug(f"Processed trade_df columns (lowercase): {list(trades_df.columns)}")
+                    #logger.debug(f"Processed trade_df columns (lowercase): {list(trades_df.columns)}")
 
 
                     trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'], errors='coerce', utc=True)
@@ -1600,19 +1631,55 @@ class DatabaseClient:
                     
                     resampled_ohlcv_list = []
                     for mint_name, group_df in ohlcv_df.groupby('mint'):
-                        # ... (resampling logic as in previous response)
-                        if group_df.index.has_duplicates: group_df = group_df.loc[~group_df.index.duplicated(keep='last')]
+                        if group_df.index.has_duplicates: 
+                            group_df = group_df.loc[~group_df.index.duplicated(keep='last')]
+                        
                         min_ts, max_ts = group_df.index.min(), group_df.index.max()
-                        if pd.isna(min_ts) or pd.isna(max_ts): continue
+                        if pd.isna(min_ts) or pd.isna(max_ts): 
+                            logger.warning(f"Skipping mint {mint_name} due to NaT in min/max timestamp for reindexing.")
+                            continue
+                            
                         full_range = pd.date_range(start=min_ts, end=max_ts, freq='5s', tz='UTC')
                         group_reindexed = group_df.reindex(full_range)
-                        try: group_reindexed = group_reindexed.infer_objects(copy=False)
-                        except: pass 
+
+                        # --- START MODIFICATION ---
+                        # Explicitly convert columns intended for time interpolation to numeric.
+                        # These are the columns output by ohlcv_sql_like and filled.
+                        cols_to_make_numeric_for_interpolate = [
+                            'Open', 'High', 'Low', 'Close', 'Volume',
+                            'market_cap_calculated', 'marketCapSol', 'volatility'
+                        ]
+                        for col in cols_to_make_numeric_for_interpolate:
+                            if col in group_reindexed.columns:
+                                group_reindexed[col] = pd.to_numeric(group_reindexed[col], errors='coerce')
+                            else:
+                                # This shouldn't happen if ohlcv_df is built correctly, but good to note.
+                                logger.warning(f"Column '{col}' not found in reindexed group for mint {mint_name} during numeric conversion. Interpolation might be affected.")
+                        
+                        # Attempt to infer better dtypes for any other object columns
+                        try:
+                            group_reindexed_inferred = group_reindexed.infer_objects(copy=False)
+                            # Log if key dtypes actually changed, for debugging, can be removed later
+                            for col_to_check in cols_to_make_numeric_for_interpolate:
+                                if col_to_check in group_reindexed.columns and col_to_check in group_reindexed_inferred.columns:
+                                    if group_reindexed[col_to_check].dtype != group_reindexed_inferred[col_to_check].dtype:
+                                        logger.debug(f"Mint {mint_name}, Col {col_to_check}: dtype changed from {group_reindexed[col_to_check].dtype} to {group_reindexed_inferred[col_to_check].dtype} by infer_objects")
+                            group_reindexed = group_reindexed_inferred
+                        except Exception as e_infer:
+                            # Log the error instead of passing silently
+                            logger.warning(f"Failed to infer_objects for {mint_name} (continuing with current dtypes for reindexed group): {e_infer}")
+                        
+                        # Now interpolate. Warnings should be gone if target columns are float.
                         group_resampled = group_reindexed.interpolate(method='time')
+                        # --- END MODIFICATION ---
+                        
                         group_resampled['mint'] = mint_name
                         resampled_ohlcv_list.append(group_resampled)
 
-                    if not resampled_ohlcv_list: return {}
+                    if not resampled_ohlcv_list: 
+                        logger.warning("No data after resampling for any mints.")
+                        return {}
+                    
                     resampled_ohlcv_df = pd.concat(resampled_ohlcv_list)
                     if resampled_ohlcv_df.index.name != 'timestamp': resampled_ohlcv_df.index.name = 'timestamp'
 
@@ -1733,7 +1800,7 @@ class DatabaseClient:
                     logger.error(f"Error processing historical data ({type(e).__name__}): {e}", exc_info=True)
                     return {}
 
-            logger.info(f"Successfully fetched and processed historical data for {len(results_dict)} tokens.")
+            #logger.info(f"Successfully fetched and processed historical data for {len(results_dict)} tokens.")
             return results_dict
 
 # Helper function moved outside class for potential reuse (optional)

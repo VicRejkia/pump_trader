@@ -58,12 +58,31 @@ class GlobalState:
             return set()
 
     def _save_subscriptions_to_file(self):
-        """Save current active token subscriptions to file."""
+        """Save current active token subscriptions to file atomically."""
+        # Ensure data directory exists (it's created in TradingBot, but good to be robust)
+        data_dir = os.path.dirname(SUBSCRIPTIONS_FILE)
+        if not os.path.exists(data_dir):
+            try:
+                os.makedirs(data_dir)
+            except OSError as e:
+                logger.error(f"Could not create data directory {data_dir}: {e}")
+                return # Cannot proceed if directory cannot be created
+
+        temp_file_path = SUBSCRIPTIONS_FILE + ".tmp"
         try:
-            with open(SUBSCRIPTIONS_FILE, 'w') as f:
+            # The self.active_token_subscriptions set is already under self.lock in the calling methods
+            # So, here we just perform the file operation.
+            with open(temp_file_path, 'w') as f:
                 json.dump(list(self.active_token_subscriptions), f, indent=2)
+            os.replace(temp_file_path, SUBSCRIPTIONS_FILE) # Atomic rename
+            # logger.debug(f"Saved {len(self.active_token_subscriptions)} subscriptions to {SUBSCRIPTIONS_FILE}")
         except Exception as e:
-            logger.error(f"Error saving subscriptions to file: {e}")
+            logger.error(f"Error saving subscriptions to file {SUBSCRIPTIONS_FILE}: {e}")
+            if os.path.exists(temp_file_path):
+                try:
+                    os.remove(temp_file_path)
+                except OSError as ose:
+                    logger.error(f"Error removing temporary subscription file {temp_file_path}: {ose}")
 
     @classmethod
     def get_instance(cls):
@@ -122,12 +141,12 @@ class GlobalState:
     async def add_token_subscription(self, mint: str):
         async with self.lock:
             self.active_token_subscriptions.add(mint)
-            self._save_subscriptions_to_file()
+        self._save_subscriptions_to_file()
 
     async def remove_token_subscription(self, mint: str):
         async with self.lock:
             self.active_token_subscriptions.discard(mint)
-            self._save_subscriptions_to_file()
+        self._save_subscriptions_to_file()
 
     async def get_token_subscriptions(self):
         async with self.lock:

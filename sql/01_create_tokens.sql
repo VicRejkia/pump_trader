@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS tokens (
     sol_price_usd NUMERIC,                          -- SOL price at token creation
     is_active BOOLEAN DEFAULT TRUE,                 -- TRUE or FALLS for considering in check_buy_opportunities
     last_trade TIMESTAMP WITH TIME ZONE,            -- TIMESTAMP of the last Trade event, updated when a new TRADE is fetched
+    cooldown_until TIMESTAMP WITH TIME ZONE,        -- <<< ADD THIS LINE: Prevent re-buys until this time
     timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP    -- creation TIMESTAMP
 );
 

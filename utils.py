@@ -6,6 +6,9 @@ Includes URL validation, audio alerts, and log formatting.
 import os
 import asyncio # <-- Add if used implicitly by called async functions
 import pandas as pd
+import pandas_ta as ta
+import warnings # Add this import
+from pandas.errors import UserWarning # Import the specific warning category
 import numpy as np
 import json
 from datetime import datetime, timezone, timedelta # <-- Added timedelta
@@ -81,7 +84,8 @@ def format_buy_order_log(state, name: str, mint: str, price_per_token: float, to
 
     # Handle different platforms
     if for_telegram:
-        formatted_mint = f'<a href="{url}">{mint}</a>'
+        #formatted_mint = f'<a href="{url}">{mint}</a>'
+        formatted_mint = url
     else:
         # Use Rich markup for console hyperlinks
         # This requires `markup=True` in the RichHandler, which you have.
@@ -124,7 +128,8 @@ def format_sell_order_log(mint: str, token_name: str, market_cap_sol: float, pro
 
     # Handle different platforms
     if for_telegram:
-        formatted_mint = f'<a href="{url}">{mint}</a>'
+        #formatted_mint = f'<a href="{url}">{mint}</a>'
+        formatted_mint = url
     else:
         ## Use Rich markup for console hyperlinks
         # This requires `markup=True` in the RichHandler, which you have.
@@ -517,6 +522,65 @@ def export_to_csv(historical_data_sets: Dict[str, Dict[str, pd.DataFrame]],
 
     logger.info(f"Exported OHLCV data and lifespans to {output_dir}")
 
+def calculate_trend_indicators(df: pd.DataFrame, config: dict) -> pd.DataFrame:
+    """
+    Calculates a suite of technical indicators using pandas-ta.
+
+    Args:
+        df (pd.DataFrame): DataFrame with columns 'Open', 'High', 'Low', 'Close', 'Volume'.
+        config (dict): The bot's configuration dictionary for periods.
+
+    Returns:
+        pd.DataFrame: The original DataFrame with new indicator columns appended.
+    """
+    if df.empty or len(df) < config['MIN_CANDLE_DATA_FOR_INDICATORS']:
+        logger.debug(f"Not enough data to calculate indicators (Have: {len(df)}, Need: {config['MIN_CANDLE_DATA_FOR_INDICATORS']}).")
+        return pd.DataFrame() # Return empty DataFrame if not enough data
+
+    try:
+        # Create a copy to avoid SettingWithCopyWarning
+        df_ta = df.copy()
+
+        # Calculate Bollinger Bands
+        bbands = df_ta.ta.bbands(length=config['BBANDS_PERIOD'], std=config['BBANDS_STD_DEV'])
+        if bbands is not None and not bbands.empty:
+            df_ta = pd.concat([df_ta, bbands], axis=1)
+
+        # Calculate RSI
+        df_ta['RSI'] = df_ta.ta.rsi(length=config['RSI_PERIOD'])
+
+        # Calculate EMAs
+        df_ta['EMA_fast'] = df_ta.ta.ema(length=config['FAST_EMA_PERIOD'])
+        df_ta['EMA_slow'] = df_ta.ta.ema(length=config['SLOW_EMA_PERIOD'])
+        
+                # --- MODIFICATION TO SUPPRESS VWAP WARNING ---
+        # Temporarily catch and ignore the specific UserWarning for VWAP calculation
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Converting to PeriodArray/Index representation will drop timezone information.",
+                category=UserWarning, # Specify the category for more targeted suppression
+                module="pandas_ta.volume.vwap" # Be even more specific if you know the exact module in pandas-ta
+                                              # Or even just pandas.core.arrays.period if that's where it originates
+            )
+            # You might need to inspect the full warning traceback to get the most specific module
+            # For a general pandas_ta UserWarning related to this message:
+            # warnings.filterwarnings("ignore", category=UserWarning, module="pandas_ta") 
+            
+            # Calculate VWAP
+            df_ta['VWAP'] = df_ta.ta.vwap()
+        # --- END MODIFICATION ---
+        
+        # Drop rows with NaN values that were created during indicator calculation
+        df_ta.dropna(inplace=True)
+        
+        logger.debug(f"Successfully calculated indicators. Resulting data shape: {df_ta.shape}")
+        return df_ta
+
+    except Exception as e:
+        logger.error(f"Error calculating indicators: {e}", exc_info=True)
+        return pd.DataFrame() # Return empty on error
+
 class NpEncoder(json.JSONEncoder):
     """
     Custom JSON encoder to handle NumPy, Pandas, and datetime types
@@ -542,3 +606,4 @@ class NpEncoder(json.JSONEncoder):
             return obj.isoformat()
         # Let the base class default method raise the TypeError for unsupported types
         return super(NpEncoder, self).default(obj)
+    
