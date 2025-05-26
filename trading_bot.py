@@ -423,7 +423,7 @@ class TradingBot:
             log_info(":stop_sign: Monitor task shutting down")
 
     async def command_listener(self):
-        """Periodically checks the command file for STOP command."""
+        """Periodically checks the command file for commands."""
         last_command_content = None
         try:
             while not self.state.shutdown_event.is_set():
@@ -435,37 +435,49 @@ class TradingBot:
 
                         if current_command_content and current_command_content != last_command_content:
                             log_info(f"Received command via {COMMAND_FILE}: '{current_command_content}'")
-                            last_command_content = current_command_content # Update last command processed
+                            last_command_content = current_command_content
 
-                            # Process command
                             command_upper = current_command_content.upper()
+                            
+                            # --- Process Commands ---
                             if command_upper == "STOP":
-                                log_info(f":hand: STOP command processed. Initiating shutdown...")
+                                log_info(":hand: STOP command processed. Initiating shutdown...")
                                 self.state.trigger_shutdown()
-                                # Clear command file after processing
-                                try:
-                                    with open(COMMAND_FILE, 'w', encoding='utf-8') as f_clear: f_clear.write("")
-                                except OSError as e_clear: log_error(f"Error clearing command file: {e_clear}")
-                                break # Exit listener loop
+                            elif command_upper == "STOP_BUYING":
+                                log_info("🚫 STOP_BUYING command processed. No new buy orders will be placed.")
+                                self.state.is_buying_enabled = False
+                            elif command_upper == "START_BUYING":
+                                log_info("✅ START_BUYING command processed. New buy orders are now allowed.")
+                                self.state.is_buying_enabled = True
+                            elif command_upper.startswith("SELL_"):
+                                mint_to_sell = current_command_content[len("SELL_"):]
+                                log_info(f"SELL command processed for mint: {mint_to_sell}")
+                                if self.trading_manager:
+                                    # Non-blocking call
+                                    asyncio.create_task(self.trading_manager.execute_manual_sell(mint_to_sell))
+                                else:
+                                    log_warning("TradingManager not ready for SELL command.")
                             elif command_upper == "UNSUB_NEWTOKEN":
-                                log_info(f":no_bell: UNSUB_NEWTOKEN command processed.")
+                                log_info(":no_bell: UNSUB_NEWTOKEN command processed.")
                                 if self.ws_handler:
                                     asyncio.create_task(self.ws_handler.unsubscribe_new_tokens())
-                                else: log_warning("WS handler not ready for UNSUB_NEWTOKEN.")
-                                try:
-                                    with open(COMMAND_FILE, 'w', encoding='utf-8') as f_clear: f_clear.write("")
-                                except OSError as e_clear: log_error(f"Error clearing command file: {e_clear}")
-                            # Add more commands here (e.g., RELOAD_CONFIG, GET_STATUS)
-                            # For GET_STATUS, the bot could write its current status_data to a response file.
+                                else:
+                                    log_warning("WS handler not ready for UNSUB_NEWTOKEN.")
                             else:
                                 log_warning(f"Unknown command '{current_command_content}' in {COMMAND_FILE}. Ignoring.")
-                                try: # Clear unknown commands too
-                                    with open(COMMAND_FILE, 'w', encoding='utf-8') as f_clear: f_clear.write("")
-                                except OSError as e_clear: log_error(f"Error clearing command file: {e_clear}")
+                            
+                            # Clear command file after processing any command
+                            try:
+                                with open(COMMAND_FILE, 'w', encoding='utf-8') as f_clear: f_clear.write("")
+                            except OSError as e_clear: 
+                                log_error(f"Error clearing command file: {e_clear}")
+                            
+                            if command_upper == "STOP":
+                                break # Exit listener loop on STOP command
 
                         elif not current_command_content and last_command_content:
-                            # If file is now empty, reset last_command_content
                             last_command_content = None
+
                 except IOError as e:
                     log_error(f"Error reading command file {COMMAND_FILE}: {e}")
                 except Exception as e:

@@ -44,7 +44,7 @@ TREND_REVERSAL_RSI_NEUTRAL_LEVEL = 45.0     # RSI level considered neutral for t
 INDICATOR_LOOKBACK_HOURS = 1                # Lookback period for indicators in hours
 
 # Indicator Time Periods
-APPLY_TREND_REVERSAL_ON_SELL_REASONS = ["🛑 Stop Loss", "🆘 Emergency SL (MCap)", "↘️ Trailing SL", "🛡️ Breakeven SL"]
+APPLY_TREND_REVERSAL_ON_SELL_REASONS = ["🛑 Stop Loss", "🆘 Emergency SL (MCap)", "↘️ Trailing SL", "🛡️ Breakeven SL", "manual_override"]
 RSI_PERIOD = 14
 BBANDS_PERIOD = 20
 BBANDS_STD_DEV = 2.0

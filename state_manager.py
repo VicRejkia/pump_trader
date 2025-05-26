@@ -30,6 +30,7 @@ class GlobalState:
         self.active_token_subscriptions = set()  # Active token subscriptions
         self.sol_price = None          # SOL price (updated hourly)
         self.db_client = None          # Database client instance
+        self.is_buying_enabled = True # ADDED: Flag to control buy orders
 
         # API rate limiting
         self.request_timestamps = deque(maxlen=10)  # API request tracker

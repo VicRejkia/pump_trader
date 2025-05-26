@@ -8,7 +8,6 @@ import asyncio # <-- Add if used implicitly by called async functions
 import pandas as pd
 import pandas_ta as ta
 import warnings # Add this import
-from pandas.errors import UserWarning # Import the specific warning category
 import numpy as np
 import json
 from datetime import datetime, timezone, timedelta # <-- Added timedelta
@@ -556,18 +555,7 @@ def calculate_trend_indicators(df: pd.DataFrame, config: dict) -> pd.DataFrame:
                 # --- MODIFICATION TO SUPPRESS VWAP WARNING ---
         # Temporarily catch and ignore the specific UserWarning for VWAP calculation
         with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message="Converting to PeriodArray/Index representation will drop timezone information.",
-                category=UserWarning, # Specify the category for more targeted suppression
-                module="pandas_ta.volume.vwap" # Be even more specific if you know the exact module in pandas-ta
-                                              # Or even just pandas.core.arrays.period if that's where it originates
-            )
-            # You might need to inspect the full warning traceback to get the most specific module
-            # For a general pandas_ta UserWarning related to this message:
-            # warnings.filterwarnings("ignore", category=UserWarning, module="pandas_ta") 
-            
-            # Calculate VWAP
+            warnings.simplefilter("ignore", UserWarning)
             df_ta['VWAP'] = df_ta.ta.vwap()
         # --- END MODIFICATION ---
         

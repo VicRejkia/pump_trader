@@ -84,6 +84,10 @@ class TradingManager:
         if self.state.shutdown_event.is_set():
             return
 
+        if not self.state.is_buying_enabled:
+            logger.debug("Buying is currently disabled by command. Skipping buy checks.")
+            return
+
         try:
             sol_price = await self.state.get_sol_price()
             if sol_price is None or sol_price <= 0:
@@ -360,6 +364,46 @@ class TradingManager:
                 except Exception as e:
                     logger.error(f"❌ Error in check_sell_opportunities transaction block: {e}", exc_info=True)
 
+    async def execute_manual_sell(self, mint: str):
+        """Executes a manual sell for all holdings of a specific token."""
+        logger.info(f"Attempting manual sell for all holdings of token: {mint}")
+        
+        async with self.db.pool.acquire() as conn:
+            # Find the active buy position for the given mint
+            position = await conn.fetchrow(
+                "SELECT id FROM portfolio WHERE mint = $1 AND status = 'active' AND tx_type = 'buy' ORDER BY timestamp DESC LIMIT 1",
+                mint
+            )
+
+            if not position:
+                logger.warning(f"No active buy position found for mint {mint} to execute manual sell.")
+                return
+
+            pos_id = position['id']
+            
+            # Get the current price and market cap
+            price_data = await self.db.get_price_and_market_cap_for_decision(mint, self.config, conn)
+            current_price = price_data.get('price')
+            market_cap_sol = price_data.get('market_cap')
+
+            if current_price is None or current_price <= 0:
+                logger.error(f"Cannot execute manual sell for {mint}: Invalid current price ({current_price}).")
+                return
+
+            logger.info(f"Executing manual sell for {mint} (Position ID: {pos_id}) at price {current_price:.9f}")
+
+            async with conn.transaction():
+                await self.execute_sell(
+                    conn=conn,
+                    mint=mint,
+                    current_price=current_price,
+                    market_cap_sol=market_cap_sol if market_cap_sol is not None else 0.0,
+                    reason="manual_override",
+                    sell_percentage=1.0,  # Sell 100%
+                    position_id_to_update=pos_id,
+                    sell_trigger_values={"command": "SELL_" + mint}
+                )
+
     async def execute_sell(self, conn, mint: str, current_price: float, market_cap_sol: float, reason: str, sell_percentage: float, position_id_to_update: int, sell_trigger_values: dict = None) -> float | None:
         """
         💸 Execute sell simulation for a specific position within an existing transaction.
@@ -419,7 +463,7 @@ class TradingManager:
 
             sell_settings = {
                 "reason": reason,
-                "sell_percentage_of_initial_request": sell_percentage * 100 if reason == "🥇 First TP" else (sell_percentage * 100.0 if reason in ["🛑 Stop Loss", "🛡️ Breakeven SL", "🎯 Second TP", "↘️ Trailing SL", "🆘 Emergency SL (MCap)"] else 0.0),
+                "sell_percentage_of_initial_request": sell_percentage * 100 if reason == "🥇 First TP" else (sell_percentage * 100.0 if reason in ["🛑 Stop Loss", "🛡️ Breakeven SL", "🎯 Second TP", "↘️ Trailing SL", "🆘 Emergency SL (MCap)", "manual_override"] else 0.0),
                 "actual_tokens_sold_as_fraction_of_remaining_at_sell_time": (tokens_to_sell / remaining_tokens) if remaining_tokens > 0 else 0,
                 "sell_fee_config": self.config['DEFAULT_SELL_FEE'],
                 "sell_tip_config": self.config['DEFAULT_SELL_TIP'],
@@ -475,7 +519,7 @@ class TradingManager:
             await self.state.update_sol_balance(net_sol_received) # Add net SOL received to balance
 
             if self.config['PLAY_SELL_SOUND']:
-                if reason in ["🛑 Stop Loss", "🛡️ Breakeven SL", "🆘 Emergency SL (MCap)"]:
+                if reason in ["🛑 Stop Loss", "🛡️ Breakeven SL", "🆘 Emergency SL (MCap)", "manual_override"]:
                     asyncio.create_task(play_sell_sl_sound_async())
                 elif reason in ["🥇 First TP", "🎯 Second TP", "↘️ Trailing SL"]:
                     asyncio.create_task(play_sell_tp_sound_async())
