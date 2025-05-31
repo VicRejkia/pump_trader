@@ -4,6 +4,8 @@ Handles PostgreSQL connections and CRUD operations.
 """
 
 import os
+import io
+import csv
 import glob
 from datetime import datetime, timezone,timedelta
 import asyncio
@@ -18,7 +20,7 @@ import config as base_config_module
 from state_manager import GlobalState
 import pandas as pd
 import numpy as np
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta # Ensure timedelta is imported
 from typing import Dict, Optional, List, Tuple, Any
 from utils import calculate_volatility
 import inspect 
@@ -165,7 +167,7 @@ class DatabaseClient:
                             creator, token_count, now
                         )
 
-                    if token_count > 2:
+                    if token_count > self.config.get('MAX_TOKEN_COUNT_PER_CREATOR', 10):
                             logger.debug(f"🤬 [bold red]Suspicious creator[/bold red] %s for token %s with %s tokens in 7 days", creator, data['mint'], token_count)
                             return False
 
@@ -965,6 +967,68 @@ class DatabaseClient:
         except Exception as e:
             logger.exception("Error loading backup data: %s", e)
             raise
+        
+    # async def restore_creator_wallets(self):
+    #     backup_path = os.path.abspath(os.path.join(
+    #         os.path.dirname(__file__), 
+    #         "data", 
+    #         "creator_wallets_backup.json"
+    #     ))
+
+    #     if not os.path.exists(backup_path):
+    #         logger.warning("Backup file not found: %s", backup_path)
+    #         return
+
+    #     try:
+    #         with open(backup_path, "r") as f:
+    #             data = json.load(f)
+
+    #         # Prepare CSV in memory
+    #         csv_buffer = io.StringIO()
+    #         writer = csv.writer(csv_buffer)
+    #         for record in data:
+    #             writer.writerow([
+    #                 record["wallet_address"],
+    #                 record["token_count"],
+    #                 record["last_token_time"] or ''
+    #             ])
+    #         csv_buffer.seek(0)
+
+    #         async with self.pool.acquire() as conn:
+    #             async with conn.transaction():
+    #                 # Create temp table
+    #                 await conn.execute("""
+    #                     CREATE TEMP TABLE tmp_creator_wallets (
+    #                         wallet_address TEXT PRIMARY KEY,
+    #                         token_count INTEGER,
+    #                         last_token_time TIMESTAMPTZ
+        #                 ) ON COMMIT DROP;
+        #             """)
+
+        #             # COPY into temp table
+        #             await conn.copy_from_table(
+        #                 table_name='tmp_creator_wallets',
+        #                 source=csv_buffer,
+        #                 format='csv'
+        #             )
+
+        #             # Merge into main table
+        #             await conn.execute("""
+        #                 INSERT INTO creator_wallets (wallet_address, token_count, last_token_time)
+        #                 SELECT wallet_address, token_count, last_token_time FROM tmp_creator_wallets
+        #                 ON CONFLICT (wallet_address) DO UPDATE SET
+        #                     token_count = GREATEST(creator_wallets.token_count, EXCLUDED.token_count),
+        #                     last_token_time = CASE
+        #                         WHEN EXCLUDED.token_count > creator_wallets.token_count THEN EXCLUDED.last_token_time
+        #                         ELSE creator_wallets.last_token_time
+        #                     END;
+        #             """)
+
+        #     logger.info("✅ Fast restore of `creator_wallets` completed: %d records", len(data))
+
+        # except Exception as e:
+        #     logger.exception("Error loading `creator_wallets` backup data: %s", e)
+        #     raise
 
     # --- START: Refactored Price Calculation Logic ---
     async def _get_raw_trades_for_window(self, mint: str, window_minutes: int, conn) -> List[Dict[str, Any]]:
@@ -1179,6 +1243,84 @@ class DatabaseClient:
                 logger.error(f"Error fetching total tracked tokens: {e}", exc_info=True)
                 return 0
 
+    async def load_all_configurations(self) -> Dict[str, Any]:
+        """Loads all configuration parameters from the database."""
+        query = "SELECT key, value, type FROM configurations"
+        config_data = {}
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(query)
+                for row in rows:
+                    key, str_value, value_type = row['key'], row['value'], row['type']
+                    try:
+                        if value_type == 'int':
+                            config_data[key] = int(str_value)
+                        elif value_type == 'float':
+                            config_data[key] = float(str_value)
+                        elif value_type == 'bool':
+                            config_data[key] = str_value.lower() == 'true'
+                        elif value_type == 'list':
+                            config_data[key] = json.loads(str_value) # Assuming lists are stored as JSON strings
+                        elif value_type == 'str':
+                            config_data[key] = str_value
+                        else:
+                            logger.warning(f"Unknown configuration type '{value_type}' for key '{key}'. Storing as string.")
+                            config_data[key] = str_value
+                    except (ValueError, TypeError, json.JSONDecodeError) as e:
+                        logger.error(f"Error converting configuration value for key '{key}' (type: {value_type}, value: '{str_value}'): {e}. Storing as raw string or None.")
+                        config_data[key] = str_value # Fallback to string
+                logger.info(f"Loaded {len(config_data)} configurations from database.")
+                return config_data
+        except Exception as e:
+            logger.error(f"Error loading configurations from database: {e}", exc_info=True)
+            return {} # Return empty dict on error
+
+    async def save_configuration_parameter(self, key: str, value: Any, value_type: str, description: Optional[str] = None):
+        """Saves or updates a single configuration parameter in the database."""
+        query = """
+            INSERT INTO configurations (key, value, type, description, last_updated)
+            VALUES ($1, $2, $3, $4, NOW())
+            ON CONFLICT (key) DO UPDATE SET
+                value = EXCLUDED.value,
+                type = EXCLUDED.type,
+                description = EXCLUDED.description,
+                last_updated = NOW();
+        """
+        str_value = ""
+        if value_type == 'bool':
+            str_value = 'true' if value else 'false'
+        elif value_type == 'list':
+            str_value = json.dumps(value) # Store lists as JSON strings
+        elif value is None: # Handle None explicitly for other types
+            str_value = None # Store as NULL in DB if appropriate, or handle as empty string
+        else:
+            str_value = str(value)
+
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(query, key, str_value, value_type, description)
+            logger.debug(f"Saved configuration: {key} = {value} (Type: {value_type})")
+        except Exception as e:
+            logger.error(f"Error saving configuration parameter {key}: {e}", exc_info=True)
+
+    async def get_python_type_string(self, value: Any) -> str:
+        """Determines the storable type string for a Python value."""
+        if isinstance(value, bool): return 'bool'
+        if isinstance(value, int): return 'int'
+        if isinstance(value, float): return 'float'
+        if isinstance(value, list): return 'list'
+        if isinstance(value, str): return 'str'
+        # Fallback for other types, or raise error
+        logger.warning(f"Unsupported type for config persistence: {type(value)} for value '{value}'. Defaulting to 'str'.")
+        return 'str'
+
+    async def get_configuration_parameter(self, key: str) -> Optional[Any]:
+        """Fetches a single configuration parameter from the database."""
+        # This method might not be strictly necessary if all configs are loaded at once,
+        # but can be useful for specific lookups.
+        all_configs = await self.load_all_configurations()
+        return all_configs.get(key)
+
     async def insert_heartbeat(self, event_type: str = 'heartbeat', details: Optional[dict] = None):
         """Insert a new heartbeat or event into the bot_heartbeat table."""
         try:
@@ -1341,7 +1483,8 @@ class DatabaseClient:
                 # List all known application tables (main and backup)
                 # Add any other tables managed by the application if necessary (e.g., creator_wallets)
                 tables_to_drop = [
-                    'portfolio',          
+                    'configurations',     # Add the new table
+                    'portfolio',
                     'rugcheck',           # Depends on tokens
                     'trades',             # No explicit FK, but related to tokens
                     'migrations',         # Standalone or related? Assuming standalone for drop order
@@ -1537,10 +1680,11 @@ class DatabaseClient:
                     SELECT
                         mint, socials_score, timestamp AS token_creation_time,
                         marketCapSol AS creation_init_market_cap_sol,
+                        cooldown_until,
                         ROW_NUMBER() OVER (PARTITION BY mint ORDER BY timestamp ASC) as rn
                     FROM v_tokens vt WHERE mint = ANY($1::text[])
                 )
-                SELECT mint, token_creation_time, socials_score, creation_init_market_cap_sol
+                SELECT mint, token_creation_time, socials_score, creation_init_market_cap_sol, cooldown_until
                 FROM TokenCreationData WHERE rn = 1;
             """
 
@@ -1673,12 +1817,25 @@ class DatabaseClient:
                     if token_info_records_raw:
                         for r_rec in token_info_records_raw:
                             r_dict = dict(r_rec)
-                            mint_val, creation_time_val, socials_val, creation_mc_sol_val = r_dict.get('mint'), r_dict.get('token_creation_time'), r_dict.get('socials_score'), r_dict.get('creation_init_market_cap_sol')
-                            creation_time, socials, creation_mc_sol = pd.to_datetime(creation_time_val, errors='coerce', utc=True), pd.to_numeric(socials_val, errors='coerce'), pd.to_numeric(creation_mc_sol_val, errors='coerce')
+                            mint_val = r_dict.get('mint')
+                            creation_time_val = r_dict.get('token_creation_time')
+                            socials_val = r_dict.get('socials_score')
+                            creation_mc_sol_val = r_dict.get('creation_init_market_cap_sol')
+                            cooldown_until_val = r_dict.get('cooldown_until')
+
+                            creation_time = pd.to_datetime(creation_time_val, errors='coerce', utc=True)
+                            socials = pd.to_numeric(socials_val, errors='coerce')
+                            creation_mc_sol = pd.to_numeric(creation_mc_sol_val, errors='coerce')
+                            cooldown_until_ts = pd.to_datetime(cooldown_until_val, errors='coerce', utc=True)
+
                             if mint_val and pd.notna(creation_time):
-                                token_info_map[mint_val] = {'creation_time': creation_time, 'socials_score': socials, 'creation_init_market_cap_sol': creation_mc_sol}
+                                token_info_map[mint_val] = {'creation_time': creation_time, 
+                                                            'socials_score': socials, 
+                                                            'creation_init_market_cap_sol': creation_mc_sol,
+                                                            'cooldown_until': cooldown_until_ts
+                                                            }
                     
-                    required_final_cols = ['Open', 'High', 'Low', 'Close', 'Volume', 'market_cap_calculated', 'marketCapSol', 'creation_init_market_cap_sol', 'volatility', 'rugcheck_score', 'socials_score', 'token_creation_time']
+                    required_final_cols = ['Open', 'High', 'Low', 'Close', 'Volume', 'market_cap_calculated', 'marketCapSol', 'creation_init_market_cap_sol', 'volatility', 'rugcheck_score', 'socials_score', 'token_creation_time', 'cooldown_until']
                     
                     grouped_ohlcv = resampled_ohlcv_df.groupby('mint')
                     for mint_name in grouped_ohlcv.groups:
@@ -1700,18 +1857,19 @@ class DatabaseClient:
 
                         mint_specific_info = token_info_map.get(mint_name)
                         if mint_specific_info:
-                            combined_df['token_creation_time'], combined_df['socials_score'], combined_df['creation_init_market_cap_sol'] = mint_specific_info['creation_time'], mint_specific_info['socials_score'], mint_specific_info.get('creation_init_market_cap_sol', np.nan)
+                            combined_df['token_creation_time'], combined_df['socials_score'], combined_df['creation_init_market_cap_sol'], combined_df['cooldown_until'] = mint_specific_info['creation_time'], mint_specific_info['socials_score'], mint_specific_info.get('creation_init_market_cap_sol', np.nan), mint_specific_info.get('cooldown_until', pd.NaT)
                         else:
-                            combined_df['token_creation_time'], combined_df['socials_score'], combined_df['creation_init_market_cap_sol'] = pd.NaT, 100, np.nan
+                            combined_df['token_creation_time'], combined_df['socials_score'], combined_df['creation_init_market_cap_sol'], combined_df['cooldown_until'] = pd.NaT, 100, np.nan, pd.NaT
                         
                         for r_col in required_final_cols:
                             if r_col not in combined_df.columns: combined_df[r_col] = np.nan 
 
-                        for col in ['rugcheck_score', 'socials_score', 'token_creation_time', 'creation_init_market_cap_sol']: combined_df[col] = combined_df[col].ffill().bfill()
+                        for col in ['rugcheck_score', 'socials_score', 'token_creation_time', 'creation_init_market_cap_sol', 'cooldown_until']: combined_df[col] = combined_df[col].ffill().bfill()
                         
                         combined_df['rugcheck_score'] = combined_df['rugcheck_score'].fillna(10000).astype(int)
                         combined_df['socials_score'] = combined_df['socials_score'].fillna(100).astype(int)
                         combined_df['creation_init_market_cap_sol'] = pd.to_numeric(combined_df['creation_init_market_cap_sol'], errors='coerce').fillna(0.0)
+                        combined_df['cooldown_until'] = pd.to_datetime(combined_df['cooldown_until'], errors='coerce', utc=True) 
 
                         for col in ['Open', 'High', 'Low', 'Close', 'Volume', 'market_cap_calculated', 'marketCapSol', 'volatility']:
                             combined_df[col] = pd.to_numeric(combined_df[col], errors='coerce').fillna(0.0)
@@ -1719,10 +1877,20 @@ class DatabaseClient:
                         final_df = combined_df[(combined_df.index >= start_date) & (combined_df.index < end_date)].copy()
 
                         if not final_df.empty and all(col in final_df.columns for col in required_final_cols):
-                            astype_dict = {'Open': float, 'High': float, 'Low': float, 'Close': float, 'Volume': float, 'market_cap_calculated': float, 'marketCapSol': float, 'creation_init_market_cap_sol': float, 'volatility': float, 'rugcheck_score': int, 'socials_score': int}
-                            final_df = final_df[required_final_cols].astype(astype_dict)
+                            astype_dict = {
+                                'Open': float, 'High': float, 'Low': float, 'Close': float, 
+                                'Volume': float, 'market_cap_calculated': float, 
+                                'marketCapSol': float, 'creation_init_market_cap_sol': float, 
+                                'volatility': float, 'rugcheck_score': int, 'socials_score': int
+                                # 'token_creation_time' and 'cooldown_until' will remain datetime64[ns, UTC]
+                            }
+                            # Select only required columns before astype to avoid issues with datetime cols
+                            cols_for_astype = [col for col in required_final_cols if col in astype_dict]
+                            final_df[cols_for_astype] = final_df[cols_for_astype].astype(astype_dict)
+                            
+                            # Ensure index is datetime
                             final_df.index = pd.to_datetime(final_df.index, utc=True)
-                            results_dict[mint_name] = final_df
+                            results_dict[mint_name] = final_df[required_final_cols] # Ensure column order
                         else:
                             logger.warning(f"No valid data or missing columns for {mint_name} after final processing. Skipping.")
                 

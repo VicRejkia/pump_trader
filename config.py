@@ -8,6 +8,16 @@ SOL_TO_BUY = 0.5                            # Amount of SOL to spend on each buy
 PLAY_BUY_SOUND = False                      # Play the buy sound when a buy is made
 PLAY_SELL_SOUND = False                     # Play the sell sound when a sell is made
 
+# --- NEW TRADING MODE ---
+# Options: "simulate", "paper_trading", "live"
+# "simulate": Records trades to DB as if they happened, no external calls for execution. (Your current behavior)
+# "paper_trading": Calls live execution APIs, signs transactions, but DOES NOT send to network. Simulates fills.
+# "live": Full live trading, sends transactions to the network.
+TRADING_MODE = "simulate"                   # <<< SET YOUR DEFAULT MODE HERE (e.g., "simulate" for safety)
+DEFAULT_SLIPPAGE_PERCENT = 15.0                # Default slippage percentage for trades (e.g., 1.0 for 1%)
+DEFAULT_BUY_POOL = "auto"
+DEFAULT_SELL_POOL = "auto"
+
 # --- New Multi-Stage Sell Logic Configuration ---
 FIRST_SELL_PROFIT_MARGIN = 70.0             # Desired profit margin % on the *total initial investment* for the first TP sell
 FIRST_SELL_PERCENT = 35.0                   # % of *initial* tokens to sell at First TP (e.g., 50.0 for 50%)
@@ -34,6 +44,7 @@ MIN_MARKETCAP_THRESHOLD = 3600              # Minimum market cap threshold in US
 DEFAULT_MARKETCAP_THRESHOLD = 45000         # Minimum market cap threshold in USD to search for buy opportunities
 MIN_VOLATILITY = 0.18                       # Minimum volatility threshold in % to search for buy opportunities
 DEFAULT_TIME_INTERVALL = 10                 # Time interval for checking volatility, volume and marketcap in minutes
+MAX_TOKEN_COUNT_PER_CREATOR = 10            # Maximum number of tokens per creator to consider token as safe
 
 # --- Re-Buy Logic Configuration ---
 USE_TREND_REVERSAL_CONFIRMATION = True      # Master switch to enable/disable this feature
@@ -44,7 +55,7 @@ TREND_REVERSAL_RSI_NEUTRAL_LEVEL = 45.0     # RSI level considered neutral for t
 INDICATOR_LOOKBACK_HOURS = 1                # Lookback period for indicators in hours
 
 # Indicator Time Periods
-APPLY_TREND_REVERSAL_ON_SELL_REASONS = ["🛑 Stop Loss", "🆘 Emergency SL (MCap)", "↘️ Trailing SL", "🛡️ Breakeven SL", "manual_override"]
+_APPLY_TREND_REVERSAL_ON_SELL_REASONS = ["🛑 Stop Loss", "🆘 Emergency SL (MCap)", "↘️ Trailing SL", "🛡️ Breakeven SL", "manual_override"]
 RSI_PERIOD = 14
 BBANDS_PERIOD = 20
 BBANDS_STD_DEV = 2.0
@@ -60,6 +71,7 @@ MIN_TOKEN_AGE = 30                          # Minimum token age in minutes befor
 _MAX_SUBSCRIPTION_BATCH: int = 100           # For batch unsubscription ... can be deleted?
 _TOTAL_SUPPLY = 1000000000                   # Assumed total supply if not provided
 _PUMPPORTAL_WS = "wss://pumpportal.fun/api/data"
+_PUMPORTAL_LOCAL_API_URL = "https://pumpportal.fun/api/trade-local"
 
 _RUGCHECK_AUTH_API = "https://api.rugcheck.xyz/auth/login/solana"
 _RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens"
@@ -81,7 +93,7 @@ TELEGRAM_INTERACTION = True
 
 # --- Metadata Processor Configuration ---
 HEARTBEAT_EMIT_INTERVAL_SECONDS = 60  # Interval for emitting heartbeat messages in seconds
-RESTART_GAP_THRESHOLD_SECONDS = 300  # Threshold for restart gap in seconds
+RESTART_GAP_THRESHOLD_SECONDS = 600  # Threshold for restart gap in seconds
 # --- Metadata Processor Configuration ---
 
 # --- Socials Processor Configuration ---

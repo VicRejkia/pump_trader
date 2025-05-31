@@ -62,8 +62,6 @@ OBSERVATION_SPACE_DIM: int = len(OBSERVATION_FEATURES)
 # Note: Observation normalization is handled by Stable Baselines3's VecNormalize.
 # The bounds defined here are the *expected* range after normalization,
 # but the Box space itself is defined by the shape only.
-# OBSERVATION_LOW: float = -1.0 # Removed as normalization is external
-# OBSERVATION_HIGH: float = 1.0 # Removed as normalization is external
 OBSERVATION_LOW: float = -np.inf 
 OBSERVATION_HIGH: float = np.inf 
 
@@ -85,6 +83,16 @@ RL_TUNABLE_PARAMETERS: List[Tuple[str, float, float, type]] = [
     # ('DEFAULT_TIME_INTERVALL', 1, 60, int),
     ('SOL_TO_BUY', 0.1, 0.5, float), # Add buy amount later if needed
     ('MC_DROP_THRESHOLD_RL', 5.0, 95.0, float), # 5% to 70% market cap drop threshold
+    ('USE_TREND_REVERSAL_CONFIRMATION', 0.0, 1.0, float), # Agent outputs float; env converts (e.g., > 0.5 is True)
+    ('STOP_LOSS_COOLDOWN_MINUTES', 0.0, 60.0, int),
+    ('TREND_REVERSAL_RECENCY_HOURS', 0.25, 12.0, int),
+    ('TREND_REVERSAL_RSI_NEUTRAL_LEVEL', 30.0, 60.0, float),
+    ('INDICATOR_LOOKBACK_HOURS', 0.25, 6.0, int),
+    ('RSI_PERIOD', 7.0, 28.0, int),
+    ('BBANDS_PERIOD', 10.0, 30.0, int),
+    ('BBANDS_STD_DEV', 1.5, 2.5, float),
+    ('FAST_EMA_PERIOD', 5.0, 15.0, int),
+    ('SLOW_EMA_PERIOD', 15.0, 30.0, int),
 ]
 ACTION_SPACE_DIM: int = len(RL_TUNABLE_PARAMETERS)
 

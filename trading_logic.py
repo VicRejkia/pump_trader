@@ -14,6 +14,7 @@ from utils import (
     play_buy_opportunity_sound, play_sell_sl_sound_async, play_sell_tp_sound_async,
     format_buy_order_log, format_sell_order_log, calculate_trend_indicators 
 )
+from live_trader_pumpportal import execute_live_pumpportal_trade
 from telegram_interface import send_telegram_message
 
 class TradingManager:
@@ -113,7 +114,7 @@ class TradingManager:
 
                 # --- Trend Reversal Confirmation Logic (Revised with two-pronged Stage 1) ---
                 if self.config.get('USE_TREND_REVERSAL_CONFIRMATION', False):
-                    apply_reversal_on_configured_reasons = self.config.get('APPLY_TREND_REVERSAL_ON_SELL_REASONS', [])
+                    apply_reversal_on_configured_reasons = self.config.get('_APPLY_TREND_REVERSAL_ON_SELL_REASONS', [])
                     recency_hours = self.config.get('TREND_REVERSAL_RECENCY_HOURS', 6) 
                     rsi_neutral_level_config = self.config.get('TREND_REVERSAL_RSI_NEUTRAL_LEVEL', 45) # New config
 
@@ -482,7 +483,7 @@ class TradingManager:
             )
 
             # Determine if a hard cooldown should be set
-            sell_reasons_triggering_hard_cooldown = self.config.get('APPLY_TREND_REVERSAL_ON_SELL_REASONS', []) # Using the same list
+            sell_reasons_triggering_hard_cooldown = self.config.get('_APPLY_TREND_REVERSAL_ON_SELL_REASONS', []) # Using the same list
             trigger_hard_cooldown = False
             for configured_reason_substring in sell_reasons_triggering_hard_cooldown:
                 if configured_reason_substring in reason: # 'reason' is the sell_reason string passed to execute_sell
@@ -530,6 +531,8 @@ class TradingManager:
 
     async def execute_buy(self, mint: str, current_price: float, market_cap_sol: float):
         """🛒 Simulate buy order execution and record in portfolio."""
+        trading_mode = self.config['TRADING_MODE'].lower()
+
         if current_price <= 0:
             logger.error(f"❌ Attempted to buy {mint} with invalid price: {current_price}")
             return

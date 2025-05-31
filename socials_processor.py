@@ -18,7 +18,7 @@ from state_manager import GlobalState
 from utils import is_valid_website, is_valid_telegram, is_valid_twitter
 
 # --- Configuration for Retries ---
-MAX_FETCH_ATTEMPTS = 4 # Allow 2 attempts (initial + 1 retry)
+MAX_FETCH_ATTEMPTS = 3 # Allow 2 attempts (initial + 1 retry)
 DEPRIORITIZED_PRIORITY = float('inf') # Very low priority for requeueing after max attempts
 
 class SocialsProcessor:
@@ -61,42 +61,55 @@ class SocialsProcessor:
         # Shared HTTP client for website verification
         self._verify_client = httpx.AsyncClient(timeout=10.0, follow_redirects=True, limits=httpx.Limits(max_connections=5))
 
-    async def _fetch_metadata(self, uri: str) -> dict | None:
+    async def _fetch_metadata(self, uri: str) -> dict | str | None: # Return type includes str for errors
         """Fetches JSON metadata from a given URI."""
         if not uri or not uri.startswith('http'):
             logger.debug(f"Invalid or missing URI for social metadata: {uri}")
-            return None
+            return None # Indicates an issue with the URI itself, not a fetch failure
+
+        response_obj_for_logging = None # To hold the response object for logging in case of JSONDecodeError
+
         try:
             async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
                 # Use GET, respecting redirects
                 response = await client.get(uri)
+                response_obj_for_logging = response # Store for logging if parsing fails
                 response.raise_for_status() # Raise HTTPStatusError for bad responses (4xx or 5xx)
+
                 # Check content type - be lenient but prefer application/json
                 content_type = response.headers.get('content-type', '').lower()
-                if 'application/json' in content_type:
-                     metadata = response.json()
-                     logger.debug(f"Successfully fetched JSON metadata from {uri}")
-                     return metadata
-                else:
-                    logger.warning(f"Unexpected content type '{content_type}' received from metadata URI {uri}. Expected JSON.")
-                    # Attempt to parse anyway, might be mislabeled
-                    try:
-                        metadata = response.json()
-                        logger.debug(f"Successfully parsed non-JSON labeled metadata from {uri}")
-                        return metadata
-                    except json.JSONDecodeError:
-                         logger.error(f"Failed to decode non-JSON content from {uri}. Content: {response.text[:200]}...")
-                         return "Error :" + response.text[:200]
+                
+                try:
+                    # First attempt: standard JSON parsing
+                    metadata = response.json()
+                    logger.debug(f"Successfully fetched and parsed JSON metadata from {uri} (Content-Type: {content_type})")
+                    return metadata
+                except json.JSONDecodeError as e_initial:
+                    # If standard parsing fails, check the reason
+                    if "Invalid control character" in str(e_initial):
+                        logger.warning(f"Initial JSON parsing for {uri} failed due to control characters: {e_initial}. Attempting with strict=False.")
+                        try:
+                            # Second attempt: parse with strict=False
+                            metadata_strict_false = json.loads(response.text, strict=False)
+                            logger.debug(f"Successfully parsed JSON from {uri} with strict=False.")
+                            return metadata_strict_false
+                        except json.JSONDecodeError as e_strict:
+                            logger.error(f"Failed to decode JSON from {uri} even with strict=False. Error: {e_strict}. Response text: {response.text[:200]}...")
+                            return "Error Decode StrictFail" # Specific error string
+                    else:
+                        # Initial parsing failed for a reason other than control characters
+                        logger.error(f"Failed to decode JSON from {uri} (Content-Type: {content_type}). Error: {e_initial}. Response text: {response.text[:200]}...")
+                        if 'application/json' not in content_type and content_type: # If content type wasn't JSON and it failed
+                             return f"Error NotJSON: {content_type}"
+                        return "Error Decode" # General decode error for JSON content type
 
         except httpx.HTTPStatusError as e:
             status_code = e.response.status_code
             logger.warning(f"HTTP error fetching social metadata from {uri}: {status_code} {e.response.reason_phrase}")
-            if 400 <= status_code < 500:
-                return f"Error {status_code}" # Client-side error (e.g., 404)
-            elif 500 <= status_code < 600:
-                return f"Error {status_code}" # Server-side error
-            else:
-                return f"Error {status_code}" # Other HTTP error
+            # Return specific error strings based on status code
+            if 400 <= status_code < 500: return f"Error HTTP {status_code}"
+            elif 500 <= status_code < 600: return f"Error HTTP {status_code}" # Potentially retryable
+            else: return f"Error HTTP {status_code}"
         except httpx.TimeoutException:
             logger.warning(f"Timeout fetching social metadata from {uri}")
             return "Error Timeout"
@@ -104,15 +117,18 @@ class SocialsProcessor:
             # Includes connection errors, DNS errors, etc.
             logger.warning(f"Request error fetching social metadata from {uri}: {e}")
             return "Error Request"
-        except json.JSONDecodeError as e:
-            # Use response variable safely, might not be defined if request failed earlier
-            response_text = getattr(e, 'response', None) and getattr(e.response, 'text', '')
-            logger.error(f"Failed to decode JSON from {uri}: {e}. Response text: {response_text[:200]}...")
-            return "Error Decode"
-        except Exception as e:
-            logger.error(f"Unexpected error fetching social metadata from {uri}: {e}", exc_info=True)
+        except Exception as e: # Catch-all for other unexpected errors during the process
+            try:
+                response_text_snippet = response_obj_for_logging.text[:200] if response_obj_for_logging and hasattr(response_obj_for_logging, 'text') else 'Response text not available'
+                logger.error(f"Unexpected error processing social metadata from {uri}: {e}. Response text: {response_text_snippet}...", exc_info=True)
+            except: # Fallback if response_obj_for_logging is not set or .text fails
+                logger.error(f"Unexpected error processing social metadata from {uri}: {e}. Response text could not be retrieved.", exc_info=True)
             return "Error Unknown"
-        return None
+        
+        # This line should ideally not be reached if all paths return.
+        # Adding it as a safeguard, but it implies a logic flaw if hit.
+        logger.error(f"Reached unexpected end of _fetch_metadata for {uri}. This indicates a logic error.")
+        return "Error Fallback"
 
     async def _verify_website_details(self, url: str, token_name: str, token_symbol: str) -> dict:
         """Attempts to verify website reachability, security, and relevance."""
@@ -527,7 +543,7 @@ class SocialsProcessor:
         try:
             sol_price = await self.state.get_sol_price()
             if sol_price is None:
-                logger.warning("⚠ SOL_PRICE not updated yet; skipping RSocials check queue refresh.")
+                logger.warning("⚠ SOL_PRICE not updated yet; skipping Socials check queue refresh.")
                 return False # Indicate refresh skipped
 
             # Clear the current queue before repopulating
@@ -583,13 +599,13 @@ class SocialsProcessor:
         """Worker task that processes tokens from the Socials Check queue with rate limiting."""
         logger.info("🚀 Socials worker started.")
         last_refresh_time = 0
-        refresh_interval = 30 # Refresh queue every 30 seconds
+        queue_refresh_interval = 30 # Refresh queue every 30 seconds
 
         while not self.state.shutdown_event.is_set():
             try:
                 # --- Refresh Queue Periodically ---
                 current_time = asyncio.get_event_loop().time()
-                if self.queue.empty() or (current_time - last_refresh_time > refresh_interval):
+                if self.queue.empty() or (current_time - last_refresh_time > queue_refresh_interval):
                     logger.debug("🔄 Triggering Socials Check queue refresh...")
                     refreshed = await self._refresh_queue()
                     if refreshed:
@@ -629,12 +645,6 @@ class SocialsProcessor:
                         task_completed = True
                         self.fetch_attempts.pop(mint, None) # Clear attempts
                         continue
-                    if not is_active:
-                            logger.debug(f"Token {mint} is no longer active. Skipping Socials Check.")
-                            self.queue.task_done()
-                            task_completed = True
-                            self.fetch_attempts.pop(mint, None) # Clear attempts
-                            continue
 
                     # Fetch, store, check score, etc.
                     process_status = await self.process_token(mint)

@@ -6,7 +6,7 @@ import subprocess
 import time
 import json
 from datetime import datetime, timezone
-from logger import setup_logging, log_info, log_debug, log_error, log_warning, log_critical
+from logger import setup_logging, rotate_log_file, log_info, log_debug, log_error, log_warning, log_critical
 from config import TELEGRAM_INTERACTION
 
 # --- Project Setup ---
@@ -118,6 +118,10 @@ async def ensure_process_terminated(process_handle: subprocess.Popen, process_na
 
 async def main_controller(args):
     setup_logging()
+    # Perform log rotation when the main controller starts
+    log_info("Main controller performing initial log rotation.")
+    rotate_log_file()
+    # setup_logging() will be called again inside rotate_log_file, which is fine.
     log_info("--- Main Controller Started ---")
 
     trading_bot_process = None
@@ -155,7 +159,10 @@ async def main_controller(args):
         if args.backup: trading_bot_cli_args.append("--backup")
         if args.params_file: trading_bot_cli_args.extend(["--params-file", args.params_file])
         if args.rl_agent_path: trading_bot_cli_args.extend(["--rl-agent-path", args.rl_agent_path])
-
+        
+        # Add the --no-log-rotate flag when starting from the controller
+        trading_bot_cli_args.append("--no-log-rotate")
+        
         if not await start_trading_bot(trading_bot_cli_args):
             log_critical("Trading Bot could not be started initially. Exiting controller.")
             return

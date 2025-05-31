@@ -233,7 +233,11 @@ class TradingEnv(gym.Env):
         for i, param_config in enumerate(rl_config.RL_TUNABLE_PARAMETERS):
             param_name, _, _, p_type = param_config
             val = clipped_action[i]
-            new_params[param_name] = p_type(np.round(val)) if p_type == int else float(val)
+            if param_name == "USE_TREND_REVERSAL_CONFIRMATION":
+                # Convert float action (0.0-1.0) to boolean for this parameter
+                new_params[param_name] = bool(val > 0.5)
+            else:
+                new_params[param_name] = p_type(np.round(val)) if p_type == int else float(val)
         self.current_parameters = new_params
 
     def _run_trading_logic_step(self) -> Tuple[float, float]:

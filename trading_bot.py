@@ -62,13 +62,14 @@ class TradingBot:
     """Main class for running the trading bot."""
 
     # Modify __init__ to accept RL agent path
-    def __init__(self, cleanup: bool = False, backup: bool = False, params_file: str = None, rl_agent_path: str = None):
+    def __init__(self, cleanup: bool = False, backup: bool = False, params_file: str = None, rl_agent_path: str = None, no_log_rotate: bool = False):
         """Initialize the TradingBot with optional cleanup, backup, GA params file, and RL agent path."""
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         self.state = GlobalState.get_instance() # Bot's instance of GlobalState
         self.cleanup = cleanup
         self.backup = backup
+        self.no_log_rotate = no_log_rotate # Store the flag
         self.params_file = params_file
         self.rl_agent_path = rl_agent_path
         self.rl_agent = None
@@ -463,6 +464,13 @@ class TradingBot:
                                     asyncio.create_task(self.ws_handler.unsubscribe_new_tokens())
                                 else:
                                     log_warning("WS handler not ready for UNSUB_NEWTOKEN.")
+                            elif command_upper.startswith("UNSUB_TOKEN_TRADES_"):
+                                mint_to_unsubscribe = current_command_content[len("UNSUB_TOKEN_TRADES_"):]
+                                log_info(":no_bell: UNSUB_TOKEN_TRADES command processed.")
+                                if self.ws_handler:
+                                    asyncio.create_task(self.ws_handler.unsubscribe_token_trades(mint_to_unsubscribe, 'manual_unsubscribe'))
+                                else:
+                                    log_warning("WS handler not ready for UNSUB_NEWTOKEN.")
                             else:
                                 log_warning(f"Unknown command '{current_command_content}' in {COMMAND_FILE}. Ignoring.")
                             
@@ -825,11 +833,15 @@ class TradingBot:
         is_main_thread = threading.current_thread() is threading.main_thread()
 
         if is_main_thread:
-            log_info("Running in main thread. Performing log rotation and registering signal handlers.")
-            rotate_log_file() # Rotate log file at the very start
+            if not self.no_log_rotate:
+                log_info("Running in main thread. Log rotation enabled. Performing log rotation...")
+                rotate_log_file() # Rotate log file at the very start
+            else:
+                log_info("Running in main thread. Log rotation disabled by controller.")
             self.register_signal_handlers() # Register signals if in main thread
         else:
              log_info("Running in a secondary thread. Skipping log rotation and signal handlers.")
+        
         
         setup_logging() # Setup logging regardless
 
@@ -941,7 +953,7 @@ class TradingBot:
                 await self.db_client.cleanup_db(cleanup_flag=True)
             
             log_info(":rocket: [bold]Initializing database schema...[/bold]")
-            await self.db_client.init_db()
+            # await self.db_client.init_db()
             await self.db_client.restore_creator_wallets()
             log_info(":white_check_mark: Database schema initialized and wallets restored.")
 
@@ -1089,6 +1101,7 @@ if __name__ == "__main__":
     parser.add_argument("--backup", action="store_true", help="Backup database before starting the bot.")
     parser.add_argument("--params-file", type=str, default=None, help="Path to JSON file containing optimized parameters from GA.")
     parser.add_argument("--rl-agent-path", type=str, default=None, help="Path to the trained RL agent model file (e.g., .zip for SB3). Overrides --params-file.")
+    parser.add_argument("--no-log-rotate", action="store_true", help="Disable log rotation on startup (used when run by a controller).")
     args = parser.parse_args()
 
     if os.name == 'nt':
@@ -1107,7 +1120,8 @@ if __name__ == "__main__":
             cleanup=args.cleanup,
             backup=args.backup,
             params_file=args.params_file,
-            rl_agent_path=args.rl_agent_path
+            rl_agent_path=args.rl_agent_path,
+            no_log_rotate=args.no_log_rotate # Pass the flag
         )
         try:
             await bot_instance.main()

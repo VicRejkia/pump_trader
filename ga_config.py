@@ -75,12 +75,56 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
         "values": list(range(0, 101, 10)), # 0 to 80 score in steps of 10
         "type": int
     },
-    # DEFAULT_TIME_INTERVALL is removed as optimization target - less impactful than thresholds
-    # {
-    #     "name": "DEFAULT_TIME_INTERVALL", # Typo kept for consistency
-    #     "values": list(range(10, 61, 10)),
-    #     "type": int
-    # },
+    {
+        "name": "USE_TREND_REVERSAL_CONFIRMATION",
+        "values": [0, 1], # 0 for False, 1 for True
+        "type": int # Will be cast to bool in the backtester/logic
+    },
+    {
+        "name": "STOP_LOSS_COOLDOWN_MINUTES",
+        "values": list(range(0, 61, 5)), # e.g., 0 to 60 minutes in 5-min steps
+        "type": int
+    },
+    {
+        "name": "TREND_REVERSAL_RECENCY_HOURS",
+        "values": list(range(1, 25, 1)), # e.g., 1 to 24 hours
+        "type": int
+    },
+    {
+        "name": "TREND_REVERSAL_RSI_NEUTRAL_LEVEL",
+        "values": [round(x * 2.5 + 30, 1) for x in range(0, 13)], # e.g., 30.0 to 60.0 in 2.5 steps
+        "type": float
+    },
+    {
+        "name": "INDICATOR_LOOKBACK_HOURS",
+        "values": list(range(1, 13, 1)), # e.g., 1 to 12 hours
+        "type": int
+    },
+    {
+        "name": "RSI_PERIOD",
+        "values": list(range(7, 29, 1)), # e.g., 7 to 28
+        "type": int
+    },
+    {
+        "name": "BBANDS_PERIOD",
+        "values": list(range(10, 31, 2)), # e.g., 10 to 30
+        "type": int
+    },
+    {
+        "name": "BBANDS_STD_DEV",
+        "values": [round(x * 0.1 + 1.5, 1) for x in range(0, 11)], # e.g., 1.5 to 2.5
+        "type": float
+    },
+    {
+        "name": "FAST_EMA_PERIOD",
+        "values": list(range(5, 16, 1)), # e.g., 5 to 15
+        "type": int
+    },
+    {
+        "name": "SLOW_EMA_PERIOD",
+        "values": list(range(15, 31, 1)), # e.g., 15 to 30
+        "type": int
+    },
 ]
 
 # --- GA Settings ---
@@ -132,8 +176,8 @@ DATA_SPLIT: Dict[str, float] = {
 
 # Overall date range for historical data fetch
 # NOTE: THESE DATES ARE EXAMPLES - ADJUST TO YOUR ACTUAL DATA RANGE
-HISTORICAL_DATA_START_TS: datetime = datetime(2025, 4, 19, 13, 0, 0, tzinfo=timezone.utc)
-HISTORICAL_DATA_END_TS: datetime = datetime(2025, 5, 3, 23, 59, 0, tzinfo=timezone.utc) # Extended range example
+HISTORICAL_DATA_START_TS: datetime = datetime(2025, 5, 23, 14, 0, 0, tzinfo=timezone.utc)
+HISTORICAL_DATA_END_TS: datetime = datetime(2025, 5, 23, 23, 59, 0, tzinfo=timezone.utc) # Extended range example
 
 # --- Backtester Settings ---
 BACKTEST_INITIAL_CAPITAL: float = 100.0 # In SOL
