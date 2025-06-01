@@ -32,7 +32,7 @@ try:
     import stable_baselines3
     # Import the specific algorithm class you trained (e.g., PPO)
     from stable_baselines3 import PPO # Or SAC, TD3, etc.
-    from stable_baselines3.common.vec_env import VecNormalize # Import VecNormalize
+    from stable_baselines3.common.vec_env import VecNormalize, DummyVecEnv # Import VecNormalize
     RL_AVAILABLE = True
 except ImportError:
     RL_AVAILABLE = False
@@ -954,8 +954,8 @@ class TradingBot:
             
             log_info(":rocket: [bold]Initializing database schema...[/bold]")
             # await self.db_client.init_db()
-            await self.db_client.restore_creator_wallets()
-            log_info(":white_check_mark: Database schema initialized and wallets restored.")
+            # await self.db_client.restore_creator_wallets()
+            # log_info(":white_check_mark: Database schema initialized and wallets restored.")
 
         except Exception as db_setup_err:
             log_critical(f"CRITICAL: Failed database setup: {db_setup_err}", exc_info=True)
