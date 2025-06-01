@@ -6,7 +6,7 @@ import inspect
 import threading
 import os
 import time
-import json # Ensure json is imported
+import json
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone, timedelta
@@ -18,7 +18,7 @@ from database_handler import DatabaseClient
 from trading_logic import TradingManager
 from websocket_handler import WebSocketHandler
 from logger import setup_logging, log_info, log_debug, log_error, log_warning, log_critical, rotate_log_file
-from state_manager import GlobalState # Assuming GlobalState is in state_manager.py
+from state_manager import GlobalState
 from trade_processor import trade_worker
 from sol_price_api import update_sol_price
 from rugcheck_handler import Rugcheck
@@ -418,10 +418,17 @@ class TradingBot:
                     )
                     await asyncio.sleep(5)
                 except Exception as e:
-                    log_error(f":x: [bold red]Monitor task error[/bold red]: {e}\n{traceback.format_exc()}")
-                await asyncio.sleep(60) # Sleep longer if monitor loop has error
+                    # Log error from the monitor loop itself if format_task_monitor_rich fails critically
+                    log_error(f":x: [bold red]Monitor task loop error (after formatting call)[/bold red]: {e}", exc_info=True)
+                    await asyncio.sleep(10) 
+                
+                monitor_interval = self.config.get('MONITOR_TASK_INTERVAL_SECONDS', 30)
+                await asyncio.sleep(monitor_interval)
+
         except asyncio.CancelledError:
             log_info(":stop_sign: Monitor task shutting down")
+        finally:
+            log_debug("Monitor task finished.")
 
     async def command_listener(self):
         """Periodically checks the command file for commands."""

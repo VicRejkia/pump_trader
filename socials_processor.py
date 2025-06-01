@@ -10,6 +10,7 @@ from urllib.parse import urlparse, urlsplit
 import httpx
 from bs4 import BeautifulSoup # Added for HTML parsing
 from decimal import Decimal
+from datetime import datetime, timezone, timedelta
 
 from database_handler import DatabaseClient
 from logger import logger
@@ -18,7 +19,7 @@ from state_manager import GlobalState
 from utils import is_valid_website, is_valid_telegram, is_valid_twitter
 
 # --- Configuration for Retries ---
-MAX_FETCH_ATTEMPTS = 3 # Allow 2 attempts (initial + 1 retry)
+MAX_FETCH_ATTEMPTS = 3 
 DEPRIORITIZED_PRIORITY = float('inf') # Very low priority for requeueing after max attempts
 
 class SocialsProcessor:
@@ -46,11 +47,12 @@ class SocialsProcessor:
         self.penalty_no_twitter = self.config['SOCIALS_PENALTY_NO_TWITTER']
         self.penalty_invalid_twitter_type = self.config['SOCIALS_PENALTY_INVALID_TWITTER_TYPE']
         self.penalty_invalid_twitter_url = self.config['SOCIALS_PENALTY_INVALID_TWITTER_URL']
-        self.penalty_action_trigger_url = self.config['SOCIALS_PENALTY_ACTION_TRIGGER_URL'] # New penalty
+        self.penalty_action_trigger_url = self.config['SOCIALS_PENALTY_ACTION_TRIGGER_URL'] 
         self.penalty_duplicate_links = self.config['SOCIALS_PENALTY_DUPLICATE_LINKS']
 
         self.bonus_domain_match = self.config['SOCIALS_BONUS_DOMAIN_MATCH']
-        # self.bonus_news_gov_website = self.config['SOCIALS_BONUS_NEWS_GOV_WEBSITE'] # Currently 0 in config
+        self.bonus_news_gov_website = self.config.get('SOCIALS_BONUS_NEWS_GOV_WEBSITE', 0)
+
 
         self.score_failed_metadata = self.config['SOCIALS_SCORE_FAILED_METADATA']
 
@@ -61,74 +63,64 @@ class SocialsProcessor:
         # Shared HTTP client for website verification
         self._verify_client = httpx.AsyncClient(timeout=10.0, follow_redirects=True, limits=httpx.Limits(max_connections=5))
 
-    async def _fetch_metadata(self, uri: str) -> dict | str | None: # Return type includes str for errors
-        """Fetches JSON metadata from a given URI."""
+    async def _fetch_metadata(self, uri: str) -> dict | str | None:
         if not uri or not uri.startswith('http'):
             logger.debug(f"Invalid or missing URI for social metadata: {uri}")
-            return None # Indicates an issue with the URI itself, not a fetch failure
+            return "Error InvalidURI"
 
-        response_obj_for_logging = None # To hold the response object for logging in case of JSONDecodeError
-
+        response_obj_for_logging = None
         try:
             async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-                # Use GET, respecting redirects
                 response = await client.get(uri)
-                response_obj_for_logging = response # Store for logging if parsing fails
+                response_obj_for_logging = response
+                
+                content_type = response.headers.get('content-type', '').lower()
+                # Check for non-JSON content types before attempting to parse
+                if not ('application/json' in content_type or 'text/json' in content_type or not content_type): # Allow empty content type for some misconfigured servers
+                    if content_type.startswith('image/') or content_type.startswith('application/octet-stream') or content_type.startswith('text/html'): # More specific checks
+                        logger.warning(f"Metadata fetch for {uri} returned non-JSON content-type: {content_type}. Response text: {response.text[:200]}...")
+                        return f"Error NotJSONContentType: {content_type}"
+                
                 response.raise_for_status() # Raise HTTPStatusError for bad responses (4xx or 5xx)
 
-                # Check content type - be lenient but prefer application/json
-                content_type = response.headers.get('content-type', '').lower()
-                
                 try:
-                    # First attempt: standard JSON parsing
                     metadata = response.json()
                     logger.debug(f"Successfully fetched and parsed JSON metadata from {uri} (Content-Type: {content_type})")
                     return metadata
                 except json.JSONDecodeError as e_initial:
-                    # If standard parsing fails, check the reason
                     if "Invalid control character" in str(e_initial):
                         logger.warning(f"Initial JSON parsing for {uri} failed due to control characters: {e_initial}. Attempting with strict=False.")
                         try:
-                            # Second attempt: parse with strict=False
                             metadata_strict_false = json.loads(response.text, strict=False)
                             logger.debug(f"Successfully parsed JSON from {uri} with strict=False.")
                             return metadata_strict_false
                         except json.JSONDecodeError as e_strict:
                             logger.error(f"Failed to decode JSON from {uri} even with strict=False. Error: {e_strict}. Response text: {response.text[:200]}...")
-                            return "Error Decode StrictFail" # Specific error string
+                            return "Error DecodeFailedStrict"
                     else:
-                        # Initial parsing failed for a reason other than control characters
                         logger.error(f"Failed to decode JSON from {uri} (Content-Type: {content_type}). Error: {e_initial}. Response text: {response.text[:200]}...")
-                        if 'application/json' not in content_type and content_type: # If content type wasn't JSON and it failed
-                             return f"Error NotJSON: {content_type}"
-                        return "Error Decode" # General decode error for JSON content type
+                        return "Error DecodeGeneral"
 
         except httpx.HTTPStatusError as e:
             status_code = e.response.status_code
             logger.warning(f"HTTP error fetching social metadata from {uri}: {status_code} {e.response.reason_phrase}")
-            # Return specific error strings based on status code
-            if 400 <= status_code < 500: return f"Error HTTP {status_code}"
-            elif 500 <= status_code < 600: return f"Error HTTP {status_code}" # Potentially retryable
-            else: return f"Error HTTP {status_code}"
+            return f"Error HTTP {status_code}"
         except httpx.TimeoutException:
             logger.warning(f"Timeout fetching social metadata from {uri}")
             return "Error Timeout"
         except httpx.RequestError as e:
-            # Includes connection errors, DNS errors, etc.
             logger.warning(f"Request error fetching social metadata from {uri}: {e}")
             return "Error Request"
-        except Exception as e: # Catch-all for other unexpected errors during the process
+        except Exception as e:
             try:
                 response_text_snippet = response_obj_for_logging.text[:200] if response_obj_for_logging and hasattr(response_obj_for_logging, 'text') else 'Response text not available'
                 logger.error(f"Unexpected error processing social metadata from {uri}: {e}. Response text: {response_text_snippet}...", exc_info=True)
-            except: # Fallback if response_obj_for_logging is not set or .text fails
+            except:
                 logger.error(f"Unexpected error processing social metadata from {uri}: {e}. Response text could not be retrieved.", exc_info=True)
-            return "Error Unknown"
+            return "Error UnknownFetch"
         
-        # This line should ideally not be reached if all paths return.
-        # Adding it as a safeguard, but it implies a logic flaw if hit.
         logger.error(f"Reached unexpected end of _fetch_metadata for {uri}. This indicates a logic error.")
-        return "Error Fallback"
+        return "Error FallbackFetch"
 
     async def _verify_website_details(self, url: str, token_name: str, token_symbol: str) -> dict:
         """Attempts to verify website reachability, security, and relevance."""
@@ -137,7 +129,6 @@ class SocialsProcessor:
         token_symbol_lower = (token_symbol or "").lower()
 
         try:
-            # Basic URL format check
             parsed_url = urlsplit(url)
             if not all([parsed_url.scheme, parsed_url.netloc]):
                  results['error'] = "Invalid URL format"
@@ -145,17 +136,14 @@ class SocialsProcessor:
                  return results
 
             results['uses_https'] = parsed_url.scheme == 'https'
-
-            # Attempt connection
             logger.debug(f"Attempting to verify website: {url}")
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'} # Basic user agent
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
             response = await self._verify_client.get(url, headers=headers)
-            response.raise_for_status() # Check for 4xx/5xx errors
+            response.raise_for_status() 
 
             results['is_reachable'] = True
             logger.debug(f"Website Verify Success ({url}): Reachable (Status: {response.status_code})")
 
-            # Basic content check (if HTML)
             content_type = response.headers.get('content-type', '').lower()
             if 'text/html' in content_type:
                 soup = BeautifulSoup(response.text, 'html.parser')
@@ -166,7 +154,6 @@ class SocialsProcessor:
                 if meta_desc and meta_desc.get('content'):
                     page_content += meta_desc['content'].lower()
 
-                # Check if token name or symbol appears (simple check)
                 if token_name_lower and token_name_lower in page_content:
                     results['mentions_token'] = True
                     logger.debug(f"Website Verify Success ({url}): Found token name in title/desc.")
@@ -178,7 +165,6 @@ class SocialsProcessor:
             else:
                  logger.debug(f"Website Verify Info ({url}): Content type '{content_type}' not HTML, skipping content check.")
 
-
         except httpx.HTTPStatusError as e:
             results['error'] = f"HTTP Error {e.response.status_code}"
             logger.warning(f"Website Verify Fail ({url}): HTTP {e.response.status_code}")
@@ -186,7 +172,6 @@ class SocialsProcessor:
             results['error'] = "Timeout"
             logger.warning(f"Website Verify Fail ({url}): Timeout")
         except httpx.RequestError as e:
-            # Covers connection errors, DNS errors etc.
             results['error'] = f"Request Error: {type(e).__name__}"
             logger.warning(f"Website Verify Fail ({url}): Request Error ({type(e).__name__})")
         except ImportError:
@@ -195,10 +180,8 @@ class SocialsProcessor:
         except Exception as e:
             results['error'] = f"Unexpected Error: {type(e).__name__}"
             logger.error(f"Website Verify Fail ({url}): Unexpected error: {e}", exc_info=True)
-
         return results
 
-    # Added verification_results parameter
     def _calculate_social_score(self, social_data: dict, token_name: str | None, token_symbol: str | None, verification_results: dict | None) -> int:
         """
         Computes a social risk score based on social data and website verification.
@@ -208,335 +191,263 @@ class SocialsProcessor:
         token_name = (token_name or "").lower()
         token_symbol = (token_symbol or "").lower()
 
-        log_str = "Social Score Calculation: \n"
+        log_str = f"Social Score Calculation for token '{token_name if token_name else token_symbol}': \n"
         log_str += f" Website: {social_data.get('website')}\n Telegram: {social_data.get('telegram')}\n Twitter: {social_data.get('twitter')}\n"
 
-        # --- Website Check ---
-        website = social_data.get("website") or social_data.get("homepage") or social_data.get("url") or social_data.get("external_url") # Consolidate check
+        website = social_data.get("website") or social_data.get("homepage") or social_data.get("url") or social_data.get("external_url")
         is_disallowed_website = False
         parsed_domain = None
 
         if not website:
             total_penalty += self.penalty_no_website
-            # logger.debug(f"Social Score Penalty: +{self.penalty_no_website} (No Website URL provided)")
             log_str += f"\tPenalty: +{self.penalty_no_website} (No Website URL provided)\n"
         elif not isinstance(website, str):
             total_penalty += self.penalty_invalid_website_type
-            # logger.debug(f"Social Score Penalty: +{self.penalty_invalid_website_type} (Invalid Website type: {type(website)})")
             log_str += f"\tPenalty: +{self.penalty_invalid_website_type} (Invalid Website type: {type(website)})\n"
         else:
-            # 1. Parse domain and check if disallowed FIRST
             try:
-                parsed_domain = urlparse(website).netloc.lower().replace('www.', '')
-                if parsed_domain: # Ensure domain was parsed
+                parsed_domain_obj = urlparse(website)
+                parsed_domain = parsed_domain_obj.netloc.lower().replace('www.', '')
+                if parsed_domain: 
                     is_disallowed_website = any(parsed_domain == disallowed or parsed_domain.endswith('.' + disallowed) for disallowed in self.disallowed_domains)
                     if is_disallowed_website:
                         total_penalty += self.penalty_common_platform_website
-                        # logger.debug(f"Social Score Penalty: +{self.penalty_common_platform_website} (Website URL domain '{parsed_domain}' is disallowed, skipping further checks)")
                         log_str += f"\tPenalty: +{self.penalty_common_platform_website} (Website URL domain '{parsed_domain}' is disallowed)\n"
-                else:
-                    logger.warning(f"Could not parse domain from website URL: {website}")
-                    # Treat as invalid URL? Apply penalty? For now, just log.
-                    # total_penalty += self.penalty_website_invalid_url # Or a specific penalty for parsing failure
+                else: # Invalid URL structure if no netloc
+                    logger.warning(f"Could not parse domain from website URL: {website} (likely invalid structure)")
+                    total_penalty += self.penalty_website_invalid_url 
+                    log_str += f"\tPenalty: +{self.penalty_website_invalid_url} (Website URL '{website}' could not be parsed for domain)\n"
+                    is_disallowed_website = True # Treat as disallowed if unparsable to prevent further checks
 
             except Exception as e:
                  logger.warning(f"Error parsing website URL '{website}' for disallowed check: {e}")
-                 # Apply penalty? For now, just log.
-                 # total_penalty += self.penalty_website_invalid_url
+                 total_penalty += self.penalty_website_invalid_url # Penalize if parsing fails
+                 log_str += f"\tPenalty: +{self.penalty_website_invalid_url} (Error parsing website URL '{website}')\n"
+                 is_disallowed_website = True # Treat as disallowed to prevent further checks
 
-            # 2. If NOT disallowed, proceed with verification results
-            if not is_disallowed_website:
+
+            if not is_disallowed_website: # Only proceed if website is structurally valid and not disallowed
                 if verification_results is None:
-                    # Should not happen if website URL exists and isn't disallowed, but handle defensively
                     total_penalty += self.penalty_website_verify_skipped
-                    # logger.warning(f"Social Score Penalty: +{self.penalty_website_verify_skipped} (Website verification skipped for {website})")
                     log_str += f"\tPenalty: +{self.penalty_website_verify_skipped} (Website verification skipped)\n"
                 elif verification_results['error']:
-                    # Add penalty based on error type
-                    if "Invalid URL" in verification_results['error']:
-                        total_penalty += self.penalty_website_invalid_url
-                    elif "Timeout" in verification_results['error']:
-                        total_penalty += self.penalty_website_timeout
-                    elif "HTTP Error" in verification_results['error']:
-                        total_penalty += self.penalty_website_http_error
-                    else: # Other request errors, unexpected errors
-                        total_penalty += self.penalty_website_other_error
-                    # logger.debug(f"Social Score Penalty: +{total_penalty} (Website verification failed: {verification_results['error']})")
-                    log_str += f"\tPenalty: +{total_penalty} (Website verification failed: {verification_results['error']})\n"
-                else:
-                    # Website is reachable, apply finer penalties/bonuses
+                    error_penalty_map = {
+                        "Invalid URL format": self.penalty_website_invalid_url,
+                        "Timeout": self.penalty_website_timeout,
+                        "HTTP Error": self.penalty_website_http_error # Default for HTTP errors
+                    }
+                    # More specific HTTP error penalties
+                    if "HTTP Error 404" in verification_results['error'] or "HTTP Error 403" in verification_results['error']: # Example
+                        specific_http_penalty = self.penalty_website_http_error # Could be different
+                        penalty_to_add = specific_http_penalty
+                    else:
+                        # General mapping or default
+                        penalty_key_part = verification_results['error'].split(':')[0].strip() # "Request Error" or "HTTP Error 400"
+                        penalty_to_add = self.penalty_website_other_error # Default
+                        for key_fragment, penalty_val_name in error_penalty_map.items():
+                             if key_fragment in verification_results['error']:
+                                 penalty_to_add = getattr(self, penalty_val_name.lower().replace("socials_penalty_", "penalty_") , self.penalty_website_other_error) # find attribute
+                                 break
+                    
+                    total_penalty += penalty_to_add
+                    log_str += f"\tPenalty: +{penalty_to_add} (Website verification failed: {verification_results['error']})\n"
+                else: # Website is reachable
                     if not verification_results['uses_https']:
                         total_penalty += self.penalty_no_https
-                        # logger.debug(f"Social Score Penalty: +{self.penalty_no_https} (Website does not use HTTPS)")
                         log_str += f"\tPenalty: +{self.penalty_no_https} (Website does not use HTTPS)\n"
                     if not verification_results['mentions_token']:
                         total_penalty += self.penalty_website_no_mention
-                        #logger.debug(f"Social Score Penalty: +{self.penalty_website_no_mention} (Website does not mention token name/symbol)")
                         log_str += f"\tPenalty: +{self.penalty_website_no_mention} (Website does not mention token name/symbol)\n"
 
-                    # Bonus for domain matching (only if not disallowed)
-                    try:
-                        # Domain already parsed as parsed_domain
-                        if parsed_domain:
-                            if token_name and (parsed_domain.startswith(token_name) or token_name in parsed_domain):
-                                total_penalty += self.bonus_domain_match
-                                # logger.debug(f"Social Score Bonus: {self.bonus_domain_match} (Website domain '{parsed_domain}' matches name '{token_name}')")
-                                log_str += f"\tBonus: +{self.bonus_domain_match} (Website domain '{parsed_domain}' matches name '{token_name}')\n"
-                            elif token_symbol and (parsed_domain.startswith(token_symbol) or token_symbol in parsed_domain):
-                                total_penalty += self.bonus_domain_match
-                                # logger.debug(f"Social Score Bonus: {self.bonus_domain_match} (Website domain '{parsed_domain}' matches symbol '{token_symbol}')")
-                                log_str += f"\tBonus: +{self.bonus_domain_match} (Website domain '{parsed_domain}' matches symbol '{token_symbol}')\n"
-                    except Exception:
-                        pass # Ignore errors during bonus check
-
-            # 3. Check for allowed news/gov domains (runs regardless of disallowed status)
-            # if parsed_domain: # Only check if domain was successfully parsed
-            #     try:
-            #         is_allowed_news_gov = (
-            #             any(parsed_domain == allowed or parsed_domain.endswith('.' + allowed) for allowed in self.allowed_news_domains)
-            #             or parsed_domain.endswith('.gov')
-            #         )
-            #         if is_allowed_news_gov:
-            #             # total_penalty += self.bonus_news_gov_website # Apply bonus/penalty if configured
-            #             # logger.debug(f"Social Score Info: Website URL domain '{parsed_domain}' is an allowed news/gov domain.")
-            #             log_str += f"\tInfo: Website URL domain '{parsed_domain}' is an allowed news/gov domain.\n"
-            #         # else: # Optional: Log if domain is NOT allowed news/gov
-            #         #    logger.debug(f"Social Score Info: Website URL domain '{parsed_domain}' is not in allowed news/gov list.")
-            #     except Exception:
-            #         pass # Ignore parsing errors for this check too
-
-            # Bonus if website is from major news outlet
-            try:
-                parsed_domain = urlparse(website).netloc.lower().replace('www.', '')
-                # Check against base domains
-                # Check against allowed news/gov domains
+                    if parsed_domain: # Bonus only if domain was parsed and website is not disallowed
+                        if token_name and (parsed_domain.startswith(token_name) or token_name in parsed_domain):
+                            total_penalty += self.bonus_domain_match
+                            log_str += f"\tBonus: {self.bonus_domain_match} (Website domain '{parsed_domain}' matches name '{token_name}')\n"
+                        elif token_symbol and (parsed_domain.startswith(token_symbol) or token_symbol in parsed_domain):
+                            total_penalty += self.bonus_domain_match
+                            log_str += f"\tBonus: {self.bonus_domain_match} (Website domain '{parsed_domain}' matches symbol '{token_symbol}')\n"
+            
+            # Allowed News/Gov Domains (runs if website URL was valid enough to parse domain)
+            if parsed_domain:
                 is_allowed_news_gov = (
                     any(parsed_domain == allowed or parsed_domain.endswith('.' + allowed) for allowed in self.allowed_news_domains)
                     or parsed_domain.endswith('.gov')
                 )
                 if is_allowed_news_gov:
-                    total_penalty += self.bonus_news_gov_website # Apply bonus/penalty if configured
-                    # logger.debug(f"Social Score Info: Website URL domain '{parsed_domain}' is an allowed news/gov domain.")
-                    log_str += f"\tBonus: +{self.bonus_news_gov_website} (Website URL domain '{parsed_domain}' is an allowed news/gov domain)\n"
-                # else: # Optional: Log if domain is NOT allowed news/gov
-                #    logger.debug(f"Social Score Info: Website URL domain '{parsed_domain}' is not in allowed news/gov list.")
-            except Exception:
-                pass # Ignore parsing errors for this check too
+                    total_penalty += self.bonus_news_gov_website 
+                    log_str += f"\tBonus: {self.bonus_news_gov_website} (Website URL domain '{parsed_domain}' is an allowed news/gov domain)\n"
 
         # --- Telegram Check ---
-        telegram = social_data.get("telegram") or social_data.get("tg") # Common keys
+        telegram = social_data.get("telegram") or social_data.get("tg")
         if not telegram:
             total_penalty += self.penalty_no_telegram
-            # logger.debug(f"Social Score Penalty: +{self.penalty_no_telegram} (No Telegram)")
             log_str += f"\tPenalty: +{self.penalty_no_telegram} (No Telegram)\n"
         elif not isinstance(telegram, str):
             total_penalty += self.penalty_invalid_telegram_type
-            # logger.debug(f"Social Score Penalty: +{self.penalty_invalid_telegram_type} (Invalid Telegram type: {type(telegram)})")
             log_str += f"\tPenalty: +{self.penalty_invalid_telegram_type} (Invalid Telegram type: {type(telegram)})\n"
         elif not is_valid_telegram(telegram):
             total_penalty += self.penalty_invalid_telegram_url
-            # logger.debug(f"Social Score Penalty: +{self.penalty_invalid_telegram_url} (Invalid Telegram URL: {telegram})")
             log_str += f"\tPenalty: +{self.penalty_invalid_telegram_url} (Invalid Telegram URL: {telegram})\n"
 
         # --- Twitter Check ---
-        twitter = social_data.get("twitter") or social_data.get("x") # Common keys
+        twitter = social_data.get("twitter") or social_data.get("x")
         if not twitter:
             total_penalty += self.penalty_no_twitter
-            #logger.debug(f"Social Score Penalty: +{self.penalty_no_twitter} (No Twitter/X)")
             log_str += f"\tPenalty: +{self.penalty_no_twitter} (No Twitter/X)\n"
         elif not isinstance(twitter, str):
             total_penalty += self.penalty_invalid_twitter_type
-            # logger.debug(f"Social Score Penalty: +{self.penalty_invalid_twitter_type} (Invalid Twitter type: {type(twitter)})")
             log_str += f"\tPenalty: +{self.penalty_invalid_twitter_type} (Invalid Twitter type: {type(twitter)})\n"
         elif not is_valid_twitter(twitter):
             total_penalty += self.penalty_invalid_twitter_url
-            # logger.debug(f"Social Score Penalty: +{self.penalty_invalid_twitter_url} (Invalid Twitter URL: {twitter})")
             log_str += f"\tPenalty: +{self.penalty_invalid_twitter_url} (Invalid Twitter URL: {twitter})\n"
 
         # --- Action Trigger URL Check ---
-        action_trigger_penalty_applied = False # Flag to apply penalty only once even if multiple links trigger it
-        for link_type, link_url in [("Website", website), ("Telegram", telegram), ("Twitter", twitter)]:
-            if link_url and isinstance(link_url, str):
+        action_trigger_penalty_applied = False
+        for link_type, link_url_val in [("Website", website), ("Telegram", telegram), ("Twitter", twitter)]:
+            if link_url_val and isinstance(link_url_val, str):
                 try:
-                    parsed = urlparse(link_url)
-                    # Check for mailto links
-                    if parsed.scheme == 'mailto':
-                        if not action_trigger_penalty_applied:
-                            total_penalty += self.penalty_action_trigger_url
-                            log_str += f"\tPenalty: +{self.penalty_action_trigger_url} ({link_type} URL is a mailto link: {link_url})\n"
-                            action_trigger_penalty_applied = True
-                        continue # No need for further checks on this link
-
-                    # Check for tel: links
-                    if parsed.scheme == 'tel':
-                        if not action_trigger_penalty_applied:
-                            total_penalty += self.penalty_action_trigger_url
-                            log_str += f"\tPenalty: +{self.penalty_action_trigger_url} ({link_type} URL is a tel link: {link_url})\n"
-                            action_trigger_penalty_applied = True
-                        continue
-
-                    # Check for sms: links
-                    if parsed.scheme == 'sms':
-                        if not action_trigger_penalty_applied:
-                            total_penalty += self.penalty_action_trigger_url
-                            log_str += f"\tPenalty: +{self.penalty_action_trigger_url} ({link_type} URL is an sms link: {link_url})\n"
-                            action_trigger_penalty_applied = True
-                        continue
-
-                    # Check for Twitter/X intent links
-                    if parsed.netloc in ('twitter.com', 'x.com') and parsed.path.startswith('/intent/'):
-                         if not action_trigger_penalty_applied:
-                            total_penalty += self.penalty_action_trigger_url
-                            log_str += f"\tPenalty: +{self.penalty_action_trigger_url} ({link_type} URL is a Twitter/X intent link: {link_url})\n"
-                            action_trigger_penalty_applied = True
-                        # continue # Might add other checks later
-
+                    parsed = urlparse(link_url_val)
+                    is_action_link = parsed.scheme in ['mailto', 'tel', 'sms'] or \
+                                     (parsed.netloc in ('twitter.com', 'x.com') and parsed.path.startswith('/intent/'))
+                    if is_action_link and not action_trigger_penalty_applied:
+                        total_penalty += self.penalty_action_trigger_url
+                        log_str += f"\tPenalty: +{self.penalty_action_trigger_url} ({link_type} URL is an action trigger: {link_url_val})\n"
+                        action_trigger_penalty_applied = True
                 except Exception as e:
-                    logger.warning(f"Could not parse URL for action trigger check ({link_type}: {link_url}): {e}")
+                    logger.warning(f"Could not parse URL for action trigger check ({link_type}: {link_url_val}): {e}")
 
         # --- Duplicate Link Check ---
-        valid_links = [link for link in [website, telegram, twitter] if link] # Get non-null links
-        if len(valid_links) > len(set(valid_links)): # Check if number of links > number of unique links
+        valid_links = [link for link in [website, telegram, twitter] if isinstance(link, str) and link]
+        if len(valid_links) > len(set(valid_links)):
             total_penalty += self.penalty_duplicate_links
-            #logger.debug(f"Social Score Penalty: +{self.penalty_duplicate_links} (Duplicate URLs found for different social types)")
             log_str += f"\tPenalty: +{self.penalty_duplicate_links} (Duplicate URLs found for different social types)\n"
 
-        # Ensure score is within 0-100 range
         final_score = min(max(total_penalty, 0), 100)
-        #logger.debug(f"Calculated Social Score (Penalty): {final_score}")
         log_str += f"\tFinal Score: {final_score}\n"
         logger.debug(log_str)
         return final_score
 
     async def _update_token_socials(self, mint: str, website: str | None, telegram: str | None, twitter: str | None, score: int):
-        """Updates the token record in the database with social info."""
+        """Updates the token record in the database with social info and robustly updates last_checked."""
         try:
             async with self.db_client.pool.acquire() as conn:
+                # Always update socials_last_checked to NOW()
+                # Update other fields only if they are not None (or score is always updated)
                 await conn.execute("""
                     UPDATE tokens
-                    SET website = $2,
-                        telegram = $3,
-                        twitter = $4,
-                        socials_score = $5,
-                        socials_last_checked = NOW()
+                    SET website = COALESCE($2, website),  -- Keep existing if new is None
+                        telegram = COALESCE($3, telegram),
+                        twitter = COALESCE($4, twitter),
+                        socials_score = $5,               -- Always update score
+                        socials_last_checked = NOW()      -- Always update last_checked
                     WHERE mint = $1
                 """, mint, website, telegram, twitter, score)
-            logger.debug(f"💾 Updated socials for {mint}. Score: {score} (Website: {'Y' if website else 'N'}, TG: {'Y' if telegram else 'N'}, TW: {'Y' if twitter else 'N'})")
+            logger.debug(f"💾 Updated socials for {mint}. Score: {score}, LastChecked: NOW (Website: {'Y' if website else 'N'}, TG: {'Y' if telegram else 'N'}, TW: {'Y' if twitter else 'N'})")
             return True
         except Exception as e:
             logger.error(f"❌ Failed to update socials in DB for {mint}: {e}", exc_info=True)
             return False
 
-    async def process_token(self, mint: str):
-        """Fetches, scores, and updates social info for a given token mint."""
+    async def process_token(self, mint: str) -> str | bool: # Return type indicates success (True) or error string
         logger.debug(f"Processing socials for token: {mint}")
         token_info = None
+        primary_uri = None
+        token_name = ''
+        token_symbol = ''
+        metadata_fetch_error = None # To store error from primary or secondary URI fetch
+
         try:
-            # 1. Fetch token URI, name, symbol from DB
             async with self.db_client.pool.acquire() as conn:
-                # Fetch uri, name, symbol from tokens table
-                # Use COALESCE for name/symbol in case they are NULL in DB
-                token_info = await conn.fetchrow("""
+                token_info_row = await conn.fetchrow("""
                     SELECT uri, COALESCE(name, '') as name, COALESCE(symbol, '') as symbol
-                    FROM tokens
-                    WHERE mint = $1
+                    FROM tokens WHERE mint = $1
                 """, mint)
 
-            if not token_info:
+            if not token_info_row:
                 logger.warning(f"Token {mint} not found in DB for social processing.")
-                return "NOT_FOUND"
-            
-            if not token_info['uri']:
-                logger.debug(f"Token {mint} has no metadata URI. Skipping social processing.")
-                # Optionally update DB to mark as checked with no URI?
-                # await self._update_token_socials(mint, None, None, None, 100) # Max penalty if no URI? Or specific score?
-                return "NO_URI"
+                return "NOT_FOUND" # Permanent error, no need to retry this mint soon
 
-            # 2. Fetch metadata from URI
-            metadata = await self._fetch_metadata(token_info['uri'])
-            # Check if metadata fetch failed (returned None or an error string)
-            if metadata is None or (isinstance(metadata, str) and metadata.startswith("Error")):
-                error_reason = metadata if metadata else "Unknown fetch failure" # Use specific error or default
-                logger.warning(f"Metadata fetch failed for {mint} from {token_info['uri']}: {error_reason}. Cannot process socials.")
-                # Update DB to mark as checked but failed, using high penalty score
-                await self._update_token_socials(mint, None, None, None, self.score_failed_metadata)
-                # Return the specific error reason for retry logic
-                return error_reason if isinstance(metadata, str) else "FAILED_METADATA_UNKNOWN" # Propagate specific error
+            primary_uri = token_info_row['uri']
+            token_name = token_info_row['name']
+            token_symbol = token_info_row['symbol']
 
-            # 3. Extract social links (handle different possible keys)
-            website_url = metadata.get("website") or metadata.get("homepage") or metadata.get("url") or metadata.get("external_url")
-            telegram_url = metadata.get("telegram") or metadata.get("tg")
-            twitter_url = metadata.get("twitter") or metadata.get("x")
+            # --- Initial URI Check ---
+            if not primary_uri or not primary_uri.strip(): # Check for empty or whitespace-only string
+                logger.debug(f"Token {mint} has no valid primary metadata URI. Attempting fallback.")
+                metadata_fetch_error = "NO_PRIMARY_URI" # Specific status
+                metadata = None # No metadata from primary URI
+            else:
+                metadata = await self._fetch_metadata(primary_uri)
 
-            # Basic type validation
-            if website_url is not None and not isinstance(website_url, str):
-                logger.warning(f"Invalid type for website link in metadata for {mint}: {type(website_url)}. Treating as null.")
-                website_url = None
-            if telegram_url is not None and not isinstance(telegram_url, str):
-                logger.warning(f"Invalid type for telegram link in metadata for {mint}: {type(telegram_url)}. Treating as null.")
-                telegram_url = None
-            if twitter_url is not None and not isinstance(twitter_url, str):
-                logger.warning(f"Invalid type for twitter link in metadata for {mint}: {type(twitter_url)}. Treating as null.")
-                twitter_url = None
-
-            social_links_for_scoring = {
-                "website": website_url,
-                "telegram": telegram_url,
-                "twitter": twitter_url
-            }
-            # 4. Check if website is disallowed and Verify Details (if applicable)
-            verification_results = None
-            is_disallowed_website = False
-            parsed_domain = None # Define parsed_domain here for broader scope
-
-            if website_url:
-                # Parse domain and check if disallowed FIRST
-                try: # Inner try for parsing
-                    parsed_domain = urlparse(website_url).netloc.lower().replace('www.', '')
-                    if parsed_domain: # Ensure domain was parsed
-                        is_disallowed_website = any(parsed_domain == disallowed or parsed_domain.endswith('.' + disallowed) for disallowed in self.disallowed_domains)
-                        if is_disallowed_website:
-                             logger.debug(f"Website domain '{parsed_domain}' is disallowed for {mint}. Skipping verification.")
-                    else:
-                        logger.warning(f"Could not parse domain from website URL for {mint}: {website_url}")
-                except Exception as e: # Inner except for parsing
-                    logger.warning(f"Error parsing website URL '{website_url}' for disallowed check for {mint}: {e}")
-
-                # Log the decision logic
-                #logger.debug(f"Disallowed check for {mint}: URL='{website_url}', Parsed Domain='{parsed_domain}', Is Disallowed={is_disallowed_website}")
-
-                # Only verify if the website exists AND it's NOT disallowed
-                if not is_disallowed_website:
-                    logger.debug(f"Executing website verification for {mint} (URL: {website_url})")
-                    # Correctly indented under the outer `if website_url:`
-                    verification_results = await self._verify_website_details(website_url, token_info['name'], token_info['symbol'])
+            # --- Fallback to Rugcheck URI if primary failed ---
+            if isinstance(metadata, str) or metadata is None: # Primary fetch failed or URI was invalid
+                if isinstance(metadata, str): metadata_fetch_error = metadata # Store error from primary attempt
+                
+                logger.info(f"Primary URI for {mint} failed ({metadata_fetch_error}). Checking rugcheck for tokenMeta_uri.")
+                async with self.db_client.pool.acquire() as conn:
+                    rugcheck_uri_row = await conn.fetchrow("SELECT tokenMeta_uri FROM rugcheck WHERE mint = $1", mint)
+                
+                if rugcheck_uri_row and rugcheck_uri_row['tokenmeta_uri'] and rugcheck_uri_row['tokenmeta_uri'].strip() and rugcheck_uri_row['tokenmeta_uri'] != primary_uri:
+                    secondary_uri = rugcheck_uri_row['tokenmeta_uri']
+                    logger.info(f"Found secondary URI for {mint} from rugcheck: {secondary_uri}. Fetching...")
+                    metadata = await self._fetch_metadata(secondary_uri)
+                    if isinstance(metadata, str) or metadata is None: # Secondary also failed
+                         if isinstance(metadata, str): metadata_fetch_error = metadata # Store error from secondary attempt
+                         logger.warning(f"Secondary URI fetch for {mint} also failed ({metadata_fetch_error}).")
                 else:
-                     logger.debug(f"Skipping website verification for {mint} as domain '{parsed_domain}' is disallowed.")
+                    logger.info(f"No valid secondary URI found in rugcheck for {mint} or it's same as primary.")
+                    # metadata_fetch_error already holds the error from primary URI or "NO_PRIMARY_URI"
 
-            # 5. Calculate score (passing verification results)
-            # Correctly indented under the main `try:`
-            social_score = self._calculate_social_score(
-                social_links_for_scoring,
-                token_info['name'],
-                token_info['symbol'],
-                verification_results # Pass verification results
-            )
+            # --- Process metadata if successfully fetched ---
+            if isinstance(metadata, dict): # Successfully fetched metadata
+                website_url = metadata.get("website") or metadata.get("homepage") or metadata.get("url") or metadata.get("external_url")
+                telegram_url = metadata.get("telegram") or metadata.get("tg")
+                twitter_url = metadata.get("twitter") or metadata.get("x")
 
-            # 6. Update DB
-            # Correctly indented under the main `try:`
-            await self._update_token_socials(
-                mint,
-                website_url, # Use validated/extracted URLs
-                telegram_url,
-                twitter_url,
-                social_score
-            )
+                # Basic type validation
+                website_url = str(website_url) if website_url is not None and isinstance(website_url, (str, int, float)) else None
+                telegram_url = str(telegram_url) if telegram_url is not None and isinstance(telegram_url, (str, int, float)) else None
+                twitter_url = str(twitter_url) if twitter_url is not None and isinstance(twitter_url, (str, int, float)) else None
 
-            return True # Indicate success
-        # Correctly aligned with the main `try:` at line 338
+                social_links_for_scoring = {"website": website_url, "telegram": telegram_url, "twitter": twitter_url}
+                
+                verification_results = None
+                is_disallowed_website = False
+                parsed_domain_val = None
+
+                if website_url:
+                    try:
+                        parsed_domain_val_obj = urlparse(website_url)
+                        parsed_domain_val = parsed_domain_val_obj.netloc.lower().replace('www.', '')
+                        if parsed_domain_val:
+                            is_disallowed_website = any(parsed_domain_val == disallowed or parsed_domain_val.endswith('.' + disallowed) for disallowed in self.disallowed_domains)
+                        else: # Invalid structure
+                            is_disallowed_website = True 
+                    except Exception: # Parsing error
+                        is_disallowed_website = True
+                    
+                    if not is_disallowed_website:
+                        verification_results = await self._verify_website_details(website_url, token_name, token_symbol)
+
+                social_score = self._calculate_social_score(social_links_for_scoring, token_name, token_symbol, verification_results)
+                await self._update_token_socials(mint, website_url, telegram_url, twitter_url, social_score)
+                return True # Success
+
+            else: # All URI attempts failed
+                final_error_reason = metadata_fetch_error if metadata_fetch_error else "FAILED_METADATA_UNKNOWN"
+                logger.warning(f"Metadata fetch ultimately failed for {mint} after all URI checks. Reason: {final_error_reason}. Updating DB with failure score.")
+                await self._update_token_socials(mint, None, None, None, self.score_failed_metadata) # This updates last_checked
+                return final_error_reason # Propagate the error for worker to handle
+
         except Exception as e:
-            # Correctly indented under the `except:`
             logger.error(f"💥 Unexpected error processing socials for {mint}: {e}", exc_info=True)
+            # Attempt to update last_checked even on unexpected error to avoid immediate requeue loops
+            try:
+                await self._update_token_socials(mint, None, None, None, self.score_failed_metadata)
+            except Exception as db_e:
+                logger.error(f"Failed to update socials_last_checked for {mint} after unexpected error: {db_e}")
+            return "Error UnhandledProcessToken"
+
 
     async def _refresh_queue(self):
         """Refreshes the Socials Check priority queue based on token volume."""
@@ -544,66 +455,60 @@ class SocialsProcessor:
             sol_price = await self.state.get_sol_price()
             if sol_price is None:
                 logger.warning("⚠ SOL_PRICE not updated yet; skipping Socials check queue refresh.")
-                return False # Indicate refresh skipped
+                return False 
 
-            # Clear the current queue before repopulating
             while not self.queue.empty():
                 try:
                     self.queue.get_nowait()
-                    self.queue.task_done()
+                    self.queue.task_done() # Important to call task_done for each get
                 except asyncio.QueueEmpty:
                     break
-                except Exception as e:
-                    logger.error(f"Error clearing socials heck queue item: {e}")
+                except Exception as e: # Catch any other error during queue clear
+                    logger.error(f"Error clearing item from socials check queue: {e}")
+                    # If task_done fails or other error, break to prevent potential infinite loop here
+                    break
 
 
             async with self.db_client.pool.acquire() as conn:
-                # Fetch tokens that are active but don't have Socials Check data yet, ordered by volume
-                # Note: Volatility isn't directly calculated here, using volume as proxy per original code.
                 rows = await conn.fetch("""
                     SELECT t.mint, COALESCE(SUM(tr.sol_amount), 0) AS volume
                     FROM tokens t
-                    LEFT JOIN trades tr ON t.mint = tr.mint AND tr.timestamp >= NOW() - INTERVAL '1 hour' -- Consider recent volume
-                    WHERE t.is_active = TRUE AND (t.socials_score IS NULL OR t.socials_last_checked < NOW() - ($1 || ' minutes')::interval) -- Select tokens not checked recently
+                    LEFT JOIN trades tr ON t.mint = tr.mint AND tr.timestamp >= NOW() - INTERVAL '1 hour'
+                    WHERE t.is_active = TRUE AND (t.socials_score IS NULL OR t.socials_last_checked < NOW() - ($1 || ' minutes')::interval)
                     GROUP BY t.mint
                     ORDER BY volume DESC
-                """, str(self.config['SOCIALS_CHECK_REFRESH_INTERVAL'])) # Use refresh interval from config
+                """, str(self.config['SOCIALS_CHECK_REFRESH_INTERVAL']))
 
-                logger.debug(f"🔍 Found {len(rows)} active tokens missing Socials Check data for refresh.")
+                logger.debug(f"🔍 Found {len(rows)} active tokens potentially needing Socials Check for refresh.")
 
+                tokens_added = 0
                 if rows:
-                    tokens_added = 0 # Initialize counter
                     for row in rows:
                         mint = row["mint"]
                         volume = row["volume"] or Decimal(0)
                         priority = -float(volume)
                         current_attempts = self.fetch_attempts.get(mint, 0)
 
-                        # Only add if not already deprioritized (reached max attempts)
+                        # Only add if not already reached max attempts (deprioritized)
                         if current_attempts < MAX_FETCH_ATTEMPTS:
                              await self.queue.put((priority, mint))
                              tokens_added += 1
-                        # else:
-                        #      logger.debug(f"Token {mint} previously reached max fetch attempts ({current_attempts}), not adding during refresh.")
-
+                        else:
+                             logger.debug(f"Token {mint} previously reached max fetch attempts ({current_attempts}), not re-adding during this refresh cycle.")
                     logger.debug(f"🔄 Refreshed Socials Check queue. Added {tokens_added} tokens (current size: {self.queue.qsize()}).")
-                #else:
-                    # logger.debug("✅ No active tokens found needing Socials Check data during refresh.")
-            return True # Indicate refresh completed
+            return True
 
         except Exception as e:
             logger.error(f"❌ Critical error in _refresh_queue: {e}", exc_info=True)
-            return False # Indicate refresh failed
+            return False
         
     async def _worker(self):
-        """Worker task that processes tokens from the Socials Check queue with rate limiting."""
         logger.info("🚀 Socials worker started.")
         last_refresh_time = 0
-        queue_refresh_interval = 30 # Refresh queue every 30 seconds
+        queue_refresh_interval = 30 
 
         while not self.state.shutdown_event.is_set():
             try:
-                # --- Refresh Queue Periodically ---
                 current_time = asyncio.get_event_loop().time()
                 if self.queue.empty() or (current_time - last_refresh_time > queue_refresh_interval):
                     logger.debug("🔄 Triggering Socials Check queue refresh...")
@@ -611,125 +516,91 @@ class SocialsProcessor:
                     if refreshed:
                         last_refresh_time = current_time
                     else:
-                        # Avoid busy-looping if refresh fails repeatedly
                         await self.state.wait_or_interrupt(timeout=5)
-                        continue # Skip to next iteration if refresh failed
+                        continue 
 
-                # --- Get Token from Queue ---
                 if self.queue.empty():
-                    # logger.debug("Socials Check queue is empty, waiting...")
-                    await self.state.wait_or_interrupt(timeout=5) # Wait if queue is empty
+                    await self.state.wait_or_interrupt(timeout=5) 
                     continue
 
+                priority, mint = await asyncio.wait_for(self.queue.get(), timeout=1.0)
+                task_completed_flag = False
                 try:
-                    # Get highest priority item (lowest negative volume)
-                    priority, mint = await asyncio.wait_for(self.queue.get(), timeout=1.0)
-                    # logger.debug(f"Processing {mint} from Socials Check queue (Priority: {priority})")
-                except asyncio.TimeoutError:
-                    # logger.debug("Socials Check queue.get() timed out, queue might be empty or contested.")
-                    continue # Try again next loop
-                except Exception as q_err:
-                     logger.error(f"Error getting item from socials check queue: {q_err}")
-                     continue
-                
-                # --- Process Token ---
-                task_completed = False # Flag to ensure task_done is called correctly
-                try:
-                    # Check if token still exists and is active before fetching
-                    async with self.db_client.pool.acquire() as conn:
-                        is_active = await conn.fetchval("SELECT is_active FROM tokens WHERE mint = $1", mint)
+                    async with self.db_client.pool.acquire() as conn: # Check if token still exists and is active
+                        token_status = await conn.fetchrow("SELECT is_active, socials_last_checked FROM tokens WHERE mint = $1", mint)
 
-                    if is_active is None:
-                        logger.debug(f"Token {mint} no longer exists. Skipping Socials Check.")
+                    if not token_status or not token_status['is_active']:
+                        logger.debug(f"Token {mint} no longer exists or is inactive. Skipping Socials Check.")
                         self.queue.task_done()
-                        task_completed = True
-                        self.fetch_attempts.pop(mint, None) # Clear attempts
+                        task_completed_flag = True
+                        self.fetch_attempts.pop(mint, None) 
                         continue
+                    
+                    # Check if recently processed to avoid immediate re-processing due to queue race conditions
+                    if token_status['socials_last_checked']:
+                        time_since_last_check = datetime.now(timezone.utc) - token_status['socials_last_checked'].replace(tzinfo=timezone.utc)
+                        if time_since_last_check < timedelta(minutes=self.config['SOCIALS_CHECK_REFRESH_INTERVAL'] / 2): # Check if processed in less than half refresh interval
+                            logger.debug(f"Token {mint} was checked very recently ({time_since_last_check}). Skipping this queue item.")
+                            self.queue.task_done()
+                            task_completed_flag = True
+                            continue
 
-                    # Fetch, store, check score, etc.
-                    process_status = await self.process_token(mint)
 
-                    # --- Handle Retry/Deprioritize Logic ---
-                    # process_status can now be True, False, "NO_URI", "NOT_FOUND", or specific error strings like "Error 404", "Error Timeout", etc.
-                    if process_status is True: # Success
+                    process_status = await self.process_token(mint) # This now updates DB for failures too
+
+                    if process_status is True: 
                         logger.debug(f"✅ Successfully processed Socials Check for {mint}.")
-                        async with self.db_client.pool.acquire() as conn:
-                            try:
-                                await conn.execute('''
-                                    UPDATE tokens SET socials_last_checked = NOW() WHERE mint = $1
-                                ''', mint)
-                                logger.debug(f"Updated socials_last_checked for {mint} to NOW()")
-                            except Exception as e:
-                                logger.error(f"Error updating socials_last_checked for {mint}: {e}", exc_info=True)
-                        self.fetch_attempts.pop(mint, None) # Clear attempts on success
-
-                    elif process_status in ["NO_URI", "NOT_FOUND"] or (isinstance(process_status, str) and process_status.startswith("Error 4")): # No URI, Token Gone, or Client Error (4xx)
-                        status_reason = process_status
-                        logger.warning(f"Socials Check for {mint} failed with likely permanent error: {status_reason}. Deprioritizing immediately.")
-                        # Deprioritize immediately by setting attempts high and requeueing low
-                        self.fetch_attempts[mint] = MAX_FETCH_ATTEMPTS # Mark as max attempts reached
+                        self.fetch_attempts.pop(mint, None) 
+                    # "NO_URI", "NOT_FOUND" are permanent issues handled by process_token updating DB.
+                    # "Error InvalidURI" is also permanent.
+                    elif process_status in ["NO_PRIMARY_URI", "NOT_FOUND", "Error InvalidURI"]:
+                        logger.warning(f"Socials Check for {mint} failed with permanent error: {process_status}. It's now marked in DB and deprioritized.")
+                        self.fetch_attempts[mint] = MAX_FETCH_ATTEMPTS 
                         await self.queue.put((DEPRIORITIZED_PRIORITY, mint))
-
-                    elif process_status is False or (isinstance(process_status, str) and process_status.startswith("Error")): # General error or Transient Error (Timeout, Request, 5xx, Decode, Unknown)
-                        status_reason = process_status if isinstance(process_status, str) else "General processing error"
+                    # Other error strings from _fetch_metadata or process_token are transient or specific.
+                    elif isinstance(process_status, str) and process_status.startswith("Error"):
                         current_attempts = self.fetch_attempts.get(mint, 0) + 1
                         self.fetch_attempts[mint] = current_attempts
-                        logger.warning(f"🔄 Socials Check failed for {mint} ({status_reason}). Attempt {current_attempts}/{MAX_FETCH_ATTEMPTS}.")
+                        logger.warning(f"🔄 Socials Check failed for {mint} ({process_status}). Attempt {current_attempts}/{MAX_FETCH_ATTEMPTS}.")
 
                         if current_attempts < MAX_FETCH_ATTEMPTS:
-                            # Requeue with original priority for retry
-                            await self.queue.put((priority, mint))
+                            await self.queue.put((priority, mint)) # Requeue with original priority
                             logger.info(f"Retrying Socials Check for {mint} later (attempt {current_attempts}).")
                         else:
-                            # Max attempts reached for transient error, deprioritize
                             await self.queue.put((DEPRIORITIZED_PRIORITY, mint))
-                            logger.warning(f"Max socials check fetch attempts ({MAX_FETCH_ATTEMPTS}) reached for {mint} due to {status_reason}. Deprioritizing.")
-                            # Keep attempt count high so refresh doesn't re-add with high priority
+                            logger.warning(f"Max socials check fetch attempts ({MAX_FETCH_ATTEMPTS}) reached for {mint} due to {process_status}. Deprioritizing. It's marked in DB.")
+                    elif process_status is False: # Generic internal error in process_token not returning specific string
+                        logger.warning(f"📉 Socials Check processing failed generally for {mint}. Requeuing with original priority for now.")
+                        await self.queue.put((priority, mint)) 
+                        self.fetch_attempts.pop(mint, None) # Reset attempts for general error for now
 
-                    elif process_status is False:
-                        # General processing error (not 404 or timeout)
-                        logger.warning(f"📉 Socials Check processing failed for {mint} (not 404/timeout). Requeuing with original priority.")
-                        await self.queue.put((priority, mint)) # Requeue
-                        self.fetch_attempts.pop(mint, None) # Clear attempts counter
-
-                    # else block removed as logic is now handled within the elif conditions above
-                    
-
-                    # Mark task as done regardless of outcome (requeueing handles retries)
                     self.queue.task_done()
-                    task_completed = True
+                    task_completed_flag = True
 
-
+                except asyncio.TimeoutError:
+                    logger.debug("Socials Check queue.get() timed out.")
+                    # Do not call task_done if get() times out, as no item was retrieved.
                 except Exception as proc_err:
-                    logger.error(f"❌ Unexpected error processing socials check for token {mint}: {proc_err}", exc_info=True)
-                    # Requeue on unexpected errors during processing block
-                    await self.queue.put((priority, mint))
-                    # Clear fetch attempts counter as it was an unexpected error
-                    self.fetch_attempts.pop(mint, None)
-
+                    logger.error(f"❌ Unexpected error processing socials check item for token {mint if 'mint' in locals() else 'UNKNOWN'}: {proc_err}", exc_info=True)
+                    if 'mint' in locals() and 'priority' in locals() : # If mint and priority were obtained
+                         await self.queue.put((priority, mint)) # Requeue on unexpected errors
+                         self.fetch_attempts.pop(mint, None)
                 finally:
-                    # Ensure task_done is called even if processing fails, unless already called
-                    if not task_completed:
+                    if not task_completed_flag and 'mint' in locals(): # Ensure task_done is called if an error happened after .get() but before explicit task_done
                         try:
                             self.queue.task_done()
-                        except ValueError:
-                            logger.warning(f"Task_done already called for {mint} in finally block?")
+                        except ValueError: # If already done by preceding logic
+                            pass
                         except Exception as td_err:
-                            logger.error(f"Error calling task_done for {mint} in finally block: {td_err}")
-
-
+                            logger.error(f"Error calling task_done for {mint} in worker's finally block: {td_err}")
             except asyncio.CancelledError:
                 logger.info("⏹ Socials Check worker task cancelled.")
-                break # Exit loop cleanly on cancellation
+                break
             except Exception as e:
                 logger.error(f"💥 Unexpected error in Socials Check worker main loop: {e}", exc_info=True)
-                # Avoid busy-looping on persistent errors
                 await self.state.wait_or_interrupt(timeout=10)
-
         logger.info("🛑 Socials check worker shutting down.")
 
     def start(self) -> asyncio.Task:
-        """Creates and returns the asyncio task for the Socials Check worker."""
         logger.info("Creating Socials Check background task...")
-        # Ensure worker starts after initial setup (like wallet loading) is done
         return asyncio.create_task(self._worker(), name="socialscheck_worker")
