@@ -6,7 +6,7 @@ import asyncio
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 
-from logger import logger
+from bot_logger import logger
 from state_manager import GlobalState
 from utils import calculate_market_cap 
 from config import _TOTAL_SUPPLY # Import TOTAL_SUPPLY from config
@@ -67,6 +67,7 @@ async def trade_worker():
                 signature = data.get('signature')
                 sol_price = await state.get_sol_price() # Get current SOL price
                 sol_price = Decimal(sol_price)
+                precise_timestamp = data.get('received_at_timestamp', datetime.now(timezone.utc))
 
                 if not mint or not signature:
                     logger.warning(f"Skipping trade with missing mint or signature: {data}")
@@ -114,7 +115,7 @@ async def trade_worker():
                         market_cap_sol,
                         sol_price,
                         market_cap_calculated,
-                        datetime.now(timezone.utc) # Use current UTC time for timestamp
+                        precise_timestamp
                     ))
                     mints_in_batch.append(mint)
 

@@ -56,7 +56,7 @@ import matplotlib.pyplot as plt
 
 # --- Project Modules ---
 import rl_config
-from logger import logger, setup_logging
+from bot_logger import logger, setup_logging
 from database_handler import DatabaseClient
 from rl_environment import TradingEnv # Ensure TradingEnv takes lifespan info
 from utils import load_and_split_data, calculate_volatility, export_to_csv, NpEncoder # Import NpEncoder for saving

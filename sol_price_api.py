@@ -3,7 +3,7 @@ import asyncio
 import httpx
 import json
 from config import _SOL_PRICE_API_URL
-from logger import logger
+from bot_logger import logger
 from database_handler import DatabaseClient
 from state_manager import GlobalState
 

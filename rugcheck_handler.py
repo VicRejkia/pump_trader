@@ -20,7 +20,7 @@ from config import (
     RUGCHECK_SCORE_THRESHOLD
 )
 from database_handler import DatabaseClient
-from logger import logger
+from bot_logger import logger
 from state_manager import GlobalState
 from websocket_handler import WebSocketHandler
 from socials_processor import SocialsProcessor

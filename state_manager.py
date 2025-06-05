@@ -7,7 +7,7 @@ from asyncio import Queue
 from collections import deque
 import config # Import config to access INITIAL_SOL_BALANCE
 import json # Added for file writing
-from logger import logger
+from bot_logger import logger
 import os
 
 # Define the path for the shared SOL price file

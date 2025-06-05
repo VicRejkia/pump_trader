@@ -12,7 +12,7 @@ from solders.transaction import VersionedTransaction
 # from solana.rpc.types import TxOpts
 # from solana.rpc.commitment import Confirmed
 
-from logger import logger
+from bot_logger import logger
 # Import your main config module to access TRADING_MODE and other settings
 import config as bot_config # Use an alias
 

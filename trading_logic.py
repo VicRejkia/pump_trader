@@ -8,7 +8,7 @@ import json # Added for settings
 
 # Assuming these are in your project structure
 from database_handler import DatabaseClient # Type hint
-from logger import logger
+from bot_logger import logger
 from state_manager import GlobalState
 from utils import (
     play_buy_opportunity_sound, play_sell_sl_sound_async, play_sell_tp_sound_async,

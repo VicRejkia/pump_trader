@@ -17,7 +17,7 @@ import config as config_module
 from database_handler import DatabaseClient
 from trading_logic import TradingManager
 from websocket_handler import WebSocketHandler
-from logger import setup_logging, log_info, log_debug, log_error, log_warning, log_critical, rotate_log_file
+from bot_logger import setup_logging, log_info, log_debug, log_error, log_warning, log_critical, rotate_log_file
 from state_manager import GlobalState
 from trade_processor import trade_worker
 from sol_price_api import update_sol_price
@@ -390,45 +390,140 @@ class TradingBot:
         self._write_status({"bot_process_status": "STOPPED", "timestamp": datetime.now(timezone.utc).isoformat()})
 
     async def monitor_tasks(self):
-        """Monitor and log the status of background tasks."""
+        """Monitor and log the status of background tasks using Rich markup string."""
         try:
             while not self.state.shutdown_event.is_set():
                 try:
+                    # --- Gather General Bot Data ---
+                    sol_amount_raw = await self.state.get_current_sol_balance()
+                    sol_amount = sol_amount_raw if sol_amount_raw is not None else 0.0
                     rug_queue_size = self.state.get_rugcheck_queue().qsize()
-                    tokens_subscribed = list(await self.state.get_token_subscriptions())
-                    task_status = [f"{task.get_name()}: {'[bold yellow]done[/bold yellow]' if task.done() else '[bold green]running[/bold green]'}\n" for task in self.tasks]
-                    sol_amount = await self.state.get_current_sol_balance()
+                    socials_queue_size = self.state.get_socialscheck_queue().qsize()
+                    
+                    open_trades_count_str = "[dim white]N/A[/dim white]"
+                    if self.db_client and self.db_client.pool:
+                        try:
+                            active_positions = await self.db_client.get_active_buy_positions()
+                            open_trades_count_str = f"[yellow]{len(active_positions)}[/yellow]"
+                        except Exception as e_db_trades:
+                            open_trades_count_str = "[bold red]DB Error[/bold red]"
+                            log_debug(f"Monitor: Error fetching open trades: {e_db_trades}") # Log less critical here
+                    
+                    rl_status_str = "[green]Loaded & Active[/green]" if self.rl_agent else "[dim white]Not Loaded[/dim white]"
 
-                    # Add RL agent status if loaded
-                    rl_status = f"[bold cyan]│[/bold cyan] :brain: [bold]RL Agent:[/bold] {'Loaded' if self.rl_agent else 'Not Loaded'}\n"
+                    # --- Gather WebSocket Connection Summary ---
+                    ws_conn_status_line = "[bold cyan]│[/bold cyan] :electric_plug: [bold]WS Connection:[/bold] [dim white]N/A[/dim white]"
+                    ws_new_token_line = "[bold cyan]│  ├─ [/bold cyan][bold]NewToken Stream:[/bold] [dim white]N/A[/dim white]"
+                    ws_trades_subbed_line = "[bold cyan]│  └─ [/bold cyan][bold]Token Trades Subbed:[/bold] [dim white]N/A[/dim white]"
 
-                    log_debug(
-                        f"\n"
-                        f"[bold cyan]┌────────────────────────────────────[/bold cyan]\n"
-                        f"[bold cyan]│[/bold cyan] :robot: [bold magenta]Task Monitor[/bold magenta]\n"
-                        f"[bold cyan]│────────────────────────────────────[/bold cyan]\n"
-                        f"{rl_status}" # Add RL status here
-                        f"[bold cyan]│[/bold cyan] :moneybag: [bold]Actual SOL amount:[/bold] {sol_amount:.6f}\n"
-                        f"[bold cyan]│[/bold cyan] :label: [bold]Subscribed tokens:[/bold] {len(tokens_subscribed)}\n"
-                        f"[bold cyan]│[/bold cyan] :recycle: [bold]RugCheck Queue size:[/bold] {rug_queue_size}\n"
-                        f"[bold cyan]│[/bold cyan] :gear: [bold]Active tasks:[/bold] {len([t for t in self.tasks if not t.done()])}/{len(self.tasks)}\n"
-                        f"[bold cyan]│[/bold cyan] :clipboard: [bold]Tasks:[/bold]\n"
-                        f"[bold cyan]├──[/bold cyan] {'[bold cyan]├──[/bold cyan] '.join(task_status)}"
-                        f"[bold cyan]└────────────────────────────────────[/bold cyan]\n"
-                    )
-                    await asyncio.sleep(5)
-                except Exception as e:
-                    # Log error from the monitor loop itself if format_task_monitor_rich fails critically
-                    log_error(f":x: [bold red]Monitor task loop error (after formatting call)[/bold red]: {e}", exc_info=True)
-                    await asyncio.sleep(10) 
+                    if self.ws_handler and hasattr(self.ws_handler, 'get_connection_summary'):
+                        try:
+                            ws_summary = await self.ws_handler.get_connection_summary()
+                            ws_conn_status = ws_summary.get("connection_status", "Error")
+                            ws_new_token_sub = "Yes" if ws_summary.get("new_token_subscribed") else "No"
+                            ws_trades_sub_count = str(ws_summary.get("trade_subscriptions_count", "0"))
+
+                            ws_style = "dim white" # Default
+                            conn_status_lower = ws_conn_status.lower()
+                            if "connected" in conn_status_lower: ws_style = "green"
+                            elif "reconnecting" in conn_status_lower or "connecting" in conn_status_lower: ws_style = "blue"
+                            elif "closed" in conn_status_lower or "shutting down" in conn_status_lower or "not initialized" in conn_status_lower : ws_style = "yellow"
+                            elif "error" in conn_status_lower or "unknown" in conn_status_lower : ws_style = "bold red"
+
+                            ws_conn_status_line = f"[bold cyan]│[/bold cyan] :electric_plug: [bold]Websocket:[/bold] [{ws_style}]{ws_conn_status}[/{ws_style}]"
+                            ws_new_token_style = "green" if ws_new_token_sub == "Yes" else "yellow"
+                            ws_new_token_line = f"[bold cyan]│  ├─ [/bold cyan][bold]NewToken Stream:[/bold] [{ws_new_token_style}]{ws_new_token_sub}[/{ws_new_token_style}]"
+                            ws_trades_subbed_line = f"[bold cyan]│  └─ [/bold cyan][bold]Token Trades Subbed:[/bold] [magenta]{ws_trades_sub_count}[/magenta]"
+                        except Exception as e_ws_sum:
+                            ws_conn_status_line = f"[bold cyan]│[/bold cyan] :electric_plug: [bold]Websocket:[/bold] [bold red]Error: {e_ws_sum!r}[/bold red]"
+
+                    # --- Format Main Bot Tasks Status ---
+                    main_task_status_lines_list = []
+                    active_bot_tasks_count = 0
+                    for task in self.tasks: # Iterate TradingBot's self.tasks
+                        task_name = task.get_name()
+                        status_str = ""
+                        style = "green" # Default for running
+
+                        if task.cancelled():
+                            status_str = "cancelled"
+                            style = "dim yellow"
+                        elif task.done():
+                            if task.exception():
+                                exc = task.exception()
+                                exc_name = type(exc).__name__ if exc else "UnknownException"
+                                status_str = f"error ({exc_name})"
+                                style = "bold red"
+                            else:
+                                status_str = "done" 
+                                style = "yellow"
+                        else: # Not done
+                            status_str = "running"
+                            active_bot_tasks_count += 1
+                        
+                        line_prefix = "[bold cyan]├──[/bold cyan]"
+                        formatted_line = ""
+                        if task_name == "buy_opportunity_checker" and status_str == "running" and \
+                           hasattr(self.state, 'is_buying_enabled') and not self.state.is_buying_enabled:
+                            formatted_line = f"{line_prefix} {task_name}: [yellow]paused (buys disabled)[/yellow]"
+                        else:
+                            formatted_line = f"{line_prefix} {task_name}: [bold {style}]{status_str}[/bold {style}]"
+                        main_task_status_lines_list.append(formatted_line)
+
+                        # --- Display WebSocket Internal Tasks under the 'websocket_services_manager' ---
+                        if task_name == "websocket_services_manager" and self.ws_handler and hasattr(self.ws_handler, 'get_internal_task_statuses'):
+                            try:
+                                internal_ws_tasks = self.ws_handler.get_internal_task_statuses()
+                                if internal_ws_tasks:
+                                    for ws_task_name, ws_task_status_str in internal_ws_tasks:
+                                        ws_style_int = "green" # default for running
+                                        if "done" in ws_task_status_str.lower() or "completed" in ws_task_status_str.lower(): ws_style_int = "yellow"
+                                        if "error" in ws_task_status_str.lower(): ws_style_int = "bold red"
+                                        if "cancel" in ws_task_status_str.lower(): ws_style_int = "dim yellow"
+                                        if any(s in ws_task_status_str.lower() for s in ["not active", "not_started", "stopped", "cleared", "shutting down", "shutting_down"]): ws_style_int = "dim white"
+                                        if any(s in ws_task_status_str.lower() for s in ["pending", "initializing", "reconnecting"]): ws_style_int = "blue"
+                                        main_task_status_lines_list.append(f"[bold cyan]│  └───[/bold cyan] {ws_task_name}: [bold {ws_style_int}]{ws_task_status_str}[/bold {ws_style_int}]")
+                                else:
+                                    main_task_status_lines_list.append(f"[bold cyan]│  └───[/bold cyan] [dim white]No internal WS task statuses reported by handler.[/dim white]")
+                            except Exception as e_ws_int_status:
+                                main_task_status_lines_list.append(f"[bold cyan]│  └───[/bold cyan] [bold red]Error fetching WS internal tasks: {e_ws_int_status!r}[/bold red]")
+                    
+                    main_tasks_formatted_str = "\n".join(main_task_status_lines_list) if main_task_status_lines_list else f"[bold cyan]├──[/bold cyan] [dim white]No main tasks defined yet.[/dim white]"
+
+                    # --- Construct the final log message ---
+                    log_parts = [
+                        "\n", # Start with a newline for separation in logs
+                        "[bold cyan]┌────────────────────────────────────[/bold cyan]",
+                        "[bold cyan]│[/bold cyan] :robot: [bold magenta]Task Monitor[/bold magenta]",
+                        "[bold cyan]│────────────────────────────────────[/bold cyan]",
+                        f"[bold cyan]│[/bold cyan] :brain: [bold]RL Agent:[/bold] {rl_status_str}",
+                        f"[bold cyan]│[/bold cyan] :moneybag: [bold]SOL Balance:[/bold] {sol_amount:.4f}",
+                        f"[bold cyan]│[/bold cyan] :bar_chart: [bold]Open Trades:[/bold] {open_trades_count_str}",
+                        f"[bold cyan]│[/bold cyan] :recycle: [bold]RugCheck Queue:[/bold] [blue]{rug_queue_size}[/blue]",
+                        f"[bold cyan]│[/bold cyan] :speech_balloon: [bold]Socials Queue:[/bold] [blue]{socials_queue_size}[/blue]",
+                        ws_conn_status_line,
+                        ws_new_token_line,
+                        ws_trades_subbed_line,
+                        f"[bold cyan]│[/bold cyan] :gear: [bold]Managed Tasks:[/bold] {active_bot_tasks_count}/{len(self.tasks)}",
+                        f"[bold cyan]│[/bold cyan] :clipboard: [bold]Tasks:[/bold]",
+                        main_tasks_formatted_str, # This now includes nested WS tasks
+                        "[bold cyan]└────────────────────────────────────[/bold cyan]"
+                    ]
+                    
+                    log_debug("\n".join(log_parts))
+                    
+                except Exception as e_monitor_loop:
+                    log_error(f":x: [bold red]Error in monitor_tasks formatting/display loop[/bold red]: {e_monitor_loop}", exc_info=True) #
                 
-                monitor_interval = self.config.get('MONITOR_TASK_INTERVAL_SECONDS', 30)
-                await asyncio.sleep(monitor_interval)
+                monitor_interval_seconds = self.config.get('MONITOR_TASK_INTERVAL_SECONDS', 30) # Default from your old code
+                await self.state.wait_or_interrupt(timeout=monitor_interval_seconds) # Use interruptible sleep
 
         except asyncio.CancelledError:
-            log_info(":stop_sign: Monitor task shutting down")
+            log_info(":stop_sign: Monitor task shutting down (cancelled).") #
+        except Exception as e_outer:
+            log_error(f":x: [bold red]FATAL error in Monitor task outer loop[/bold red]: {e_outer}", exc_info=True) #
         finally:
-            log_debug("Monitor task finished.")
+            log_debug("Monitor task finished.") #
 
     async def command_listener(self):
         """Periodically checks the command file for commands."""
@@ -944,7 +1039,6 @@ class TradingBot:
 
         log_debug(f":wrench: FINAL INITIAL CONFIG in use by bot: {self.config}")
 
-
         # --- Database and Services Setup ---
         try:
             # Pass the active self.config to DatabaseClient if its __init__ expects it
@@ -960,9 +1054,9 @@ class TradingBot:
                 await self.db_client.cleanup_db(cleanup_flag=True)
             
             log_info(":rocket: [bold]Initializing database schema...[/bold]")
-            # await self.db_client.init_db()
-            # await self.db_client.restore_creator_wallets()
-            # log_info(":white_check_mark: Database schema initialized and wallets restored.")
+            # await self.db_client.init_db() # Ensure this is called
+            #await self.db_client.restore_creator_wallets() # Ensure this is called
+            log_info(":white_check_mark: Database schema initialized and wallets restored.")
 
         except Exception as db_setup_err:
             log_critical(f"CRITICAL: Failed database setup: {db_setup_err}", exc_info=True)
@@ -975,18 +1069,16 @@ class TradingBot:
             initial_price_fetched = await self._fetch_initial_sol_price()
             if not initial_price_fetched:
                 log_critical("🔴 Failed to fetch initial SOL price. The bot will rely on the hourly updater. Some functionalities might be delayed or impacted until the price is available.")
-                # Consider if you want to halt bot startup if initial price fetch fails.
-                # For now, it logs a critical error and proceeds.
             else:
                 log_info("🟢 Initial SOL price fetched and set.")
         except Exception as e:
             log_critical(f"💥 Error during initial SOL price fetch: {e}. The bot will rely on the hourly updater.", exc_info=True)
-            # Similar consideration for halting startup.
         # *** END OF INITIAL SOL PRICE FETCH ***
 
         # --- Initialize Core Components (pass self.config) ---
+        # Initialize WebSocketHandler first as other components might depend on state it prepares (like state_manager)
         self.ws_handler = WebSocketHandler(db_client=self.db_client, config_dict=self.config, state_manager=self.state)
-        await self.ws_handler.connect() # Connect WS
+        # Do not call self.ws_handler.connect() here. It will be called by start_websocket_services().
         await self.state.set_websocket_handler(self.ws_handler) # Store in GlobalState
 
         socials_proc = SocialsProcessor(state=self.state, db_client=self.db_client, config_dict=self.config)
@@ -996,57 +1088,50 @@ class TradingBot:
 
         # --- Start Background Tasks ---
         self.tasks = [
-            asyncio.create_task(self.status_updater(), name="status_updater"), # Writes to bot_status.json
-            asyncio.create_task(self.config_updater(), name="config_updater"), # Reads dynamic_config.json
-            asyncio.create_task(self.command_listener(), name="command_listener"), # Reads bot_command.txt
-            asyncio.create_task(self.monitor_tasks(), name="task_monitor"), # Internal task logging
-            
+            asyncio.create_task(self.status_updater(), name="status_updater"),
+            asyncio.create_task(self.config_updater(), name="config_updater"),
+            asyncio.create_task(self.command_listener(), name="command_listener"),
+            asyncio.create_task(self.monitor_tasks(), name="task_monitor"),
             asyncio.create_task(update_sol_price(self.state, self.db_client), name="sol_price_updater"),
-            asyncio.create_task(trade_worker(), name="trade_worker"), # Uses self.state.db_client
-            rugchecker.start(), # Returns a task
-            socials_proc.start(), # Returns a task
+            asyncio.create_task(trade_worker(), name="trade_worker"),
+            rugchecker.start(), # Ensure this returns a task
+            socials_proc.start(), # Ensure this returns a task
             
             asyncio.create_task(self.run_buy_checks(), name="buy_opportunity_checker"),
             asyncio.create_task(self.run_sell_checks(), name="sell_opportunity_checker"),
+            asyncio.create_task(self.run_heartbeat_emitter(), name="heartbeat_emitter"),
+            
+            # Start the WebSocketHandler's main service task
+            # WebSocketHandler will internally manage its specific tasks (message_handler, monitor_connection, etc.)
+            asyncio.create_task(self.ws_handler.start_websocket_services(), name="websocket_services_manager")
         ]
-        self.tasks.extend(self.ws_handler.start()) # Add WebSocket handler's tasks
-        self.tasks.append(asyncio.create_task(self.run_heartbeat_emitter(), name="heartbeat_emitter"))
+        # Removed: self.tasks.extend(self.ws_handler.start())
+        # Removed: asyncio.create_task(self.ws_handler.unsubscribe_new_tokens()) 
+        # (assuming connect/shutdown in handler manage this)
 
         if self.rl_agent:
             self.tasks.append(asyncio.create_task(self.run_rl_agent_updates(), name="rl_agent_updater"))
         
-        # Initial status update to RUNNING after all tasks are launched
-        # status_updater will take over from here.
-        # self._write_status({"bot_process_status": "RUNNING", "timestamp": datetime.now(timezone.utc).isoformat()})
-        # No, status_updater will set it to RUNNING on its first successful pass.
-
         log_info(":rocket: [bold green]Trading bot core components started.[/bold green]")
         try:
-            # Wait for any task to complete (e.g., if shutdown is triggered, command_listener might exit)
-            # Or if a critical task errors out.
             done, pending = await asyncio.wait(self.tasks, return_when=asyncio.FIRST_COMPLETED)
             
-            # If we are here, one of the main tasks has finished.
-            # Check if it was due to an error or normal completion (like shutdown signal)
             for task in done:
                 if task.exception():
                     log_critical(f"Task {task.get_name()} exited with exception: {task.exception()}", exc_info=task.exception())
-                    self.state.trigger_shutdown() # Trigger shutdown if a task crashes
+                    self.state.trigger_shutdown() 
                 else:
                     log_info(f"Task {task.get_name()} completed.")
             
-            # If shutdown wasn't triggered by the completed task, wait for the shutdown event
             if not self.state.shutdown_event.is_set():
                 log_info("A task completed, but shutdown not triggered. Waiting for shutdown signal...")
                 await self.state.wait_for_shutdown()
 
         except Exception as e:
             log_critical(f"CRITICAL ERROR in bot's main execution: {e}", exc_info=True)
-            self.state.trigger_shutdown() # Ensure shutdown is triggered on any main error
+            self.state.trigger_shutdown() 
         finally:
             log_info("Main execution loop ended. Proceeding to full shutdown.")
-            # The shutdown method will handle cancelling remaining tasks and cleanup.
-            # No need to call self.shutdown() here as it's called in the final `finally` block of the script's entry point
 
     async def run_heartbeat_emitter(self): # Add this as a new async method in TradingBot
         log_debug("❤️ Heartbeat emitter started.")

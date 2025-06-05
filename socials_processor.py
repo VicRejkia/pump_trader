@@ -13,7 +13,7 @@ from decimal import Decimal
 from datetime import datetime, timezone, timedelta
 
 from database_handler import DatabaseClient
-from logger import logger
+from bot_logger import logger
 from state_manager import GlobalState
 # Assuming these validation functions exist in utils.py
 from utils import is_valid_website, is_valid_telegram, is_valid_twitter
@@ -234,20 +234,19 @@ class SocialsProcessor:
                     error_penalty_map = {
                         "Invalid URL format": self.penalty_website_invalid_url,
                         "Timeout": self.penalty_website_timeout,
-                        "HTTP Error": self.penalty_website_http_error # Default for HTTP errors
+                        # Add more specific HTTP error messages if needed, or handle generally
+                        "HTTP Error 404": self.penalty_website_http_error, # Example specific
+                        "HTTP Error 403": self.penalty_website_http_error, # Example specific
+                        "HTTP Error": self.penalty_website_http_error # General HTTP error
+                        # Add other specific error strings from _verify_website_details if needed
                     }
-                    # More specific HTTP error penalties
-                    if "HTTP Error 404" in verification_results['error'] or "HTTP Error 403" in verification_results['error']: # Example
-                        specific_http_penalty = self.penalty_website_http_error # Could be different
-                        penalty_to_add = specific_http_penalty
-                    else:
-                        # General mapping or default
-                        penalty_key_part = verification_results['error'].split(':')[0].strip() # "Request Error" or "HTTP Error 400"
-                        penalty_to_add = self.penalty_website_other_error # Default
-                        for key_fragment, penalty_val_name in error_penalty_map.items():
-                             if key_fragment in verification_results['error']:
-                                 penalty_to_add = getattr(self, penalty_val_name.lower().replace("socials_penalty_", "penalty_") , self.penalty_website_other_error) # find attribute
-                                 break
+                    penalty_to_add = self.penalty_website_other_error # Default penalty
+
+                    # Iterate to find the most specific match for the error string
+                    for error_key_fragment, specific_penalty_value in error_penalty_map.items():
+                        if error_key_fragment in verification_results['error']:
+                            penalty_to_add = specific_penalty_value
+                            break # Found a specific penalty, use it
                     
                     total_penalty += penalty_to_add
                     log_str += f"\tPenalty: +{penalty_to_add} (Website verification failed: {verification_results['error']})\n"

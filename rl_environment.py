@@ -17,7 +17,7 @@ from typing import Dict, List, Optional, Tuple, Any, Union
 from datetime import timezone, datetime
 
 # --- Project Modules ---
-from logger import logger
+from bot_logger import logger
 import rl_config # Import RL specific configurations
 from utils import calculate_volatility # Keep utility for potential recalculation
 

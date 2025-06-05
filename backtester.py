@@ -10,7 +10,7 @@ import pandas as pd
 from datetime import datetime, timezone, timedelta # Added timedelta
 from typing import Dict, List, Optional, Any
 
-from logger import logger
+from bot_logger import logger
 import utils # For calculate_trend_indicators
 import config as config_module # To access fixed configurations like _APPLY_TREND_REVERSAL_ON_SELL_REASONS
 
@@ -599,7 +599,7 @@ async def main_test():
     from database_handler import DatabaseClient, get_token_lifespan
     from ga_config import OPTIMIZABLE_PARAMETERS, BACKTEST_INITIAL_CAPITAL, HISTORICAL_DATA_START_TS, HISTORICAL_DATA_END_TS
     import random
-    from logger import setup_logging
+    from bot_logger import setup_logging
 
     setup_logging()
     db_client = DatabaseClient()
@@ -675,6 +675,6 @@ async def main_test():
 
 if __name__ == "__main__":
     import asyncio
-    from logger import setup_logging
+    from bot_logger import setup_logging
     setup_logging()
     asyncio.run(main_test())

@@ -18,7 +18,7 @@ try:
     from database_handler import DatabaseClient
     from state_manager import GlobalState, SOL_PRICE_FILE # Import SOL_PRICE_FILE if defined there
     import config as bot_config_module # Alias to avoid naming conflict
-    from logger import _LOG_STORAGE_PATH as BOT_LOG_DIR_CONFIG, _LOGGER_NAME as BOT_LOGGER_NAME_CONFIG
+    from bot_logger import _LOG_STORAGE_PATH as BOT_LOG_DIR_CONFIG, _LOGGER_NAME as BOT_LOGGER_NAME_CONFIG
     # Import any other necessary utilities or configs
 except ImportError as e:
     print(f"CRITICAL ERROR: Could not import trading bot modules: {e}")

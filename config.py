@@ -32,9 +32,22 @@ DEFAULT_SELL_FEE = 0.001                    # Fee for selling in SOL
 DEFAULT_SELL_TIP = 0.001                    # Tip for selling in SOL
 
 # Price determination strategy
-PRICE_DETERMINATION_METHOD = "MEDIAN"       # Options: "VWAP", "TWAP", "LATEST", "MEDIAN"
-PRICE_AVG_WINDOW_MINUTES = 1                # Lookback window for VWAP/TWAP in minutes
-TWAP_SUB_INTERVAL_SECONDS = 60              # Sub-interval for TWAP calculation (if TWAP is used) in seconds
+PRICE_DETERMINATION_METHOD = "MEDIAN"       # Options: "VWAP", "TWAP", "LATEST", "MEDIAN" (Applies to chosen source)
+TWAP_SUB_INTERVAL_SECONDS = 15              # Sub-interval for TWAP calculation (if TWAP is used) in seconds
+PRICE_AVG_WINDOW_MINUTES = 0.25           # You mentioned you already set this to 0.25 (15 seconds) - keep it
+
+# --- NEW: Price Calculation Strategy Control ---
+# Determines the primary source for decision price and market cap.
+# "direct_price": Calculates robust price from trades (sol_amount/token_amount), then derives MC.
+# "market_cap": Calculates robust MC from trades (marketCapSol), then derives price.
+PRICE_SOURCE_METHOD = "market_cap"  # Default, Options: "direct_price", "market_cap"
+
+# Determines how the lookback window for price/MC calculation is defined.
+# "time": Uses PRICE_AVG_WINDOW_MINUTES.
+# "count": Uses PRICE_AVG_TRADE_COUNT.
+PRICE_WINDOW_TYPE = "count"  # Default, Options: "time", "count"
+PRICE_AVG_TRADE_COUNT = 15  # Number of trades for window if PRICE_WINDOW_TYPE is "count" (e.g., last 20 trades)
+
 
 # Trading thresholds
 DEFAULT_RUGCHECK_SCORE_THRESHOLD = 401      # No trading if Rugcheck score is equal or above this threshold
@@ -66,6 +79,7 @@ SLOW_EMA_PERIOD = 21
 INACTIVITY_PERIOD = 60                      # Inactivity period in minutes before unsubscribing & backup
 MC_DROP_THRESHOLD = 5                       # Market cap drop threshold (in %) - for unsubscription & backup
 MIN_TOKEN_AGE = 30                          # Minimum token age in minutes before unsubscription & backup
+
 
 # PumpPortal
 _MAX_SUBSCRIPTION_BATCH: int = 100           # For batch unsubscription ... can be deleted?

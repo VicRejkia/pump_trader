@@ -11,7 +11,7 @@ import warnings # Add this import
 import numpy as np
 import json
 from datetime import datetime, timezone, timedelta # <-- Added timedelta
-from logger import logger, Panel, Table, Text, Align, Group, rich_box
+from bot_logger import logger, Panel, Table, Text, Align, Group, rich_box
 # Type hint for DatabaseClient without creating circular dependency
 from typing import TYPE_CHECKING, Dict, Optional, Tuple, List
 # For type hinting TradingBot instance without circular import

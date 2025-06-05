@@ -6,7 +6,7 @@ import subprocess
 import time
 import json
 from datetime import datetime, timezone
-from logger import setup_logging, rotate_log_file, log_info, log_debug, log_error, log_warning, log_critical
+from bot_logger import setup_logging, rotate_log_file, log_info, log_debug, log_error, log_warning, log_critical
 from config import TELEGRAM_INTERACTION
 
 # --- Project Setup ---
@@ -20,7 +20,7 @@ TELEGRAM_SCRIPT_PATH = os.path.join(PROJECT_ROOT_DIR, 'telegram_interface.py')
 TRADING_BOT_SCRIPT_PATH = os.path.join(PROJECT_ROOT_DIR, 'trading_bot.py')
 
 # --- Configuration ---
-BOT_INITIAL_WARMUP_SECONDS = 40  # Wait this long after starting the bot before the first check
+BOT_INITIAL_WARMUP_SECONDS = 60  # Wait this long after starting the bot before the first check
 BOT_CHECK_INTERVAL_SECONDS = 15  # How often to check if the TradingBot is running after warmup
 PYTHON_EXECUTABLE = sys.executable
 MAX_RESTART_ATTEMPTS = 5 # Maximum number of consecutive restart attempts before giving up for a while

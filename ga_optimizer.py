@@ -24,7 +24,7 @@ import traceback
 import copy
 
 # --- Project Modules ---
-from logger import logger, setup_logging
+from bot_logger import logger, setup_logging
 from ga_config import (
     OPTIMIZABLE_PARAMETERS, POPULATION_SIZE, NUM_GENERATIONS,
     CROSSOVER_PROBABILITY, MUTATION_PROBABILITY, FITNESS_METRIC, FITNESS_GOAL,
