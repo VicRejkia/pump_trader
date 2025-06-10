@@ -32,7 +32,7 @@ class TradingManager:
 
         logger.debug(f"Performing trend reversal confirmation for {mint}...")
         
-        apply_reversal_on_configured_reasons = self.config.get('_APPLY_TREND_REVERSAL_ON_SELL_REASONS', [])
+        apply_reversal_on_configured_reasons = self.config.get('APPLY_TREND_REVERSAL_ON_SELL_REASONS', [])
         recency_hours = self.config.get('TREND_REVERSAL_RECENCY_HOURS', 6)
         rsi_neutral_level_config = self.config.get('TREND_REVERSAL_RSI_NEUTRAL_LEVEL', 45)
 
@@ -438,7 +438,7 @@ class TradingManager:
                     telegram_msg = format_sell_order_log(mint=mint, token_name=token_name, market_cap_sol=market_cap_sol_at_trigger, profit=sim_profit, reason=reason, sol_price=sol_price_usd, for_telegram=True)
                     asyncio.create_task(send_telegram_message(telegram_msg))
                 
-                sell_reasons_triggering_hard_cooldown = self.config.get('_APPLY_TREND_REVERSAL_ON_SELL_REASONS', [])
+                sell_reasons_triggering_hard_cooldown = self.config.get('APPLY_TREND_REVERSAL_ON_SELL_REASONS', [])
                 if any(configured_reason in reason for configured_reason in sell_reasons_triggering_hard_cooldown):
                     cooldown_minutes = self.config.get('STOP_LOSS_COOLDOWN_MINUTES', 0)
                     if cooldown_minutes > 0:
@@ -516,7 +516,7 @@ class TradingManager:
                                 telegram_msg += f"\nMode: {trading_mode.upper()}\nSignature: {signature}"
                                 asyncio.create_task(send_telegram_message(telegram_msg))
                     
-                    sell_reasons_triggering_hard_cooldown = self.config.get('_APPLY_TREND_REVERSAL_ON_SELL_REASONS', [])
+                    sell_reasons_triggering_hard_cooldown = self.config.get('APPLY_TREND_REVERSAL_ON_SELL_REASONS', [])
                     if any(configured_reason in reason for configured_reason in sell_reasons_triggering_hard_cooldown):
                         cooldown_minutes = self.config.get('STOP_LOSS_COOLDOWN_MINUTES', 0)
                         if cooldown_minutes > 0:
@@ -623,6 +623,20 @@ class TradingManager:
                             sell_reason = "🆘 Emergency SL (MCap)"
                             sell_all = True
                             trigger_values_for_log = {"current_market_cap_usd_at_trigger": (current_market_cap_sol_for_log * sol_price_usd), "min_mcap_threshold_config": self.config['MIN_MARKETCAP_THRESHOLD']}
+                        elif current_market_cap_sol_for_log is not None and current_market_cap_sol_for_log > 0 and position.get('initial_market_cap_sol') is not None and float(position.get('initial_market_cap_sol')) > 0:
+                            initial_mc = float(position['initial_market_cap_sol'])
+                            mc_drop_threshold_percent = self.config.get('MC_DROP_THRESHOLD', 5.0)
+                            mc_sell_trigger_level = initial_mc * (1 - mc_drop_threshold_percent / 100.0)
+                            
+                            if current_market_cap_sol_for_log < mc_sell_trigger_level:
+                                sell_reason = "🆘 Emergency SL (MC Drop%)"
+                                sell_all = True
+                                trigger_values_for_log = {
+                                    "current_market_cap_sol_at_trigger": current_market_cap_sol_for_log,
+                                    "initial_market_cap_sol": initial_mc,
+                                    "mc_drop_threshold_percent": mc_drop_threshold_percent,
+                                    "mc_sell_trigger_level": mc_sell_trigger_level
+                                }
                         elif current_market_cap_sol_for_log is None and not sell_reason : 
                              logger.warning(f"Cannot check Emergency SL (MCap) for {mint} (ID: {pos_id}) due to invalid market cap: {current_market_cap_sol_for_log}")
 

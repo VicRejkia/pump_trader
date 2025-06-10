@@ -35,49 +35,58 @@ def is_process_running(process_handle):
 
 def get_trading_bot_status_from_file() -> str:
     """
-    Reads the TradingBot status from the bot_status.json file.
+    Reads the TradingBot status from the bot_status.json file with a retry mechanism.
     Returns 'RUNNING', 'STARTING', 'STOPPED', 'STALE', or 'ERROR_READING_STATUS'.
     """
-    try:
-        if not os.path.exists(STATUS_FILE):
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        try:
+            if not os.path.exists(STATUS_FILE):
+                return "STOPPED"
+            with open(STATUS_FILE, 'r') as f:
+                # If file is empty, wait and retry
+                if os.fstat(f.fileno()).st_size == 0:
+                    raise json.JSONDecodeError("File is empty", "", 0)
+                status_data = json.load(f)
+
+            bot_process_status = status_data.get("bot_process_status", "UNKNOWN").upper()
+            timestamp_str = status_data.get("timestamp")
+
+            if not timestamp_str:
+                return "STALE" if bot_process_status == "RUNNING" else bot_process_status
+
+            status_dt = datetime.fromisoformat(timestamp_str)
+            if status_dt.tzinfo is None:
+                status_dt = status_dt.replace(tzinfo=timezone.utc)
+            else:
+                status_dt = status_dt.astimezone(timezone.utc)
+
+            age_seconds = (datetime.now(timezone.utc) - status_dt).total_seconds()
+
+            stale_threshold = BOT_CHECK_INTERVAL_SECONDS * 2.5
+            if bot_process_status in ["RUNNING", "STARTING"] and age_seconds > stale_threshold:
+                log_warning(f"Status file is STALE. Status: {bot_process_status}, Age: {age_seconds:.2f}s, Threshold: {stale_threshold}s")
+                return "STALE"
+            
+            if bot_process_status in ["RUNNING", "STARTING"]:
+                return bot_process_status
+            
             return "STOPPED"
-        with open(STATUS_FILE, 'r') as f:
-            status_data = json.load(f)
 
-        bot_process_status = status_data.get("bot_process_status", "UNKNOWN").upper()
-        timestamp_str = status_data.get("timestamp")
-
-        if not timestamp_str:
-            return "STALE" if bot_process_status == "RUNNING" else bot_process_status
-
-        status_dt = datetime.fromisoformat(timestamp_str)
-        # Ensure status_dt is offset-aware for correct comparison with offset-aware datetime.now(timezone.utc)
-        if status_dt.tzinfo is None:
-            status_dt = status_dt.replace(tzinfo=timezone.utc) # Assume UTC if naive
-        else:
-            status_dt = status_dt.astimezone(timezone.utc) # Convert to UTC if already aware
-
-        age_seconds = (datetime.now(timezone.utc) - status_dt).total_seconds()
-
-        # Check for stale status specifically
-        # Stale if status is RUNNING/STARTING but timestamp is too old
-        stale_threshold = BOT_CHECK_INTERVAL_SECONDS * 2.5 # Increased threshold slightly
-        if bot_process_status in ["RUNNING", "STARTING"] and age_seconds > stale_threshold:
-            log_warning(f"Status file is STALE. Status: {bot_process_status}, Age: {age_seconds:.2f}s, Threshold: {stale_threshold}s")
-            return "STALE"
-        
-        if bot_process_status in ["RUNNING", "STARTING"]: # STARTING is also a valid running state initially
-            return bot_process_status
-        
-        # Covers "STOPPED", "ERROR_IN_STATUS_UPDATER", "CRASHED", "ERROR_DB_SETUP", etc.
-        return "STOPPED"
-
-    except (IOError, json.JSONDecodeError, ValueError) as e:
-        log_error(f"Error reading bot_status.json: {e}")
-        return "ERROR_READING_STATUS"
-    except Exception as e:
-        log_error(f"Unexpected error in get_trading_bot_status_from_file: {e}")
-        return "ERROR_READING_STATUS"
+        except json.JSONDecodeError as e:
+            log_warning(f"Attempt {attempt + 1}/{max_attempts} failed to read bot_status.json: {e}. Retrying in 1 second...")
+            if attempt < max_attempts - 1:
+                time.sleep(1) # Wait before the next attempt
+            else:
+                log_error(f"Error reading bot_status.json after {max_attempts} attempts: {e}")
+                return "ERROR_READING_STATUS"
+        except (IOError, ValueError) as e:
+            log_error(f"Error reading bot_status.json: {e}")
+            return "ERROR_READING_STATUS"
+        except Exception as e:
+            log_error(f"Unexpected error in get_trading_bot_status_from_file: {e}")
+            return "ERROR_READING_STATUS"
+    return "ERROR_READING_STATUS" # Should not be reached, but as a fallback
 
 def start_script_in_new_console(script_path: str, cwd: str, args: list = None) -> subprocess.Popen:
     """Starts a Python script in a new console window."""

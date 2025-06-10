@@ -235,10 +235,10 @@ class DatabaseClient:
                     # Batch insert trades
                     await conn.executemany('''
                         INSERT INTO trades (
-                            signature, mint, tx_type, token_amount, sol_amount, price,
+                            signature, mint, trader_pubkey, tx_type, token_amount, sol_amount, price,
                             bondingCurveKey, vTokensInBondingCurve, vSolInBondingCurve,
                             marketCapSol,sol_price_usd, market_cap_calculated, timestamp
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                         ON CONFLICT (signature) DO NOTHING
                     ''', trade_params)
 
@@ -480,10 +480,12 @@ class DatabaseClient:
     async def get_active_buy_positions(self, conn=None):
         """Fetches active buy positions from the portfolio."""
         query = '''
-            SELECT id, mint, price AS buy_price, initial_tokens, remaining_tokens, total_investment_sol,
-                   stop_loss_price, highest_price, initial_tp_price, second_tp_price, first_tp_hit
-            FROM portfolio
-            WHERE status = 'active' AND tx_type = 'buy'
+            SELECT p.id, p.mint, p.price AS buy_price, p.initial_tokens, p.remaining_tokens, p.total_investment_sol,
+                p.stop_loss_price, p.highest_price, p.initial_tp_price, p.second_tp_price, p.first_tp_hit,
+                t.marketCapSol as initial_market_cap_sol
+            FROM portfolio p
+            JOIN tokens t ON p.mint = t.mint
+            WHERE p.status = 'active' AND p.tx_type = 'buy'
         '''
         connection = conn or await self.pool.acquire()
         try:
@@ -839,6 +841,26 @@ class DatabaseClient:
 
     async def backup_and_delete_token(self, mint: str, archived_at: datetime, reason: str=None):
         """Backup core table data to a corresponding backup table."""
+
+        # --- START: ADD THIS SAFETY CHECK BLOCK ---
+        try:
+            async with self.pool.acquire() as conn:
+                is_active_in_portfolio = await conn.fetchval(
+                    "SELECT 1 FROM portfolio WHERE mint = $1 AND status = 'active' LIMIT 1",
+                    mint
+                )
+                if is_active_in_portfolio:
+                    logger.critical(
+                        f"CRITICAL SAFEGUARD: Prevented backup/deletion of token {mint} because it has an ACTIVE position in the portfolio. Reason for attempted deletion: '{reason}'."
+                    )
+                    # Deactivate the token in the 'tokens' table so it's not picked up by other processes,
+                    # but DO NOT delete it, allowing the sell logic to continue managing the position.
+                    await conn.execute("UPDATE tokens SET is_active = FALSE WHERE mint = $1", mint)
+                    return # Exit the function immediately.
+        except Exception as e:
+            logger.error(f"Error during safety check in backup_and_delete_token for {mint}: {e}", exc_info=True)
+            return # Exit on error to be safe
+        # --- END: ADD THIS SAFETY CHECK BLOCK ---
         final_reason = reason # Initialize final_reason with the provided reason
  
         try:

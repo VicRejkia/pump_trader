@@ -41,6 +41,7 @@ class GlobalState:
         # Queues
         self.rugcheck_queue = asyncio.PriorityQueue()  # RugCheck processing queue
         self.socialscheck_queue = asyncio.PriorityQueue()  # SocialsCheck processing queue
+        self.enrichment_queue = asyncio.Queue() # Transaction enrichment queue
 
         # Concurrency control
         self.lock = asyncio.Lock()  # General state lock
@@ -174,10 +175,12 @@ class GlobalState:
     ## 🚀 Queue Accessors
     def get_rugcheck_queue(self) -> asyncio.PriorityQueue:
         return self.rugcheck_queue
-    
-    ## 🚀 Queue Accessors
+
     def get_socialscheck_queue(self) -> asyncio.PriorityQueue:
         return self.socialscheck_queue
+    
+    def get_enrichment_queue(self) -> asyncio.Queue: # <<< ADD THIS
+        return self.enrichment_queue
 
     def get_db_write_lock(self):
         return self.db_write_lock

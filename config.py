@@ -53,8 +53,8 @@ PRICE_AVG_TRADE_COUNT = 15  # Number of trades for window if PRICE_WINDOW_TYPE i
 DEFAULT_RUGCHECK_SCORE_THRESHOLD = 401      # No trading if Rugcheck score is equal or above this threshold
 DEFAULT_SOCIAL_SCORE_THRESHOLD = 100        # No trading if Social score is equal or above this threshold
 DEFAULT_VOLUME_THRESHOLD = 40000            # Minimum volume threshold in USD
-MIN_MARKETCAP_THRESHOLD = 3600              # Minimum market cap threshold in USD to make emergency sell
-DEFAULT_MARKETCAP_THRESHOLD = 45000         # Minimum market cap threshold in USD to search for buy opportunities
+MIN_MARKETCAP_THRESHOLD = 4000              # Minimum market cap threshold in USD to make emergency sell
+DEFAULT_MARKETCAP_THRESHOLD = 30000         # Minimum market cap threshold in USD to search for buy opportunities
 MIN_VOLATILITY = 0.18                       # Minimum volatility threshold in % to search for buy opportunities
 DEFAULT_TIME_INTERVALL = 10                 # Time interval for checking volatility, volume and marketcap in minutes
 MAX_TOKEN_COUNT_PER_CREATOR = 10            # Maximum number of tokens per creator to consider token as safe
@@ -68,7 +68,7 @@ TREND_REVERSAL_RSI_NEUTRAL_LEVEL = 45.0     # RSI level considered neutral for t
 INDICATOR_LOOKBACK_HOURS = 1                # Lookback period for indicators in hours
 
 # Indicator Time Periods
-_APPLY_TREND_REVERSAL_ON_SELL_REASONS = ["🛑 Stop Loss", "🆘 Emergency SL (MCap)", "↘️ Trailing SL", "🛡️ Breakeven SL", "manual_override"]
+APPLY_TREND_REVERSAL_ON_SELL_REASONS = ["🛑 Stop Loss", "🆘 Emergency SL (MCap)", "↘️ Trailing SL", "🛡️ Breakeven SL", "manual_override"]
 RSI_PERIOD = 14
 BBANDS_PERIOD = 20
 BBANDS_STD_DEV = 2.0
@@ -77,7 +77,7 @@ SLOW_EMA_PERIOD = 21
 
 # UNSUBSCRIBING CONDITIONS
 INACTIVITY_PERIOD = 60                      # Inactivity period in minutes before unsubscribing & backup
-MC_DROP_THRESHOLD = 5                       # Market cap drop threshold (in %) - for unsubscription & backup
+MC_DROP_THRESHOLD = 2                       # Market cap drop threshold (in %) - for unsubscription & backup
 MIN_TOKEN_AGE = 30                          # Minimum token age in minutes before unsubscription & backup
 
 
@@ -95,6 +95,15 @@ RUGCHECK_SCORE_THRESHOLD = 1002             # Score above which a token is consi
 
 # SOL price configuration
 _SOL_PRICE_API_URL = "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd"
+
+# --- Solana RPC ---
+_SOLANA_RPC_ENDPOINT = "https://solana.drpc.org"
+_DRPC_ENDPOINT = "https://lb.drpc.org/ogrpc?network=solana"
+
+# "https://api.mainnet-beta.solana.com" # A public endpoint
+# Alternative free endpoints:
+# "https://solana-mainnet.g.alchemy.com/v2/YOUR_API_KEY" (requires free sign-up)
+# "https://mainnet.helius-rpc.com/?api-key=YOUR_API_KEY" (requires free sign-up)
 
 # Logging
 _LOGGER_NAME = "TradingBot"

@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Any
 
 from bot_logger import logger
 import utils # For calculate_trend_indicators
-import config as config_module # To access fixed configurations like _APPLY_TREND_REVERSAL_ON_SELL_REASONS
+import config as config_module # To access fixed configurations like APPLY_TREND_REVERSAL_ON_SELL_REASONS
 
 # --- Performance Metrics Calculation ---
 def calculate_performance_metrics(
@@ -259,7 +259,7 @@ async def run_backtest(
     slow_ema_period_ga = parameters.get('SLOW_EMA_PERIOD', config_module.SLOW_EMA_PERIOD)
 
     # This comes from the main config, not typically tuned by GA directly
-    apply_trend_reversal_on_sell_reasons_config = config_module._APPLY_TREND_REVERSAL_ON_SELL_REASONS
+    apply_trend_reversal_on_sell_reasons_config = config_module.APPLY_TREND_REVERSAL_ON_SELL_REASONS
 
     # --- Simulation State ---
     current_sol = initial_capital

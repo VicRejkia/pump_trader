@@ -24,6 +24,7 @@ from sol_price_api import update_sol_price
 from rugcheck_handler import Rugcheck
 from socials_processor import SocialsProcessor
 from utils import calculate_volatility # Assuming this is your utility
+from transaction_enricher import transaction_enricher_worker
 
 from telegram_interface import send_telegram_message
 
@@ -1094,6 +1095,7 @@ class TradingBot:
             asyncio.create_task(self.monitor_tasks(), name="task_monitor"),
             asyncio.create_task(update_sol_price(self.state, self.db_client), name="sol_price_updater"),
             asyncio.create_task(trade_worker(), name="trade_worker"),
+            #asyncio.create_task(transaction_enricher_worker(self.state, self.db_client), name="transaction_enricher"), #
             rugchecker.start(), # Ensure this returns a task
             socials_proc.start(), # Ensure this returns a task
             
@@ -1101,9 +1103,8 @@ class TradingBot:
             asyncio.create_task(self.run_sell_checks(), name="sell_opportunity_checker"),
             asyncio.create_task(self.run_heartbeat_emitter(), name="heartbeat_emitter"),
             
-            # Start the WebSocketHandler's main service task
-            # WebSocketHandler will internally manage its specific tasks (message_handler, monitor_connection, etc.)
-            asyncio.create_task(self.ws_handler.start_websocket_services(), name="websocket_services_manager")
+            # Start the single, self-recovering WebSocket service task
+            asyncio.create_task(self.ws_handler.connect_and_run(), name="websocket_services_manager")
         ]
         # Removed: self.tasks.extend(self.ws_handler.start())
         # Removed: asyncio.create_task(self.ws_handler.unsubscribe_new_tokens()) 

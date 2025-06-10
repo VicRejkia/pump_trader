@@ -2,6 +2,7 @@
 CREATE TABLE IF NOT EXISTS trades (
     signature TEXT PRIMARY KEY,         -- signature of the token event
     mint TEXT,                          -- tokens mint address
+    trader_pubkey TEXT,                 -- The wallet address of the trader
     tx_type TEXT,                       -- event type 'buy' or 'sell'
     token_amount NUMERIC,               -- amount of tokens traded
     sol_amount NUMERIC,                 -- amount of SOL traded

@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 import os
 import json
 import subprocess
-from datetime import datetime, timezone, timedelta 
+from datetime import datetime, timezone, timedelta
 import math
 import sys
 import re
@@ -35,12 +35,11 @@ DB_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}/{DB_DATABASE}?options=
 
 # --- Constants ---
 STATUS_FILE_CHECK_SECONDS = 10
-ITEMS_PER_PAGE_CONFIG = 7
-ITEMS_PER_PAGE_TRADES = 5
+ITEMS_PER_PAGE_CONFIG = 15
+ITEMS_PER_PAGE_TRADES = 10
 BULLX_URL_BASE = "https://neo.bullx.io/terminal?chainId=1399811149&address=" # Added BullX base URL
 
 # --- Directory Setup ---
-# ... (remains the same)
 CURRENT_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT_DIR = CURRENT_SCRIPT_DIR
 DATA_DIR_BOT = os.path.join(PROJECT_ROOT_DIR, 'data')
@@ -51,7 +50,6 @@ DYNAMIC_CONFIG_FILE = os.path.join(DATA_DIR_BOT, 'dynamic_config.json')
 os.makedirs(DATA_DIR_BOT, exist_ok=True)
 
 # --- Conversation States ---
-# ... (remains the same)
 CHOOSING_PARAM, TYPING_VALUE = range(2)
 EDIT_CONFIG_PARAM_KEY = "edit_config_param_name"
 CONFIG_PAGE_KEY = "config_page_key"
@@ -60,7 +58,6 @@ COMMAND_TYPE_KEY = "command_type_key"
 OPEN_TRADES_PAGE_KEY = "open_trades_page"
 
 # --- Callback Data Constants ---
-# ... (remains the same)
 CB_MAIN_MENU = "main_menu"
 CB_GET_SOL_AMOUNT = "get_sol_amount"
 CB_GET_TOKEN_COUNT = "get_token_count"
@@ -81,10 +78,11 @@ CB_EDIT_DYNAMIC_CONFIG_START = "edit_dynamic_config_start"
 CB_CANCEL_EDIT_CONFIG = "cancel_edit_config"
 CB_CONFIG_PAGE_PREFIX = "config_page_"
 CB_OPEN_TRADES_PAGE_PREFIX = "open_trades_page_"
-CB_SELL_NOW_PREFIX = "sell_now_" 
+CB_SELL_NOW_PREFIX = "sell_now_"
+CB_SELL_CONFIRM_YES_PREFIX = "sell_confirm_yes_"
+CB_SELL_CONFIRM_CANCEL_PREFIX = "sell_confirm_cancel_"
 
 def get_sol_price_from_status_file() -> float | None:
-    # ... (remains the same)
     try:
         if not os.path.exists(STATUS_FILE):
             print("Status file not found for SOL price.")
@@ -100,7 +98,6 @@ def get_sol_price_from_status_file() -> float | None:
         return None
 
 async def send_telegram_message(message: str):
-    # ... (remains the same)
     if not TG_TOKEN or not TG_ID:
         print("Error: Telegram token or chat ID is not configured for send_telegram_message.")
         return
@@ -111,34 +108,27 @@ async def send_telegram_message(message: str):
         print(f"Error in send_telegram_message: {e}")
 
 # --- Markdown Escaping Helpers ---
-# ... (escape_markdown_v2_text and escape_markdown_v2_text_for_code_block remain the same) ...
 def escape_markdown_v2_text(text: str) -> str:
     processed_text = text
-    for char in r'\\_*[]()~`>#+-=|{}.!':
+    for char in r'\_*[]()~`>#+-=|{}.!':
         if char in processed_text:
             processed_text = processed_text.replace(char, f'\\{char}')
     return processed_text
 
 def escape_markdown_v2_text_for_code_block(text: str) -> str:
-    processed_text = text.replace('\\', '\\\\\\\\') 
+    processed_text = text.replace('\\', '\\\\\\\\')
     processed_text = processed_text.replace('`', '\\`')
     return processed_text
 
 def escape_url_for_markdownv2_link(url: str) -> str:
     """
     Escapes a URL specifically for the URL part of a MarkdownV2 link [text](url).
-    According to Telegram Bot API documentation for MarkdownV2:
-    "Inside () part of inline link definition, all ')' and '\' characters 
-    must be escaped with a preceding '\' character."
     """
-    # First, escape backslashes (as they are used for escaping other characters)
     temp_url = url.replace('\\', '\\\\')
-    # Then, escape closing parentheses
     temp_url = temp_url.replace(')', '\\)')
     return temp_url
 
 # --- IPC Helper ---
-# ... (write_bot_command remains the same) ...
 def write_bot_command(command: str):
     try:
         with open(COMMAND_FILE, 'w', encoding='utf-8') as f:
@@ -150,7 +140,6 @@ def write_bot_command(command: str):
         return False
 
 # --- Helper Functions for Dynamic Config ---
-# ... (load_dynamic_config, save_dynamic_config, get_type_hint remain the same) ...
 def load_dynamic_config() -> dict:
     try:
         if os.path.exists(DYNAMIC_CONFIG_FILE):
@@ -181,7 +170,6 @@ def get_type_hint(value) -> str:
     return " (string)"
 
 # --- Telegram Bot Status & Control Functions ---
-# ... (get_bot_actual_status, toggle_bot_process_command, send_simple_bot_command remain the same) ...
 async def get_bot_actual_status() -> str:
     try:
         if not os.path.exists(STATUS_FILE): return "UNKNOWN (No Status File)"
@@ -200,7 +188,7 @@ async def get_bot_actual_status() -> str:
         if bot_process_status in ["RUNNING", "STARTING"] and age_seconds > stale_threshold:
             return f"STALE ({bot_process_status})"
         elif bot_process_status == "STOPPING" and age_seconds > stale_threshold * 2:
-             return "STOPPED (Stale Stopping)"
+            return "STOPPED (Stale Stopping)"
         return bot_process_status
     except (IOError, json.JSONDecodeError, ValueError) as e:
         print(f"Error reading status.json: {e}")
@@ -213,9 +201,9 @@ async def toggle_bot_process_command(update: Update, context: ContextTypes.DEFAU
     query = update.callback_query
     if query: await query.answer()
     message_text = ""
-    current_bot_status = await get_bot_actual_status() 
+    current_bot_status = await get_bot_actual_status()
 
-    if query and query.data == CB_STOP_BOT: 
+    if query and query.data == CB_STOP_BOT:
         if write_bot_command("STOP"):
             message_text = "🛑 STOP command sent to the trading bot. It may take a moment to fully stop."
         else:
@@ -232,10 +220,10 @@ async def toggle_bot_process_command(update: Update, context: ContextTypes.DEFAU
             message_text = "🚀 Main controller (and trading bot) initiated. Check status shortly."
         except Exception as e:
             message_text = f"❌ Error starting main controller: {e}"
-    else: 
+    else:
         message_text = f"Unhandled toggle action. Current status: {current_bot_status}"
     if query:
-        await menu_command(update, context) 
+        await menu_command(update, context)
         await context.bot.send_message(chat_id=update.effective_chat.id, text=escape_markdown_v2_text(message_text), parse_mode="MarkdownV2")
     elif update.message:
         await menu_command(update, context)
@@ -252,13 +240,12 @@ async def send_simple_bot_command(update: Update, context: ContextTypes.DEFAULT_
     await menu_command(update, context)
 
 # --- Main Menu ---
-# ... (menu_command remains the same) ...
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    if query: 
+    if query:
         await query.answer()
         target_message_for_edit = query.message
-    else: 
+    else:
         target_message_for_edit = update.message
 
     current_bot_status = await get_bot_actual_status()
@@ -267,7 +254,7 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                    "🟠" if "STALE" in current_bot_status else \
                    "🔴" if current_bot_status == "STOPPED" else \
                    "🟣" if current_bot_status == "STOPPING" else \
-                   "⚠️" 
+                   "⚠️"
 
     menu_text = f"{status_emoji} Bot Status: *{escape_markdown_v2_text(current_bot_status)}*\nChoose an option:"
     keyboard = [
@@ -280,17 +267,16 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     try:
-        if query : 
-             if target_message_for_edit.text != menu_text or target_message_for_edit.reply_markup != reply_markup :
+        if query :
+            if target_message_for_edit.text != menu_text or target_message_for_edit.reply_markup != reply_markup :
                 await target_message_for_edit.edit_text(menu_text, reply_markup=reply_markup, parse_mode="MarkdownV2")
-        else: 
+        else:
             await target_message_for_edit.reply_text(menu_text, reply_markup=reply_markup, parse_mode="MarkdownV2")
     except Exception as e:
         print(f"Error updating menu: {e}")
         await context.bot.send_message(chat_id=update.effective_chat.id, text=menu_text, reply_markup=reply_markup, parse_mode="MarkdownV2")
 
 # --- Bot Control Submenu ---
-# ... (bot_control_menu_command remains the same) ...
 async def bot_control_menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -303,10 +289,10 @@ async def bot_control_menu_command(update: Update, context: ContextTypes.DEFAULT
         start_stop_callback = CB_STOP_BOT
     elif current_bot_status == "STARTING":
         start_stop_button_text = "⏳ Starting..."
-        start_stop_callback = CB_REFRESH_STATUS 
+        start_stop_callback = CB_REFRESH_STATUS
     elif "STALE" in current_bot_status or current_bot_status == "ERROR_READING_STATUS":
-         start_stop_button_text = "▶️ Force Start Controller"
-         start_stop_callback = CB_START_BOT_FORCE
+        start_stop_button_text = "▶️ Force Start Controller"
+        start_stop_callback = CB_START_BOT_FORCE
     keyboard = [
         [InlineKeyboardButton(start_stop_button_text, callback_data=start_stop_callback)],
         [
@@ -325,11 +311,10 @@ async def bot_control_menu_command(update: Update, context: ContextTypes.DEFAULT
     await query.message.edit_text(text=message_text, reply_markup=reply_markup, parse_mode="MarkdownV2")
 
 # --- Dynamic Config Management ---
-# ... (manage_dynamic_config_command, view_dynamic_config_command, edit_dynamic_config_start_command, choose_param_handler, typing_value_handler, cancel_edit_config_command, fallback_edit_config remain the same, using the last corrected versions)
 async def manage_dynamic_config_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if query: await query.answer()
-    context.user_data[CONFIG_PAGE_KEY] = 0 
+    context.user_data[CONFIG_PAGE_KEY] = 0
     keyboard = [
         [InlineKeyboardButton("👁️ View Current Config", callback_data=CB_VIEW_DYNAMIC_CONFIG)],
         [InlineKeyboardButton("✏️ Edit Config Parameter", callback_data=CB_EDIT_DYNAMIC_CONFIG_START)],
@@ -362,8 +347,8 @@ async def view_dynamic_config_command(update: Update, context: ContextTypes.DEFA
         await query.message.edit_text(text=plain_text, reply_markup=reply_markup)
 
 async def edit_dynamic_config_start_command(
-    update_or_cb_query: Union[Update, CallbackQuery], 
-    context: ContextTypes.DEFAULT_TYPE, 
+    update_or_cb_query: Union[Update, CallbackQuery],
+    context: ContextTypes.DEFAULT_TYPE,
     page: int = 0
 ) -> int:
     actual_query_object: CallbackQuery | None = None
@@ -408,7 +393,7 @@ async def edit_dynamic_config_start_command(
         line_part_4_value_code = f"`{escape_markdown_v2_text_for_code_block(raw_value_json_str)}`"
         line_part_5_closing_paren_literal = escape_markdown_v2_text(")")
         line_part_6_type_hint_escaped = escape_markdown_v2_text(raw_type_hint)
-        full_line = (line_part_1_bullet + line_part_2_key_code + line_part_3_current_literal + 
+        full_line = (line_part_1_bullet + line_part_2_key_code + line_part_3_current_literal +
                      line_part_4_value_code + line_part_5_closing_paren_literal + line_part_6_type_hint_escaped)
         params_list_md_parts.append(full_line)
     params_text_md = "\n".join(params_list_md_parts)
@@ -441,7 +426,7 @@ async def choose_param_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Cancel Edit", callback_data=CB_CANCEL_EDIT_CONFIG)]]),
             parse_mode="MarkdownV2"
         )
-        return CHOOSING_PARAM 
+        return CHOOSING_PARAM
     context.user_data[EDIT_CONFIG_PARAM_KEY] = param_name_unescaped
     current_value = config_data[param_name_unescaped]
     param_name_display_escaped = escape_markdown_v2_text(param_name_unescaped)
@@ -474,14 +459,14 @@ async def typing_value_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         elif isinstance(original_value, int): parsed_value = int(new_value_str)
         elif isinstance(original_value, float): parsed_value = float(new_value_str)
         elif isinstance(original_value, list):
-            try: 
+            try:
                 parsed_value = json.loads(new_value_str)
                 if not isinstance(parsed_value, list): raise ValueError("Input was not a valid JSON list.")
-            except json.JSONDecodeError: 
+            except json.JSONDecodeError:
                 if original_value and all(isinstance(item, str) for item in original_value):
                     parsed_value = [s.strip() for s in new_value_str.split(',')]
-                elif not original_value: 
-                     parsed_value = [s.strip() for s in new_value_str.split(',')] if new_value_str else []
+                elif not original_value:
+                    parsed_value = [s.strip() for s in new_value_str.split(',')] if new_value_str else []
                 else: raise ValueError("List format is complex. Provide valid JSON list (e.g., [\"item1\"] or [1, 2]).")
         else: parsed_value = new_value_str
     except ValueError as e: parse_error = str(e)
@@ -510,10 +495,10 @@ async def cancel_edit_config_command(update: Update, context: ContextTypes.DEFAU
     query = update.callback_query
     if query: await query.answer("Edit cancelled.")
     if EDIT_CONFIG_PARAM_KEY in context.user_data: del context.user_data[EDIT_CONFIG_PARAM_KEY]
-    if query: await manage_dynamic_config_command(update, context) 
-    elif update.message: 
+    if query: await manage_dynamic_config_command(update, context)
+    elif update.message:
         await update.message.reply_text("Edit cancelled.")
-        await manage_dynamic_config_command(update, context) 
+        await manage_dynamic_config_command(update, context)
     return ConversationHandler.END
 
 async def fallback_edit_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -521,10 +506,9 @@ async def fallback_edit_config(update: Update, context: ContextTypes.DEFAULT_TYP
         escape_markdown_v2_text("Sorry, I didn't understand that. If you're editing, please provide the value or use /cancel_edit_config to stop."),
         parse_mode="MarkdownV2"
     )
-    return 
+    return
 
 # --- Bot Command Handling (with arguments) ---
-# ... (prompt_mint_address, process_mint_address_command, cancel_mint_command remain the same) ...
 async def prompt_mint_address(update: Update, context: ContextTypes.DEFAULT_TYPE, command_type: str) -> int:
     query = update.callback_query
     await query.answer()
@@ -540,7 +524,7 @@ async def prompt_mint_address(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def process_mint_address_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     mint_address = update.message.text.strip()
     command_type = context.user_data.get(COMMAND_TYPE_KEY)
-    if not mint_address: 
+    if not mint_address:
         await update.message.reply_text("No mint address provided. Please try again or cancel.")
         return ASK_MINT_FOR_SELL if command_type == "SELL" else ASK_MINT_FOR_UNSUB
     final_command = ""; friendly_action = ""
@@ -557,7 +541,7 @@ async def process_mint_address_command(update: Update, context: ContextTypes.DEF
             await update.message.reply_text(escape_markdown_v2_text(f"⚠️ Error sending '{friendly_action}' command."), parse_mode="MarkdownV2")
     else: await update.message.reply_text("Internal error: Unknown command type.")
     del context.user_data[COMMAND_TYPE_KEY]
-    await bot_control_menu_command(update, context) 
+    await bot_control_menu_command(update, context)
     return ConversationHandler.END
 
 async def cancel_mint_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -579,37 +563,16 @@ async def get_token_name(conn: asyncpg.Connection, mint: str) -> str:
         print(f"Error fetching token name for {mint}: {e}")
         return mint # Fallback
 
-async def get_current_market_data(conn: asyncpg.Connection, mint: str) -> dict | None:
-    query = """
-        SELECT price, marketcapsol AS market_cap_sol 
-        FROM v_trades 
-        WHERE mint = $1
-        ORDER BY timestamp DESC
-        LIMIT 1;
-    """
-    try:
-        row = await conn.fetchrow(query, mint)
-        if row:
-            return {
-                "current_price_sol": float(row["price"]) if row["price"] is not None else 0.0,
-                "current_market_cap_sol": float(row["market_cap_sol"]) if row["market_cap_sol"] is not None else 0.0,
-            }
-        return None
-    except Exception as e:
-        print(f"Error fetching current market data for {mint}: {e}")
-        return None
-    
 def format_open_trade_display(trade_data: dict, sol_usd_price: float | None) -> str:
     """Formats a single open trade for display with BullX link and token name."""
     mint = trade_data['mint']
-    # Token name is expected to be passed in trade_data from view_open_trades_command
-    token_name = trade_data.get('token_name', mint) 
+    token_name = trade_data.get('token_name', mint)
     buy_price_sol = float(trade_data['buy_price'])
     initial_tokens = float(trade_data['initial_tokens'])
     remaining_tokens = float(trade_data['remaining_tokens'])
     total_investment_sol = float(trade_data['total_investment_sol'])
-    buy_timestamp = trade_data['timestamp'] # Already a datetime object
-    
+    buy_timestamp = trade_data['timestamp']
+
     current_price_sol = float(trade_data.get('current_price_sol', 0.0))
     current_market_cap_sol = float(trade_data.get('current_market_cap_sol', 0.0))
 
@@ -628,12 +591,12 @@ def format_open_trade_display(trade_data: dict, sol_usd_price: float | None) -> 
     unrealized_pnl_sol = 0.0
     current_value_sol = current_price_sol * remaining_tokens
     cost_basis_remaining_sol = 0.0
-    if initial_tokens > 1e-9: # Avoid division by zero
+    if initial_tokens > 1e-9:
         cost_basis_remaining_sol = (total_investment_sol / initial_tokens) * remaining_tokens
-    
-    if not math.isclose(remaining_tokens, 0.0, abs_tol=1e-9): # only if tokens remain
+
+    if not math.isclose(remaining_tokens, 0.0, abs_tol=1e-9):
         unrealized_pnl_sol = current_value_sol - cost_basis_remaining_sol
-    
+
     pnl_emoji = "📈" if unrealized_pnl_sol >= 0 else "📉"
     profit_percentage_raw = ((unrealized_pnl_sol / cost_basis_remaining_sol) * 100) if cost_basis_remaining_sol > 1e-9 else 0.0
 
@@ -647,29 +610,24 @@ def format_open_trade_display(trade_data: dict, sol_usd_price: float | None) -> 
     profit_percentage_for_code = escape_markdown_v2_text_for_code_block(f"{profit_percentage_raw:+.2f}%")
     current_mc_sol_for_code = escape_markdown_v2_text_for_code_block(f"{current_market_cap_sol:,.0f}")
     age_md = escape_markdown_v2_text(age_str_raw)
-    
-    # Display Name Logic for Markdown
-    display_name_md_parts = []
-    # Ensure token_name is a string before calling lower() or comparing
+
     token_name_str = str(token_name) if token_name is not None else ""
     mint_str = str(mint) if mint is not None else ""
-
+    display_name_md_parts = []
     if token_name_str and token_name_str.lower() != mint_str.lower():
         display_name_md_parts.append(escape_markdown_v2_text(token_name_str))
         display_name_md_parts.append(escape_markdown_v2_text(" ("))
-        display_name_md_parts.append(f"`{mint_for_code}`") 
+        display_name_md_parts.append(f"`{mint_for_code}`")
         display_name_md_parts.append(escape_markdown_v2_text(")"))
     else:
         display_name_md_parts.append(f"`{mint_for_code}`")
     display_name_final_md = "".join(display_name_md_parts)
 
-    # BullX Link Construction
-    bullx_url_raw = f"{BULLX_URL_BASE}{mint_str}" # Use mint_str here
+    bullx_url_raw = f"{BULLX_URL_BASE}{mint_str}"
     escaped_bullx_url_for_link_part = escape_url_for_markdownv2_link(bullx_url_raw)
-    link_text_md = escape_markdown_v2_text("BullX") # Text part of the link
+    link_text_md = escape_markdown_v2_text("BullX")
     link_final_md = f"[{link_text_md}]({escaped_bullx_url_for_link_part})"
 
-    # USD Strings
     pnl_usd_str_md = ""
     current_mc_usd_str_md = ""
     if sol_usd_price and sol_usd_price > 0:
@@ -678,7 +636,6 @@ def format_open_trade_display(trade_data: dict, sol_usd_price: float | None) -> 
         pnl_usd_str_md = escape_markdown_v2_text(f" (${unrealized_pnl_usd:+.2f} USD)")
         current_mc_usd_str_md = escape_markdown_v2_text(f" (${current_market_cap_usd:,.0f} USD)")
 
-    # Assemble the final message string
     line1 = escape_markdown_v2_text("🔵 ") + display_name_final_md + escape_markdown_v2_text(" ") + link_final_md + escape_markdown_v2_text("\n")
     line2 = escape_markdown_v2_text('  Age: ') + age_md + escape_markdown_v2_text("\n")
     line3 = escape_markdown_v2_text('  Bought at: ') + f"`{buy_price_for_code}`" + escape_markdown_v2_text(' SOL\n')
@@ -686,11 +643,10 @@ def format_open_trade_display(trade_data: dict, sol_usd_price: float | None) -> 
     line5 = escape_markdown_v2_text('  Tokens (Rem/Initial): ') + f"`{remaining_tokens_for_code}`" + escape_markdown_v2_text('/') + f"`{initial_tokens_for_code}`" + escape_markdown_v2_text("\n")
     line6 = escape_markdown_v2_text(f'  Unrealized PnL {pnl_emoji}: ') + f"`{pnl_sol_for_code}`" + escape_markdown_v2_text(' SOL ') + f"`{profit_percentage_for_code}`" + pnl_usd_str_md + escape_markdown_v2_text("\n")
     line7 = escape_markdown_v2_text('  Current MC: ') + f"`{current_mc_sol_for_code}`" + escape_markdown_v2_text(' SOL') + current_mc_usd_str_md
-    
+
     return line1 + line2 + line3 + line4 + line5 + line6 + line7
 
 async def view_open_trades_command(actual_callback_query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, page: int = 0) -> None:
-    await actual_callback_query.answer()
     context.user_data[OPEN_TRADES_PAGE_KEY] = page
     sol_usd_price = get_sol_price_from_status_file()
 
@@ -703,118 +659,170 @@ async def view_open_trades_command(actual_callback_query: CallbackQuery, context
         return
 
     conn = None
-    open_trades_for_keyboard = [] # Store mint and short name for buttons
     try:
         conn = await asyncpg.connect(dsn=DB_URL)
         offset = page * ITEMS_PER_PAGE_TRADES
-        count_query = "SELECT COUNT(*) FROM portfolio WHERE status = 'active' AND tx_type = 'buy';"
-        total_items_record = await conn.fetchrow(count_query)
-        total_trades = total_items_record['count'] if total_items_record else 0
-        
-        portfolio_query = """
-            SELECT id, mint, price AS buy_price, initial_tokens, remaining_tokens, 
-                   total_investment_sol, timestamp
+
+        optimized_query = """
+        WITH ActiveTrades AS (
+            SELECT
+                id, mint, price AS buy_price, initial_tokens, remaining_tokens,
+                total_investment_sol, timestamp,
+                ROW_NUMBER() OVER (ORDER BY timestamp DESC) as rn
             FROM portfolio
             WHERE status = 'active' AND tx_type = 'buy'
-            ORDER BY timestamp DESC
-            LIMIT $1 OFFSET $2;
+        ),
+        PagedTrades AS (
+            SELECT * FROM ActiveTrades WHERE rn > $2 AND rn <= ($2 + $1)
+        ),
+        LatestMarketData AS (
+            SELECT
+                mint,
+                (array_agg(price ORDER BY timestamp DESC))[1] AS current_price_sol,
+                (array_agg(marketcapsol ORDER BY timestamp DESC))[1] AS current_market_cap_sol
+            FROM trades
+            WHERE mint = ANY(SELECT mint FROM PagedTrades)
+            GROUP BY mint
+        )
+        SELECT
+            pt.id, pt.mint, pt.buy_price, pt.initial_tokens, pt.remaining_tokens,
+            pt.total_investment_sol, pt.timestamp,
+            COALESCE(vt.name, pt.mint) AS token_name,
+            lmd.current_price_sol,
+            lmd.current_market_cap_sol,
+            (SELECT COUNT(*) FROM ActiveTrades) AS total_trades
+        FROM PagedTrades pt
+        LEFT JOIN tokens vt ON pt.mint = vt.mint
+        LEFT JOIN LatestMarketData lmd ON pt.mint = lmd.mint
+        ORDER BY pt.timestamp DESC;
         """
-        open_trades_base = await conn.fetch(portfolio_query, ITEMS_PER_PAGE_TRADES, offset)
 
-        page_count = (total_trades -1) // ITEMS_PER_PAGE_TRADES + 1 if total_trades > 0 else 1
-        message_text_parts = [escape_markdown_v2_text(f"📈 Open Trades (Page {page + 1}/{ page_count }):")]
+        open_trades_rows = await conn.fetch(optimized_query, ITEMS_PER_PAGE_TRADES, offset)
+        total_trades = open_trades_rows[0]['total_trades'] if open_trades_rows else 0
 
-        if not open_trades_base and page == 0:
-            message_text_parts.append(escape_markdown_v2_text("\nNo open trades found."))
-        elif not open_trades_base and page > 0:
-             message_text_parts.append(escape_markdown_v2_text("\nNo more trades on this page."))
+        page_count = (total_trades - 1) // ITEMS_PER_PAGE_TRADES + 1 if total_trades > 0 else 1
+        message_text_parts = [escape_markdown_v2_text(f"📈 Open Trades (Page {page + 1}/{page_count}):")]
+
+        if not open_trades_rows:
+            message_text_parts.append(escape_markdown_v2_text("\nNo open trades found on this page."))
         else:
-            for base_trade_row in open_trades_base:
-                base_trade = dict(base_trade_row)
-                token_name = await get_token_name(conn, base_trade['mint'])
-                market_data = await get_current_market_data(conn, base_trade['mint'])
-                
-                full_trade_data = {**base_trade, "token_name": token_name}
-                if market_data:
-                    full_trade_data.update(market_data)
-                
-                # Store info needed for the sell button for this trade
-                open_trades_for_keyboard.append({
-                    "mint": base_trade['mint'],
-                    "display_name": token_name if token_name and token_name.lower() != base_trade['mint'].lower() else base_trade['mint']
-                })
-                
+            for trade_row in open_trades_rows:
+                full_trade_data = dict(trade_row)
                 message_text_parts.append("\n" + format_open_trade_display(full_trade_data, sol_usd_price))
-                message_text_parts.append(escape_markdown_v2_text("➖" * 20)) # Separator
+                message_text_parts.append(escape_markdown_v2_text("➖" * 20))
 
         if message_text_parts and message_text_parts[-1] == escape_markdown_v2_text("➖" * 20):
-            message_text_parts.pop() # Remove last separator
+            message_text_parts.pop()
 
     except Exception as e:
         print(f"Error processing open trades view: {e}")
         message_text_parts = [escape_markdown_v2_text("An error occurred while fetching open trades.")]
-        total_trades = 0 
-        open_trades_for_keyboard = [] # Clear on error
+        total_trades = 0
+        open_trades_rows = []
     finally:
         if conn:
             await conn.close()
-    
+
     message_text = "\n".join(message_text_parts)
-    
-    # --- Keyboard Construction ---
+
     keyboard_layout = []
-    
-    # Add Sell buttons for each trade shown on the page
-    # We'll try to fit 2 sell buttons per row if names are short enough
-    current_sell_button_row = []
-    for trade_info in open_trades_for_keyboard:
-        # Create a short display name for the button
-        btn_text_raw = trade_info['display_name']
-        if len(btn_text_raw) > 12: # If name is long, use first few chars of mint
-            btn_text_raw = trade_info['mint'][:6] + "..."
-        elif btn_text_raw == trade_info['mint']: # If name is mint, shorten mint
-             btn_text_raw = trade_info['mint'][:6] + "..."
+    if open_trades_rows:
+        current_sell_button_row = []
+        for trade_info in open_trades_rows:
+            btn_text_raw = trade_info['token_name']
+            if len(btn_text_raw) > 12 or btn_text_raw == trade_info['mint']:
+                btn_text_raw = trade_info['mint'][:6] + "..."
 
-        sell_button = InlineKeyboardButton(f"🚨 Sell {btn_text_raw}", callback_data=f"{CB_SELL_NOW_PREFIX}{trade_info['mint']}")
-        
-        if len(current_sell_button_row) < 2: # Max 2 sell buttons per row for better layout
-            current_sell_button_row.append(sell_button)
-        else:
+            sell_button = InlineKeyboardButton(f"🚨 Sell {btn_text_raw}", callback_data=f"{CB_SELL_NOW_PREFIX}{trade_info['mint']}")
+
+            if len(current_sell_button_row) < 2:
+                current_sell_button_row.append(sell_button)
+            else:
+                keyboard_layout.append(current_sell_button_row)
+                current_sell_button_row = [sell_button]
+        if current_sell_button_row:
             keyboard_layout.append(current_sell_button_row)
-            current_sell_button_row = [sell_button]
-            
-    if current_sell_button_row: # Add any remaining buttons in the last row
-        keyboard_layout.append(current_sell_button_row)
 
-    # Pagination buttons
     pagination_buttons_row = []
     if page > 0:
         pagination_buttons_row.append(InlineKeyboardButton("⬅️ Prev Page", callback_data=f"{CB_OPEN_TRADES_PAGE_PREFIX}{page-1}"))
     if (page + 1) * ITEMS_PER_PAGE_TRADES < total_trades:
         pagination_buttons_row.append(InlineKeyboardButton("Next Page ➡️", callback_data=f"{CB_OPEN_TRADES_PAGE_PREFIX}{page+1}"))
-    
+
     if pagination_buttons_row:
         keyboard_layout.append(pagination_buttons_row)
 
     keyboard_layout.append([InlineKeyboardButton("🔙 Back to Main Menu", callback_data=CB_MAIN_MENU)])
     reply_markup = InlineKeyboardMarkup(keyboard_layout)
-    
+
     target_message = actual_callback_query.message
     try:
-        # Only edit if content or markup has changed to prevent "Message not modified" error
         if target_message.text != message_text or target_message.reply_markup != reply_markup:
-            await target_message.edit_text(text=message_text, reply_markup=reply_markup, parse_mode="MarkdownV2")
+            await target_message.edit_text(text=message_text, reply_markup=reply_markup, parse_mode="MarkdownV2", disable_web_page_preview=True)
     except Exception as e_edit:
         print(f"Error editing open trades message: {e_edit}")
-        # Fallback to sending a new message if editing fails
-        await context.bot.send_message(chat_id=actual_callback_query.message.chat_id, text=message_text, reply_markup=reply_markup, parse_mode="MarkdownV2")
+        await context.bot.send_message(chat_id=actual_callback_query.message.chat_id, text=message_text, reply_markup=reply_markup, parse_mode="MarkdownV2", disable_web_page_preview=True)
+
 
 # --- General Button Callback Handler ---
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query: CallbackQuery = update.callback_query
-    # It's better to answer selectively in handlers that might take time or edit messages
-    # await query.answer() 
     command = query.data
+
+    if command == CB_VIEW_OPEN_TRADES:
+        await query.answer()
+        asyncio.create_task(view_open_trades_command(query, context, page=0))
+        return
+
+    if command.startswith(CB_OPEN_TRADES_PAGE_PREFIX):
+        await query.answer()
+        page = int(command.split('_')[-1])
+        asyncio.create_task(view_open_trades_command(query, context, page=page))
+        return
+
+    if command.startswith(CB_SELL_NOW_PREFIX):
+        await query.answer()
+        mint_to_sell = command[len(CB_SELL_NOW_PREFIX):]
+        
+        token_name = mint_to_sell
+        conn = None
+        try:
+            conn = await asyncpg.connect(dsn=DB_URL)
+            token_name = await get_token_name(conn, mint_to_sell)
+        except Exception as e:
+            print(f"DB Error fetching token name for confirmation: {e}")
+        finally:
+            if conn: await conn.close()
+
+        current_page = context.user_data.get(OPEN_TRADES_PAGE_KEY, 0)
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Yes, Sell Now", callback_data=f"{CB_SELL_CONFIRM_YES_PREFIX}{mint_to_sell}"),
+                InlineKeyboardButton("❌ No, Cancel", callback_data=f"{CB_OPEN_TRADES_PAGE_PREFIX}{current_page}")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        prompt_text = f"Are you sure you want to sell all holdings for token *{escape_markdown_v2_text(token_name)}*?"
+        await query.message.edit_text(text=prompt_text, reply_markup=reply_markup, parse_mode="MarkdownV2")
+        return
+
+    if command.startswith(CB_SELL_CONFIRM_YES_PREFIX):
+        await query.answer("Sending sell command...")
+        mint_to_sell = command[len(CB_SELL_CONFIRM_YES_PREFIX):]
+        sell_command_str = f"SELL_{mint_to_sell}"
+        
+        confirmation_text = ""
+        if write_bot_command(sell_command_str):
+            confirmation_text = f"✅ Sell command for token `{escape_markdown_v2_text_for_code_block(mint_to_sell)}` has been sent to the bot."
+        else:
+            confirmation_text = f"⚠️ Error sending sell command for token `{escape_markdown_v2_text_for_code_block(mint_to_sell)}`."
+        
+        await query.message.edit_text(text=escape_markdown_v2_text(confirmation_text), parse_mode="MarkdownV2")
+        
+        await asyncio.sleep(2)
+        current_page = context.user_data.get(OPEN_TRADES_PAGE_KEY, 0)
+        await view_open_trades_command(query, context, page=current_page)
+        return
 
     if command == CB_GET_SOL_AMOUNT:
         await query.answer()
@@ -827,13 +835,13 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
                         f"💼 Value: ${bot_status.get('current_portfolio_value_usd', 'N/A')}\n"
                         f"🕒 Updated: {bot_status.get('timestamp', 'N/A')}")
         except Exception as e: text = f"Error: {e}"
-        try: 
+        try:
             original_title = (query.message.text or "").splitlines()
             original_title = original_title[0] if original_title else "Bot Wallet Info"
             await query.edit_message_text(text=f"{escape_markdown_v2_text(original_title)}\n\n{escape_markdown_v2_text(text)}", reply_markup=query.message.reply_markup, parse_mode="MarkdownV2")
         except Exception as e_edit:
             print(f"Error editing for SOL amount: {e_edit}")
-            await query.message.reply_text(escape_markdown_v2_text(text), parse_mode="MarkdownV2") 
+            await query.message.reply_text(escape_markdown_v2_text(text), parse_mode="MarkdownV2")
 
     elif command == CB_GET_TOKEN_COUNT:
         await query.answer()
@@ -852,76 +860,41 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             print(f"Error editing for token count: {e_edit}")
             await query.message.reply_text(escape_markdown_v2_text(text), parse_mode="MarkdownV2")
 
-    elif command == CB_VIEW_OPEN_TRADES:
-        await view_open_trades_command(query, context, page=0) 
-    elif command.startswith(CB_OPEN_TRADES_PAGE_PREFIX):
-        page = int(command.split('_')[-1])
-        await view_open_trades_command(query, context, page=page)
     elif command == CB_START_BOT or command == CB_STOP_BOT or command == CB_START_BOT_FORCE:
-        await toggle_bot_process_command(update, context) 
+        await toggle_bot_process_command(update, context)
+
     elif command == CB_REFRESH_STATUS or command == CB_MAIN_MENU:
-        await menu_command(update, context) 
+        await menu_command(update, context)
+
     elif command == CB_MANAGE_DYNAMIC_CONFIG:
-        await manage_dynamic_config_command(update, context) 
+        await manage_dynamic_config_command(update, context)
+
     elif command == CB_VIEW_DYNAMIC_CONFIG:
-        await view_dynamic_config_command(update, context) 
+        await view_dynamic_config_command(update, context)
+
     elif command == CB_BOT_CONTROL_MENU:
         await bot_control_menu_command(update, context)
+
     elif command == CB_STOP_BUYING:
         await send_simple_bot_command(update, context, "STOP_BUYING", "Stop Buys")
+
     elif command == CB_START_BUYING:
         await send_simple_bot_command(update, context, "START_BUYING", "Start Buys")
+
     elif command == CB_UNSUB_NEWTOKEN:
         await send_simple_bot_command(update, context, "UNSUB_NEWTOKEN", "Unsubscribe New Tokens")
-    elif command == CB_SELL_TOKEN_PROMPT:
-        pass 
-    elif command == CB_UNSUB_TOKEN_PROMPT:
-        pass 
-    elif command.startswith(CB_CONFIG_PAGE_PREFIX): 
+
+    elif command.startswith(CB_CONFIG_PAGE_PREFIX):
         page = int(command.split('_')[-1])
         await edit_dynamic_config_start_command(query, context, page=page)
-    elif command.startswith(CB_SELL_NOW_PREFIX):
-        await query.answer() # Answer button press immediately
-        mint_to_sell = command[len(CB_SELL_NOW_PREFIX):]
-        sell_command_str = f"SELL_{mint_to_sell}"
-        
-        # Prepare components for the confirmation message
-        mint_for_code_block = escape_markdown_v2_text_for_code_block(mint_to_sell)
-
-        if write_bot_command(sell_command_str):
-            # Construct confirmation_text by escaping literal parts
-            part1 = escape_markdown_v2_text("✅ Sell command for token ")
-            # The part in backticks is already correctly escaped for its context
-            code_part = f"`{mint_for_code_block}`" 
-            part2 = escape_markdown_v2_text(" sent to the bot.") # This will escape the trailing dot
-            confirmation_text = part1 + code_part + part2
-            
-            await query.edit_message_reply_markup(reply_markup=None) # Remove buttons from trade list after action
-                                                                    # Or refresh the list if preferred
-            
-        else:
-            # Construct error message similarly
-            part1 = escape_markdown_v2_text("⚠️ Error sending sell command for token ")
-            code_part = f"`{mint_for_code_block}`"
-            part2 = escape_markdown_v2_text(".") # Escape the trailing dot
-            confirmation_text = part1 + code_part + part2
-        
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=confirmation_text,
-            parse_mode="MarkdownV2"
-        )
-        # Optional: Refresh the open trades view or main menu
-        # current_page = context.user_data.get(OPEN_TRADES_PAGE_KEY, 0)
-        # await view_open_trades_command(query, context, page=current_page) 
-        # For now, sending a message and letting user manually navigate back or refresh.
 
     else:
-        await query.answer("Unknown command.")
-        await query.edit_message_text(text=f"Unknown command: {escape_markdown_v2_text(command)}", parse_mode="MarkdownV2")
+        # Default fallback for any unhandled command
+        await query.answer("Unknown or unhandled command.")
+        print(f"Unhandled callback query command: {command}")
+
 
 # --- Main Function ---
-# ... (main_telegram_bot and if __name__ == '__main__': remain the same) ...
 def main_telegram_bot() -> None:
     print("Starting Telegram bot interface...")
     if not TG_TOKEN or not TG_ID:
@@ -938,9 +911,9 @@ def main_telegram_bot() -> None:
             TYPING_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, typing_value_handler)],
         },
         fallbacks=[
-            CommandHandler('cancel_edit_config', cancel_edit_config_command), 
+            CommandHandler('cancel_edit_config', cancel_edit_config_command),
             CallbackQueryHandler(cancel_edit_config_command, pattern=f"^{CB_CANCEL_EDIT_CONFIG}$"),
-            MessageHandler(filters.COMMAND, fallback_edit_config) 
+            MessageHandler(filters.COMMAND, fallback_edit_config)
         ],
         per_message=False
     )
@@ -955,16 +928,16 @@ def main_telegram_bot() -> None:
         },
         fallbacks=[
             CommandHandler('cancel_mint_command', cancel_mint_command),
-            CallbackQueryHandler(cancel_mint_command, pattern=f"^{CB_BOT_CONTROL_MENU}$"), 
-            MessageHandler(filters.COMMAND, fallback_edit_config) 
+            CallbackQueryHandler(cancel_mint_command, pattern=f"^{CB_BOT_CONTROL_MENU}$"),
+            MessageHandler(filters.COMMAND, fallback_edit_config)
         ],
-         per_message=False
+        per_message=False
     )
-    application.add_handler(CommandHandler("start", menu_command)) 
+    application.add_handler(CommandHandler("start", menu_command))
     application.add_handler(CommandHandler("menu", menu_command))
     application.add_handler(edit_config_conv_handler)
     application.add_handler(mint_command_conv_handler)
-    application.add_handler(CallbackQueryHandler(button_callback_handler)) 
+    application.add_handler(CallbackQueryHandler(button_callback_handler))
     print("Telegram bot polling...")
     try:
         application.run_polling()
