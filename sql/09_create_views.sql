@@ -38,3 +38,29 @@ CREATE OR REPLACE VIEW v_rugcheck AS
 SELECT mint, score, token_supply, last_checked FROM rugcheck
 UNION ALL
 SELECT mint, score, token_supply, last_checked FROM rugcheck_backup;
+
+-- View for combined migrations and migrations_backup
+CREATE OR REPLACE VIEW v_migrations AS
+SELECT 
+    signature,
+    mint,
+    txType,
+    pool,
+    timestamp,
+    NULL AS backup_timestamp,
+    'active' AS record_source
+FROM 
+    migrations
+
+UNION ALL
+
+SELECT 
+    signature,
+    mint,
+    txType,
+    pool,
+    timestamp,
+    backup_timestamp,
+    'backup' AS record_source
+FROM 
+    migrations_backup;
