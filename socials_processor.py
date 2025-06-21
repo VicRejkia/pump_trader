@@ -167,13 +167,13 @@ class SocialsProcessor:
 
         except httpx.HTTPStatusError as e:
             results['error'] = f"HTTP Error {e.response.status_code}"
-            logger.warning(f"Website Verify Fail ({url}): HTTP {e.response.status_code}")
+            logger.debug(f"Website Verify Fail ({url}): HTTP {e.response.status_code}")
         except httpx.TimeoutException:
             results['error'] = "Timeout"
-            logger.warning(f"Website Verify Fail ({url}): Timeout")
+            logger.debug(f"Website Verify Fail ({url}): Timeout")
         except httpx.RequestError as e:
             results['error'] = f"Request Error: {type(e).__name__}"
-            logger.warning(f"Website Verify Fail ({url}): Request Error ({type(e).__name__})")
+            logger.debug(f"Website Verify Fail ({url}): Request Error ({type(e).__name__})")
         except ImportError:
              results['error'] = "Missing 'beautifulsoup4' library"
              logger.error("Dependency missing: Please install 'beautifulsoup4' (`pip install beautifulsoup4`) for website content checking.")

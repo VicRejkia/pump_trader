@@ -678,9 +678,9 @@ async def view_open_trades_command(actual_callback_query: CallbackQuery, context
         LatestMarketData AS (
             SELECT
                 mint,
-                (array_agg(price ORDER BY timestamp DESC))[1] AS current_price_sol,
-                (array_agg(marketcapsol ORDER BY timestamp DESC))[1] AS current_market_cap_sol
-            FROM trades
+                (array_agg(price_sol ORDER BY timestamp DESC))[1] AS current_price_sol, -- USE UNIFIED COLUMN
+                (array_agg(market_cap_sol ORDER BY timestamp DESC))[1] AS current_market_cap_sol -- USE UNIFIED COLUMN
+            FROM v_unified_market_ticks_live -- <<< CORRECTED: USE LIVE UNIFIED VIEW
             WHERE mint = ANY(SELECT mint FROM PagedTrades)
             GROUP BY mint
         )

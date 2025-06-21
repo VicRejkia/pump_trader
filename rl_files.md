@@ -1,2587 +1,832 @@
 # `PUMP_T~1` Project Files
 
-📅 Generated on: 2025-05-22 17:15
+📅 Generated on: 2025-06-16 21:21
 
 📂 Project root: `C:\USERS\SASCHA\DOCUME~1\PROJECTS\PYTHON\CRYPTO\PUMP_T~1`
 
 ---
 
-### 📄 backtester.py
+### 📄 ga_config.py
 
 ```python
-# FILE: backtester.py (Modified for Lifespan & Refinements)
+# FILE: ga_config.py
 
 """
-Backtesting Engine Module
+Configuration for the Genetic Algorithm (GA) optimizer.
 
-Simulates trading strategies on historical data, respecting token lifespans,
-to evaluate performance.
+This module defines the parameters to be optimized by the GA,
+their respective ranges (boundaries), data splitting configurations,
+backtesting settings, and GA hyperparameters.
 """
-import numpy as np
-import pandas as pd
+
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any # Added Optional
-
-from logger import logger
-
-# --- Performance Metrics Calculation ---
-def calculate_performance_metrics(
-    trade_history: list,
-    initial_capital: float,
-    final_capital: float,
-    start_ts: Optional[datetime] = None, # Optional start/end timestamps for context
-    end_ts: Optional[datetime] = None,
-    simulation_end_reason: str = "Completed" # Reason simulation stopped
-) -> dict:
-    """
-    Calculates various performance metrics based on simulated trades.
-
-    Args:
-        trade_history: List of dictionaries representing simulated trades.
-                       Expected keys: 'timestamp', 'type' ('buy'/'sell'), 'price',
-                                      'amount_sol', 'amount_tokens', 'pnl' (for sells).
-        initial_capital: Starting capital in SOL.
-        final_capital: Ending capital in SOL (including value of remaining assets).
-        start_ts: Timestamp of the first data point used in the simulation.
-        end_ts: Timestamp of the last data point used or token death.
-        simulation_end_reason: Why the simulation stopped ('Completed', 'Token Death', 'Max Steps').
-
-
-    Returns:
-        A dictionary containing performance metrics. Includes added metrics like
-        total_return_pct, duration_minutes, simulation_end_reason.
-    """
-    metrics = {
-        "total_pnl": 0.0,
-        "total_return_pct": 0.0,
-        "total_trades": 0, # Number of completed buy/sell cycles
-        "winning_trades": 0,
-        "losing_trades": 0,
-        "total_profit_sells": 0.0, # Sum of PnL from profitable sells
-        "total_loss_sells": 0.0,   # Sum of absolute PnL from losing sells
-        "win_rate": 0.0,
-        "avg_profit_per_win_trade": 0.0,
-        "avg_loss_per_loss_trade": 0.0,
-        "profit_factor": 0.0, # Total profit / Total loss
-        "max_drawdown": 0.0,
-        "simulation_start_ts": start_ts.isoformat() if start_ts else None,
-        "simulation_end_ts": end_ts.isoformat() if end_ts else None,
-        "simulation_duration_minutes": (end_ts - start_ts).total_seconds() / 60.0 if start_ts and end_ts else None,
-        "simulation_end_reason": simulation_end_reason,
-    }
-
-    # Calculate PnL and Return %
-    metrics["total_pnl"] = final_capital - initial_capital
-    if initial_capital > 0:
-        metrics["total_return_pct"] = (metrics["total_pnl"] / initial_capital) * 100.0
-
-    # Analyze sell trades for win rate, avg profit/loss, profit factor
-    sell_trades = [t for t in trade_history if t['type'] == 'sell' and 'pnl' in t]
-    metrics["total_trades"] = len(sell_trades)
-
-    if metrics["total_trades"] > 0:
-        for trade in sell_trades:
-            pnl = trade.get('pnl', 0.0)
-            if pnl > 0:
-                metrics["winning_trades"] += 1
-                metrics["total_profit_sells"] += pnl
-            elif pnl < 0:
-                metrics["losing_trades"] += 1
-                metrics["total_loss_sells"] += abs(pnl) # Loss is positive here
-
-        if metrics["total_trades"] > 0:
-             metrics["win_rate"] = (metrics["winning_trades"] / metrics["total_trades"]) * 100.0
-
-        if metrics["winning_trades"] > 0:
-             metrics["avg_profit_per_win_trade"] = metrics["total_profit_sells"] / metrics["winning_trades"]
-
-        if metrics["losing_trades"] > 0:
-             metrics["avg_loss_per_loss_trade"] = metrics["total_loss_sells"] / metrics["losing_trades"]
-
-        if metrics["total_loss_sells"] > 0:
-             metrics["profit_factor"] = metrics["total_profit_sells"] / metrics["total_loss_sells"]
-        elif metrics["total_profit_sells"] > 0:
-             metrics["profit_factor"] = float('inf') # Profit but no losses
-
-
-    # --- Calculate Max Drawdown ---
-    # Track portfolio value over time based on trades
-    portfolio_values = [initial_capital] # Start with initial capital
-    current_portfolio_value = initial_capital
-    peak_value = initial_capital
-    max_dd = 0.0
-
-    # Create an equity curve based on trade executions
-    equity_curve = pd.Series(index=[], dtype=float)
-    if trade_history:
-        # Use the timestamp of the first trade, or the simulation start if available
-        first_ts = trade_history[0]['timestamp']
-        equity_curve.loc[start_ts if start_ts and start_ts < first_ts else first_ts] = initial_capital # Start point
-
-    for trade in trade_history:
-        trade_ts = trade['timestamp']
-        if trade['type'] == 'buy':
-            # Value decreases by investment cost just before buy
-            equity_curve.loc[trade_ts - pd.Timedelta(nanoseconds=1)] = current_portfolio_value
-            current_portfolio_value -= trade.get('amount_sol', 0)
-            equity_curve.loc[trade_ts] = current_portfolio_value
-        elif trade['type'] == 'sell':
-            # Value increases by net SOL received just before sell
-            equity_curve.loc[trade_ts - pd.Timedelta(nanoseconds=1)] = current_portfolio_value
-            current_portfolio_value += trade.get('amount_sol', 0)
-            equity_curve.loc[trade_ts] = current_portfolio_value
-
-    # Add final capital point if simulation ended and value changed since last trade
-    if end_ts:
-        if not equity_curve.empty and equity_curve.index[-1] < end_ts:
-             equity_curve.loc[end_ts] = final_capital
-        elif equity_curve.empty: # Handle case with no trades
-             equity_curve.loc[start_ts if start_ts else datetime.now(timezone.utc)] = initial_capital
-             equity_curve.loc[end_ts] = final_capital
-
-
-    # Ensure chronological order and remove duplicates keeping last value
-    if not equity_curve.empty:
-        equity_curve = equity_curve.sort_index()
-        equity_curve = equity_curve[~equity_curve.index.duplicated(keep='last')]
-
-        # Calculate drawdown from the equity curve
-        roll_max = equity_curve.cummax()
-        drawdown = (roll_max - equity_curve) / roll_max
-        max_dd = drawdown.max() if not drawdown.empty else 0.0 # Handle empty drawdown case
-
-    metrics["max_drawdown"] = max_dd * 100.0 # Store as percentage
-
-    return metrics
-
-# --- Backtesting Core Function ---
-async def run_backtest(
-    parameters: dict,
-    ohlcv_data: pd.DataFrame, # Renamed: Expects pre-processed OHLCV data
-    initial_capital: float,
-    max_timestamp: Optional[datetime] = None # Token death timestamp
-) -> dict:
-    """
-    Simulates trading with 5-second OHLCV candlestick data, respecting token lifespan.
-
-    Args:
-        parameters: Dictionary of trading parameters for this simulation run.
-        ohlcv_data: DataFrame containing historical 5s OHLCV data for the token.
-                    Index must be a timezone-aware UTC DatetimeIndex.
-                    Expected columns: 'Open', 'High', 'Low', 'Close', 'Volume',
-                                      'market_cap_calculated', 'rugcheck_score', 'socials_score'.
-        initial_capital: Starting capital in SOL.
-        max_timestamp: Optional UTC timestamp indicating the end of the token's
-                       life. Simulation will stop at or before this time.
-
-    Returns:
-        A dictionary containing performance metrics calculated by
-        `calculate_performance_metrics`.
-    """
-    mint_addr = parameters.get("mint", "UNKNOWN_MINT") # Get mint for logging if passed in params
-    simulation_end_reason = "Completed" # Default end reason
-
-    # --- Log Entry and Initial Checks ---
-    logger.debug(f"--- Entering run_backtest for Mint: {mint_addr} --- Max Timestamp: {max_timestamp}")
-    if ohlcv_data.empty:
-        logger.warning(f"Historical OHLCV data empty for {mint_addr}.")
-        return calculate_performance_metrics([], initial_capital, initial_capital, simulation_end_reason="No Data")
-
-    if not isinstance(ohlcv_data.index, pd.DatetimeIndex) or ohlcv_data.index.tz is None:
-        logger.error(f"DataFrame index must be timezone-aware UTC DatetimeIndex for {mint_addr}.")
-        try:
-             ohlcv_data.index = pd.to_datetime(ohlcv_data.index, utc=True)
-             logger.warning("Attempted to convert index to UTC. Review data loading.")
-        except Exception:
-             return calculate_performance_metrics([], initial_capital, initial_capital, simulation_end_reason="Invalid Index")
-
-    # --- Prepare Data ---
-    df = ohlcv_data.copy() # Use the input OHLCV data directly
-    df = df.sort_index() # Ensure chronological order
-
-    # Filter data up to max_timestamp if provided
-    start_ts_data = df.index.min()
-    end_ts_data = df.index.max()
-    if max_timestamp:
-        if max_timestamp.tzinfo is None:
-             max_timestamp = max_timestamp.replace(tzinfo=timezone.utc)
-        df = df[df.index <= max_timestamp]
-        end_ts_data = max_timestamp # The effective end time is the token death time
-        simulation_end_reason = "Token Death"
-        if df.empty:
-            logger.warning(f"No data remains for {mint_addr} after filtering up to max_timestamp {max_timestamp}.")
-            return calculate_performance_metrics([], initial_capital, initial_capital, start_ts_data, end_ts_data, simulation_end_reason)
-
-    # --- Data Validation (Check for required OHLCV columns) ---
-    required_cols = ['Open', 'High', 'Low', 'Close', 'Volume', 'market_cap_calculated', 'volatility', 'rugcheck_score', 'socials_score']
-    missing_cols = [col for col in required_cols if col not in df.columns]
-    if missing_cols:
-        logger.error(f"Missing required OHLCV columns in input data for {mint_addr}: {missing_cols}")
-        return calculate_performance_metrics([], initial_capital, initial_capital, start_ts_data, end_ts_data, "Missing OHLCV Cols")
-
-    # --- Convert Columns to Numeric (Coerce errors) ---
-    numeric_cols = ['Open', 'High', 'Low', 'Close', 'Volume', 'market_cap_calculated', 'volatility', 'rugcheck_score', 'socials_score']
-    for col in numeric_cols:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
-
-    # Fill NaNs that might result from coercion or were already present
-    # Use ffill/bfill for price-like columns, 0 for volume/scores
-    price_cols = ['Open', 'High', 'Low', 'Close', 'market_cap_calculated', 'volatility']
-    df[price_cols] = df[price_cols].ffill().bfill()
-    df[['Volume']] = df[['Volume']].fillna(0.0)
-    df[['rugcheck_score', 'socials_score']] = df[[ 'rugcheck_score', 'socials_score']].fillna(1000.0)
-
-    # Ensure no invalid prices remain after filling (use Close price as primary)
-    df = df[df["Close"] > 1e-12] # Use epsilon
-
-    # --- Calculate Volatility ---
-    # Calculate based on the 'Close' price series
-    # if not df.empty and 'Close' in df.columns:
-    #     prices_series = df['Close'] # Use the 'Close' price
-    #     if len(prices_series) > 1:
-    #          # Ensure index is DatetimeIndex before passing
-    #          if not isinstance(prices_series.index, pd.DatetimeIndex):
-    #               prices_series.index = pd.to_datetime(prices_series.index, utc=True)
-
-    #          # Use appropriate window (e.g., 10 minutes = 120 * 5s candles)
-    #          df['volatility'] = calculate_volatility(prices_series, window=120).fillna(0.0)
-    #     else:
-    #         df['volatility'] = 0.0
-    # else:
-    #     df['volatility'] = 0.0 # Add column even if empty
-
-    if df.empty:
-         logger.warning(f"No candle data remained after filtering/validation for {mint_addr}.")
-         return calculate_performance_metrics([], initial_capital, initial_capital, start_ts_data, end_ts_data, "No Candle Data")
-    
-    # logger.debug(f"Data head:\n{df.head()}")
-    # logger.debug(f"Data tail:\n{df.tail()}")
-
-    # --- Extract Parameters (Same as before) ---
-    sol_to_buy = parameters.get('SOL_TO_BUY', 0.9)
-    initial_stop_loss_percent = parameters.get('INITIAL_STOP_LOSS_PERCENT', 10.0)
-    first_sell_percent = parameters.get('FIRST_SELL_PERCENT', 65.0)
-    trailing_stop_loss_percent = parameters.get('TRAILING_STOP_LOSS_PERCENT', 15.0)
-    second_take_profit_percent = parameters.get('SECOND_TAKE_PROFIT_PERCENT', 550.0)
-    first_sell_profit_margin = parameters.get('FIRST_SELL_PROFIT_MARGIN', 170.0)
-    volume_threshold = parameters.get('DEFAULT_VOLUME_THRESHOLD', 19000)
-    marketcap_threshold = parameters.get('DEFAULT_MARKETCAP_THRESHOLD', 10000)
-    rugcheck_threshold = parameters.get('DEFAULT_RUGCHECK_SCORE_THRESHOLD', 801)
-    socials_threshold = parameters.get('DEFAULT_SOCIAL_SCORE_THRESHOLD', 50)
-    min_volatility = parameters.get('MIN_VOLATILITY', 0.1)
-    buy_fee = parameters.get('DEFAULT_BUY_FEE', 0.001)
-    buy_tip = parameters.get('DEFAULT_BUY_TIP', 0.001)
-    sell_fee = parameters.get('DEFAULT_SELL_FEE', 0.001)
-    sell_tip = parameters.get('DEFAULT_SELL_TIP', 0.001)
-
-    # --- Simulation State ---
-    current_sol = initial_capital
-    trade_history = []
-    active_position = None # Dictionary to store buy details
-
-    # --- Simulate Step-by-Step ---
-    # Iterate directly over the OHLCV DataFrame index
-    simulation_indices = df.index # Use all available 5s intervals
-    total_steps = len(simulation_indices)
-    log_interval = max(1, total_steps // 10)
-
-    logger.debug(f"Starting simulation loop for {mint_addr}. Total steps: {total_steps}. Max Timestamp: {end_ts_data}")
-    step_count = 0
-
-    for timestamp in simulation_indices:
-        step_count += 1
-        if step_count % log_interval == 0:
-             logger.debug(f"Simulating step {step_count}/{total_steps} for {mint_addr} (Timestamp: {timestamp})")
-
-        # Timestamp should always exist as we iterate over the index
-        try:
-            row = df.loc[timestamp]
-            # --- Use OHLCV columns ---
-            price = float(row["Close"]) # Use Close price for decisions/executions
-            volume = float(row["Volume"]) # Use aggregated Volume
-            high_price = float(row["High"]) # Use High price for highest_price tracking
-            low_price = float(row["Low"])   # Use Low price for SL check? (Using Close is simpler)
-            # --- End OHLCV columns ---
-            market_cap_sol = float(row.get("market_cap_calculated", 0.0))
-            rugcheck_score = int(row.get("rugcheck_score", 10000))
-            socials_score = int(row.get("socials_score", 100))
-            volatility = float(row.get("volatility", 0.0))
-
-            # --- Check Buy/Sell Logic ---
-
-            # --- Sell Logic ---
-            if active_position:
-                pos = active_position
-                # Update highest price using the High of the current candle
-                hp = max(pos['highest_price'], high_price)
-                pos['highest_price'] = hp
-
-                # Calculate current sell trigger prices based on active position
-                current_stop_loss_price = pos['stop_loss_price']
-                initial_tp_price = pos['initial_tp_price']
-                second_tp_price = pos['second_tp_price']
-                first_tp_hit = pos['first_tp_hit']
-
-                trailing_sl_price = 0.0
-                if first_tp_hit:
-                    trailing_sl_price = hp * (1.0 - trailing_stop_loss_percent / 100.0)
-
-                # Determine sell reason (using Close price for checks)
-                sell_reason = None
-                sell_all = False; sell_partial = False
-                sell_percentage = 0.0 # Percentage of initial tokens
-
-                # Check SL/TP using Close price
-                if price <= current_stop_loss_price:
-                    sell_reason = "Stop Loss" if not first_tp_hit else "Breakeven SL"; sell_all = True; sell_percentage = 1.0
-                elif price >= second_tp_price:
-                    sell_reason = "Second TP"; sell_all = True; sell_percentage = 1.0
-                elif not first_tp_hit and price >= initial_tp_price:
-                    sell_reason = "First TP"; sell_partial = True; sell_percentage = first_sell_percent / 100.0
-                elif first_tp_hit and price <= trailing_sl_price:
-                    sell_reason = "Trailing SL"; sell_all = True; sell_percentage = 1.0
-                # Emergency SL (requires SOL price - not implemented here for simplicity)
-                # elif (market_cap_sol * sol_price_live) < min_market_cap_usd:
-                #    sell_reason = "Emergency SL"; sell_all = True; sell_percentage = 1.0
-
-                # --- Execute Sell ---
-                if sell_reason:
-                    initial_tokens = pos['initial_tokens']
-                    remaining_tokens = pos['remaining_tokens']
-                    total_investment = pos['total_investment_sol']
-                    tokens_to_sell = 0.0
-
-                    if sell_partial:
-                        tokens_to_sell = initial_tokens * sell_percentage
-                        tokens_to_sell = min(tokens_to_sell, remaining_tokens)
-                    elif sell_all:
-                        tokens_to_sell = remaining_tokens
-
-                    if tokens_to_sell > 1e-9:
-                        # Simulate sale using the Close price of the interval
-                        gross_sol = tokens_to_sell * price
-                        net_sol = gross_sol - sell_fee - sell_tip
-                        cost_basis = total_investment * (tokens_to_sell / initial_tokens) if initial_tokens > 0 else 0
-                        pnl = net_sol - cost_basis
-
-                        current_sol += net_sol
-                        pos['remaining_tokens'] -= tokens_to_sell
-
-                        trade_history.append({
-                            'timestamp': timestamp, 'type': 'sell', 'price': price,
-                            'amount_sol': net_sol, 'amount_tokens': tokens_to_sell,
-                            'reason': sell_reason, 'pnl': pnl
-                        })
-
-                        if sell_partial:
-                            pos['first_tp_hit'] = True
-                            pos['stop_loss_price'] = pos['buy_price'] # Adjust SL to breakeven
-
-                        if pos['remaining_tokens'] < 1e-9:
-                            active_position = None # Close position fully
-
-            # --- Buy Logic ---
-            elif not active_position and current_sol >= (sol_to_buy + buy_fee + buy_tip):
-                # Check buy criteria using current candle data (Volume, Close price)
-                meets_buy_criteria = (
-                    volume >= volume_threshold and # Use aggregated Volume
-                    market_cap_sol >= marketcap_threshold and
-                    rugcheck_score < rugcheck_threshold and
-                    socials_score < socials_threshold and
-                    volatility >= min_volatility
-                )
-                # logger.debug(f"Buy criteria for {mint_addr} at {timestamp}: \n")
-                # logger.debug(f"Volume={volume_threshold} - {volume}")
-                # logger.debug(f"MarketCap={marketcap_threshold} - {market_cap_sol}")
-                # logger.debug(f"Volatility={min_volatility} - {volatility}")
-                # logger.debug(f"RugCheck={rugcheck_threshold} - {rugcheck_score}")
-                # logger.debug(f"Socials={socials_threshold} - {socials_score}")
-
-
-                if meets_buy_criteria:
-                    total_investment = sol_to_buy + buy_fee + buy_tip
-                    sol_for_tokens = sol_to_buy
-                    # Simulate buy using Close price
-                    tokens_bought = sol_for_tokens / price if price > 0 else 0
-
-                    if tokens_bought > 0:
-                        # Calculate initial SL/TPs based on Close price
-                        initial_sl_price = price * (1.0 - initial_stop_loss_percent / 100.0)
-
-                        sell_fee_tp1 = sell_fee
-                        sell_tip_tp1 = sell_tip
-                        profit_margin_tp1 = first_sell_profit_margin / 100.0
-                        sell_percent_tp1 = first_sell_percent / 100.0
-
-                        total_cost_base_tp1 = total_investment + sell_fee_tp1 + sell_tip_tp1
-                        target_net_sol_return_tp1 = total_cost_base_tp1 * (1 + profit_margin_tp1)
-                        target_gross_sol_return_tp1 = target_net_sol_return_tp1 + sell_fee_tp1 + sell_tip_tp1
-                        tokens_to_sell_tp1 = tokens_bought * sell_percent_tp1
-                        initial_tp_price = (target_gross_sol_return_tp1 / tokens_to_sell_tp1) if tokens_to_sell_tp1 > 1e-9 else float('inf')
-
-                        second_tp_price = price * (1.0 + second_take_profit_percent / 100.0)
-
-                        # --- Update State ---
-                        current_sol -= total_investment
-                        active_position = {
-                            'buy_price': price, 'initial_tokens': tokens_bought,
-                            'remaining_tokens': tokens_bought, 'total_investment_sol': total_investment,
-                            'stop_loss_price': initial_sl_price, 'initial_tp_price': initial_tp_price,
-                            'second_tp_price': second_tp_price, 'highest_price': price, # Initialize highest with buy price
-                            'first_tp_hit': False, 'entry_timestamp': timestamp
-                        }
-
-                        trade_history.append({
-                            'timestamp': timestamp, 'type': 'buy', 'price': price,
-                            'amount_sol': total_investment, 'amount_tokens': tokens_bought,
-                            'buy_fee': buy_fee, 'buy_tip': buy_tip
-                        })
-
-        except KeyError as ke:
-            logger.error(f"KeyError accessing data at step {step_count} for {mint_addr} (Timestamp: {timestamp}): Missing key {ke}", exc_info=False)
-            continue # Skip this step
-        except ValueError as ve:
-             logger.error(f"ValueError at step {step_count} for {mint_addr} (Timestamp: {timestamp}): {ve}", exc_info=False)
-             continue # Skip this step
-        except Exception as loop_err:
-             logger.error(f"Error during simulation step {step_count} for {mint_addr} (Timestamp: {timestamp}): {loop_err}", exc_info=True)
-             continue
-
-    # --- Simulation End ---
-    logger.debug(f"Simulation loop finished for {mint_addr} at step {step_count}.")
-
-    # --- Final Value Calculation ---
-    final_value = current_sol
-    if active_position:
-        # Use the Close price from the *last available candle* in the filtered df
-        if not df.empty:
-            last_valid_index = df.index[-1]
-            last_close_price = float(df.loc[last_valid_index]["Close"]) # Use Close price
-
-            remaining_tokens = active_position['remaining_tokens']
-            gross_sol_final = remaining_tokens * last_close_price
-            net_sol_final = gross_sol_final - sell_fee - sell_tip
-            final_value += max(0, net_sol_final)
-            logger.debug(f"Added value of remaining {remaining_tokens:.4f} tokens for {mint_addr} at final Close price {last_close_price:.9f} (Net: {net_sol_final:.6f})")
-        else:
-             logger.warning(f"No data available to value remaining position for {mint_addr}. Using current SOL only.")
-
-    # --- Calculate Metrics ---
-    logger.debug(f"Calculating final performance metrics for {mint_addr}")
-    metrics = calculate_performance_metrics(
-        trade_history,
-        initial_capital,
-        final_value,
-        start_ts=start_ts_data,
-        end_ts=end_ts_data,
-        simulation_end_reason=simulation_end_reason
-    )
-    metrics["parameters"] = parameters
-    metrics["initial_capital"] = initial_capital
-    metrics["final_portfolio_value"] = final_value
-
-    logger.debug(f"--- Exiting run_backtest for Mint: {mint_addr} --- Final Value: {final_value:.4f}")
-    return metrics
-
-
-async def main_test():
-    # This requires DB connection and data fetching setup similar to ga_optimizer
-    # Ensure the data fetched by get_historical_data_for_backtesting is used
-    from database_handler import DatabaseClient, get_token_lifespan
-    from ga_config import OPTIMIZABLE_PARAMETERS, BACKTEST_INITIAL_CAPITAL, HISTORICAL_DATA_START_TS, HISTORICAL_DATA_END_TS
-    import random
-    from logger import setup_logging
-
-    setup_logging()
-    db_client = DatabaseClient()
-    await db_client.connect()
-
-    test_mint = "X1dpwrtFkMwbFFr6ydAVv1t7ysuXXNCqDcoVpyMpump" # Replace with a valid mint
-    start_dt = HISTORICAL_DATA_START_TS
-    end_dt = HISTORICAL_DATA_END_TS
-
-    logger.info(f"Fetching OHLCV test data for mint {test_mint} from {start_dt} to {end_dt}")
-    # Use the function that returns OHLCV data
-    hist_data_dict = await db_client.get_historical_data_for_backtesting([test_mint], start_dt, end_dt)
-    logger.debug(f"Fetched historical data: {hist_data_dict}")
-
-    if not hist_data_dict or test_mint not in hist_data_dict:
-        logger.error(f"Could not fetch OHLCV data for test mint {test_mint}. Exiting test.")
-        await db_client.close()
-        return
-
-    test_ohlcv_data = hist_data_dict[test_mint] # This should be the OHLCV DataFrame
-    logger.info(f"Fetched {len(test_ohlcv_data)} OHLCV data points for {test_mint}.")
-
-    # --- Get Token Lifespan ---
-    lifespan = await get_token_lifespan(db_client, test_mint)
-    max_ts = lifespan['end_ts'] if lifespan else None
-    logger.info(f"Token Lifespan: Start={lifespan['start_ts']}, End={lifespan['end_ts']}")
-
-    # --- Test Parameters ---
-    #test_params = {}
-    # for p in OPTIMIZABLE_PARAMETERS:
-    #     if 'values' in p:
-    #         test_params[p['name']] = random.choice(p['values'])
-    #     elif 'low' in p and 'high' in p:
-    #          if p['type'] == float: test_params[p['name']] = random.uniform(p['low'], p['high'])
-    #          else: test_params[p['name']] = random.randint(p['low'], p['high'])
-
-    # test_params['SOL_TO_BUY'] = 0.5
-    # test_params['mint'] = test_mint
-
-    test_params = {
-        'SOL_TO_BUY': 0.9, 
-        'INITIAL_STOP_LOSS_PERCENT': 10, 
-        'FIRST_SELL_PERCENT': 65, 
-        'TRAILING_STOP_LOSS_PERCENT': 15,
-        'SECOND_TAKE_PROFIT_PERCENT': 550, 
-        'FIRST_SELL_PROFIT_MARGIN': 170,
-        'DEFAULT_VOLUME_THRESHOLD': 19000, 
-        'DEFAULT_MARKETCAP_THRESHOLD': 10000, 
-        'MIN_VOLATILITY': 0.1, 
-        'DEFAULT_RUGCHECK_SCORE_THRESHOLD': 801, 
-        'DEFAULT_SOCIAL_SCORE_THRESHOLD': 50, 
-        'MIN_MARKET_CAP': 3000, 
-        'DEFAULT_TIME_INTERVAL': 30, 
-        'mint': 'X1dpwrtFkMwbFFr6ydAVv1t7ysuXXNCqDcoVpyMpump'
-    }  
-    # "{""buy_fee_config"": 0.001, ""buy_tip_config"": 0.001, ""sol_to_buy_config"": 0.9, ""first_sell_percent_config"": 65.0, ""calculated_second_tp_price"": 0.000014365116894174576, ""calculated_initial_sl_price"": 0.000001989016185347249, ""calculated_initial_tp_price"": 0.000009228430650648165,
-    #  ""volume_threshold_usd_config"": 19000, ""time_interval_minutes_config"": 30, ""min_volatility_percent_config"": 0.1, ""social_score_threshold_config"": 50, ""marketcap_threshold_usd_config"": 10000,
-    #  ""first_sell_profit_margin_config"": 170.0, ""rugcheck_score_threshold_config"": 801, ""initial_stop_loss_percent_config"": 10.0, ""second_take_profit_percent_config"": 550.0, ""trailing_stop_loss_percent_config"": 15.0}"
-
-    logger.info("--- Running Backtester Test with OHLCV Data ---")
-    logger.info(f"Test Parameters: {test_params}")
-    logger.info(f"Initial Capital: {BACKTEST_INITIAL_CAPITAL}")
-    logger.info(f"Max Timestamp (Token Death): {max_ts}")
-
-    # Pass the OHLCV data directly
-    results = await run_backtest(test_params, test_ohlcv_data, BACKTEST_INITIAL_CAPITAL, max_ts)
-
-    logger.info("--- Backtester Test Results ---")
-    import pprint
-    pprint.pprint(results)
-
-    await db_client.close()
-
-if __name__ == "__main__":
-    import asyncio
-    from logger import setup_logging
-    setup_logging()
-    asyncio.run(main_test())
+from typing import List, Dict, Any, Union
+
+# --- Parameters to Optimize ---
+# Define the parameters from the main config that the GA will tune.
+# Each parameter is a dictionary with 'name', 'values' (for discrete choices)
+# or 'low'/'high' (for continuous ranges), and 'type' (int or float).
+# Ensure 'name' matches the exact key used in the trading logic/backtester.
+# Using discrete values simplifies the search space initially.
+
+OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
+    {
+        "name": "SOL_TO_BUY",
+        "values": [round(x * 0.1, 1) for x in range(1, 6)], # 0.2 to 1.0 SOL in steps of 0.1
+        "type": float
+    },
+    {
+        "name": "INITIAL_STOP_LOSS_PERCENT",
+        "values": list(range(40, 81, 5)), # 10% to 70% SL in steps of 5%
+        "type": float
+    },
+    {
+        "name": "FIRST_SELL_PERCENT",
+        "values": list(range(15, 81, 5)), # 20% to 100% of initial tokens in steps of 10%
+        "type": float
+    },
+    {
+        "name": "TRAILING_STOP_LOSS_PERCENT",
+        "values": list(range(40, 81, 5)), # 5% to 50% trailing SL in steps of 5% (tighter range)
+        "type": float
+    },
+    {
+        "name": "SECOND_TAKE_PROFIT_PERCENT",
+        "values": list(range(550, 1101, 50)), # 100% to 1000% TP2 in steps of 50%
+        "type": float
+    },
+    {
+        "name": "FIRST_SELL_PROFIT_MARGIN",
+        "values": list(range(10, 101, 10)), # 20% to 200% margin in steps of 20%
+        "type": float
+    },
+    {
+        "name": "DEFAULT_VOLUME_THRESHOLD",
+        "values": list(range(10000, 40001, 2500)), # 5k to 50k USD volume in steps of 2.5k
+        "type": int
+    },
+    {
+        "name": "DEFAULT_MARKETCAP_THRESHOLD",
+        "values": list(range(10000, 50001, 5000)), # 5k to 50k USD market cap in steps of 2.5k
+        "type": int
+    },
+    {
+        "name": "MIN_VOLATILITY",
+        # Volatility as % change (e.g., 0.1 means 0.1%)
+        "values": [round(x * 0.02, 2) for x in range(1, 11)], # 0.05% to 0.5% in steps of 0.05%
+        "type": float
+    },
+    {
+        "name": "DEFAULT_RUGCHECK_SCORE_THRESHOLD",
+        "values": list(range(1, 801, 100)), # 1 to 1001 score in steps of 100
+        "type": int
+    },
+    {
+        "name": "DEFAULT_SOCIAL_SCORE_THRESHOLD",
+        "values": list(range(0, 101, 10)), # 0 to 80 score in steps of 10
+        "type": int
+    },
+    {
+        "name": "USE_TREND_REVERSAL_CONFIRMATION",
+        "values": [0, 1], # 0 for False, 1 for True
+        "type": int # Will be cast to bool in the backtester/logic
+    },
+    {
+        "name": "STOP_LOSS_COOLDOWN_MINUTES",
+        "values": list(range(0, 61, 5)), # e.g., 0 to 60 minutes in 5-min steps
+        "type": int
+    },
+    {
+        "name": "TREND_REVERSAL_RECENCY_HOURS",
+        "values": list(range(1, 25, 1)), # e.g., 1 to 24 hours
+        "type": int
+    },
+    {
+        "name": "TREND_REVERSAL_RSI_NEUTRAL_LEVEL",
+        "values": [round(x * 2.5 + 30, 1) for x in range(0, 13)], # e.g., 30.0 to 60.0 in 2.5 steps
+        "type": float
+    },
+    {
+        "name": "INDICATOR_LOOKBACK_HOURS",
+        "values": list(range(1, 13, 1)), # e.g., 1 to 12 hours
+        "type": int
+    },
+    {
+        "name": "RSI_PERIOD",
+        "values": list(range(7, 29, 1)), # e.g., 7 to 28
+        "type": int
+    },
+    {
+        "name": "BBANDS_PERIOD",
+        "values": list(range(10, 31, 2)), # e.g., 10 to 30
+        "type": int
+    },
+    {
+        "name": "BBANDS_STD_DEV",
+        "values": [round(x * 0.1 + 1.5, 1) for x in range(0, 11)], # e.g., 1.5 to 2.5
+        "type": float
+    },
+    {
+        "name": "FAST_EMA_PERIOD",
+        "values": list(range(5, 16, 1)), # e.g., 5 to 15
+        "type": int
+    },
+    {
+        "name": "SLOW_EMA_PERIOD",
+        "values": list(range(15, 31, 1)), # e.g., 15 to 30
+        "type": int
+    },
+]
+
+# --- GA Settings ---
+POPULATION_SIZE: int = 60 # Slightly larger population
+NUM_GENERATIONS: int = 100 # More generations for convergence
+
+# Crossover and mutation rates: Higher rates for exploration
+CROSSOVER_PROBABILITY: float = 0.8 # Higher crossover probability for exploration
+# Mutation probability: 0.5 is a good starting point for exploration
+MUTATION_PROBABILITY: float = 0.5 # Slightly higher mutation for exploration
+
+KEEP_ELITISM: int = 3 # Keep top 3 solutions
+
+# Parent selection method: 'sss' (steady-state), 'rws' (roulette), 'sus', 'rank', 'tournament'
+# 'sss' is a steady-state selection method that maintains diversity
+# 'rws' is roulette wheel selection, 'sus' is stochastic universal sampling
+# 'rank' is rank-based selection, 'tournament' is tournament selection
+# 'sss' is generally more stable and maintains diversity in the population
+PARENT_SELECTION_TYPE: str = "sss"
+
+
+# 'single_point' is a good starting point for exploration
+# 'two_points' is more complex but can be beneficial in some cases
+# 'uniform' is a more complex crossover method that can be beneficial in some cases
+# 'scattered' is a more complex crossover method that can be beneficial in some cases
+CROSSOVER_TYPE: str = "single_point" # 'two_points', 'uniform', 'scattered'
+
+# 'random' mutation is a good starting point for exploration
+# 'adaptive' mutation is more complex and can be beneficial in some cases
+MUTATION_TYPE: str = "random" # 'adaptive' possible but complex
+
+
+# --- Fitness Function Settings ---
+# Metric from backtest results dict ('total_pnl', 'win_rate', 'max_drawdown', 'final_portfolio_value')
+FITNESS_METRIC: str = "final_portfolio_value" # Focus on ending portfolio value
+FITNESS_GOAL: str = "max" # Maximize the metric
+
+# Fitness Sampling: Number of random tokens to sample from the training set for each individual's fitness evaluation.
+# Set to 0 or None to use all tokens (original behavior).
+GA_FITNESS_SAMPLE_SIZE: Union[int, None] = 0 # e.g., Evaluate each individual on 15 random tokens
+
+# --- Data Settings ---
+# Percentage split for training, validation, test sets (sum to 1.0)
+DATA_SPLIT: Dict[str, float] = {
+    "training": 0.6,    # 60% for GA training iterations
+    "validation": 0.2,  # 20% for intermediate checks (optional)
+    "test": 0.2         # 20% for final evaluation
+}
+
+# Overall date range for historical data fetch
+# NOTE: THESE DATES ARE EXAMPLES - ADJUST TO YOUR ACTUAL DATA RANGE
+HISTORICAL_DATA_START_TS: datetime = datetime(2025, 5, 23, 14, 0, 0, tzinfo=timezone.utc)
+HISTORICAL_DATA_END_TS: datetime = datetime(2025, 5, 23, 23, 59, 0, tzinfo=timezone.utc) # Extended range example
+
+# --- Backtester Settings ---
+BACKTEST_INITIAL_CAPITAL: float = 100.0 # In SOL
+
+# --- Multiprocessing Settings ---
+# 'auto' lets ga_optimizer determine cores (e.g., cpu_count() - 2) or set specific number (e.g., 4)
+MULTIPROCESSING_CORES: str = "auto"
+
+# --- Results ---
+RESULTS_DIR: str = "ga_optimization_results"
 ```
 
 ---
 
-### 📄 config.py
+### 📄 ga_optimizer.py
 
 ```python
+# FILE: ga_optimizer.py (Modified for Sampling & Lifespan)
+
 """
-Configuration constants and settings for the trading bot.
-"""
+Genetic Algorithm (GA) based Optimizer for Tuning Trading Bot Parameters.
 
-# Trading configuration
-_INITIAL_SOL_BALANCE = 100.0                # Starting SOL balance for PnL tracking
-SOL_TO_BUY = 0.5                            # Amount of SOL to spend on each buy
-PLAY_BUY_SOUND = False                      # Play the buy sound when a buy is made
-PLAY_SELL_SOUND = False                     # Play the sell sound when a sell is made
-
-# --- New Multi-Stage Sell Logic Configuration ---
-FIRST_SELL_PROFIT_MARGIN = 70.0             # Desired profit margin % on the *total initial investment* for the first TP sell
-FIRST_SELL_PERCENT = 35.0                   # % of *initial* tokens to sell at First TP (e.g., 50.0 for 50%)
-INITIAL_STOP_LOSS_PERCENT = 40.0            # Initial SL as % below buy price (e.g., 25.0 for -25%)
-TRAILING_STOP_LOSS_PERCENT = 50.0           # Trailing SL % drop from highest price *after* First TP (e.g., 15.0 for -15%)
-SECOND_TAKE_PROFIT_PERCENT = 800.0          # Second TP as % above buy price (e.g., 200.0 for +200%)
-
-# --- Fees and Tips ---
-DEFAULT_BUY_FEE = 0.001                     # Fee for buying in SOL
-DEFAULT_BUY_TIP = 0.001                     # Tip for buying in SOL
-DEFAULT_SELL_FEE = 0.001                    # Fee for selling in SOL
-DEFAULT_SELL_TIP = 0.001                    # Tip for selling in SOL
-
-# Price determination strategy
-PRICE_DETERMINATION_METHOD = "MEDIAN"       # Options: "VWAP", "TWAP", "LATEST", "MEDIAN"
-PRICE_AVG_WINDOW_MINUTES = 1                # Lookback window for VWAP/TWAP in minutes
-TWAP_SUB_INTERVAL_SECONDS = 60              # Sub-interval for TWAP calculation (if TWAP is used) in seconds
-
-# Trading thresholds
-DEFAULT_RUGCHECK_SCORE_THRESHOLD = 401      # No trading if Rugcheck score is equal or above this threshold
-DEFAULT_SOCIAL_SCORE_THRESHOLD = 100        # No trading if Social score is equal or above this threshold
-DEFAULT_VOLUME_THRESHOLD = 40000            # Minimum volume threshold in USD
-MIN_MARKETCAP_THRESHOLD = 3600              # Minimum market cap threshold in USD to make emergency sell
-DEFAULT_MARKETCAP_THRESHOLD = 45000         # Minimum market cap threshold in USD to search for buy opportunities
-MIN_VOLATILITY = 0.18                       # Minimum volatility threshold in % to search for buy opportunities
-DEFAULT_TIME_INTERVALL = 10                 # Time interval for checking volatility, volume and marketcap in minutes
-
-# UNSUBSCRIBING CONDITIONS
-INACTIVITY_PERIOD = 60                      # Inactivity period in minutes before unsubscribing & backup
-MC_DROP_THRESHOLD = 5                       # Market cap drop threshold (in %) - for unsubscription & backup
-MIN_TOKEN_AGE = 30                          # Minimum token age in minutes before unsubscription & backup
-
-# PumpPortal
-_MAX_SUBSCRIPTION_BATCH: int = 100           # For batch unsubscription ... can be deleted?
-_TOTAL_SUPPLY = 1000000000                   # Assumed total supply if not provided
-_PUMPPORTAL_WS = "wss://pumpportal.fun/api/data"
-
-_RUGCHECK_AUTH_API = "https://api.rugcheck.xyz/auth/login/solana"
-_RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens"
-_RUGCHECK_RATE_LIMIT = 10                    # 10 requests per minute
-_RUGCHECK_INTERVAL = 60                      # 60 seconds interval for RugCheck checks
-RUGCHECK_SCORE_THRESHOLD = 1002             # Score above which a token is considered high risk and deactivated
-
-# SOL price configuration
-_SOL_PRICE_API_URL = "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd"
-
-# Logging
-_LOGGER_NAME = "TradingBot"
-_LOG_LEVEL_CONSOLE: str = "DEBUG"
-_LOG_LEVEL_FILE: str = "DEBUG"
-_LOG_STORAGE_PATH: str = "log"
-
-# Telegram
-TELEGRAM_INTERACTION = True
-
-# --- Metadata Processor Configuration ---
-HEARTBEAT_EMIT_INTERVAL_SECONDS = 60  # Interval for emitting heartbeat messages in seconds
-RESTART_GAP_THRESHOLD_SECONDS = 300  # Threshold for restart gap in seconds
-# --- Metadata Processor Configuration ---
-
-# --- Socials Processor Configuration ---
-SOCIALS_CHECK_REFRESH_INTERVAL = 120                  # Timeout for requeing socials check in minutes
-SOCIALS_DISALLOWED_WEBSITE_DOMAINS = {
-    "youtube.com", "youtu.be", "tiktok.com", "spotify.com", "soundcloud.com",
-    "discord.com", "discord.gg", "medium.com", "substack.com", "linktr.ee",
-    "t.me", "twitter.com", "x.com", "facebook.com", "instagram.com",
-    "linkedin.com", "reddit.com", "twitch.tv", "kick.com", "google.com",
-}
-SOCIALS_ALLOWED_NEWS_DOMAINS = {
-    "bbc.com", "cnn.com", "reuters.com", "apnews.com", "nytimes.com",
-    "washingtonpost.com", "theguardian.com", "bloomberg.com", "forbes.com",
-    "wsj.com", "ft.com", "npr.org", "cnbc.com", "abcnews.go.com",
-    "nbcnews.com", "cbsnews.com", "latimes.com", "usatoday.com",
-    "politico.com", "aljazeera.com", "theatlantic.com", "newsweek.com",
-    "time.com", "economist.com", "sky.com", "independent.co.uk",
-    "telegraph.co.uk", "dailymail.co.uk", "mirror.co.uk", "huffpost.com",
-    "vox.com", "slate.com", "buzzfeednews.com", "axios.com", "thehill.com",
-    "scmp.com", "japantimes.co.jp", "hindustantimes.com", "indiatoday.in",
-    "timesofindia.indiatimes.com", "straitstimes.com", "smh.com.au",
-    "theage.com.au", "globalnews.ca", "cbc.ca", "bitcointalk.org",
-    "cnbcnews.us", "truthsocial.com"
-}
-
-# Penalties (Higher = Worse)
-SOCIALS_PENALTY_NO_WEBSITE = 40
-SOCIALS_PENALTY_INVALID_WEBSITE_TYPE = 35
-SOCIALS_PENALTY_WEBSITE_VERIFY_SKIPPED = 35
-SOCIALS_PENALTY_WEBSITE_INVALID_URL = 35
-SOCIALS_PENALTY_WEBSITE_TIMEOUT = 35
-SOCIALS_PENALTY_WEBSITE_HTTP_ERROR = 35
-SOCIALS_PENALTY_WEBSITE_OTHER_ERROR = 35
-SOCIALS_PENALTY_NO_HTTPS = 10
-SOCIALS_PENALTY_WEBSITE_NO_MENTION = 10         # No mention of token name or symbol in website
-SOCIALS_PENALTY_COMMON_PLATFORM_WEBSITE = 25    # Common platforms like Youtube, TikTok, etc. 'SOCIALS_DISALLOWED_WEBSITE_DOMAINS'
-SOCIALS_PENALTY_NO_TELEGRAM = 25
-SOCIALS_PENALTY_INVALID_TELEGRAM_TYPE = 25
-SOCIALS_PENALTY_INVALID_TELEGRAM_URL = 25
-SOCIALS_PENALTY_NO_TWITTER = 25
-SOCIALS_PENALTY_INVALID_TWITTER_TYPE = 25
-SOCIALS_PENALTY_INVALID_TWITTER_URL = 25
-SOCIALS_PENALTY_DUPLICATE_LINKS = 15            # Duplicate links in metadata
-SOCIALS_PENALTY_ACTION_TRIGGER_URL = 15         # Action trigger URL in metadata
-
-# Bonuses (Negative = Better)
-SOCIALS_BONUS_DOMAIN_MATCH = -10                # Bonus if domain mentions token name or symbol
-SOCIALS_BONUS_NEWS_GOV_WEBSITE = 0              # No penalty/bonus currently applied for news/gov sites in 'SOCIALS_ALLOWED_NEWS_DOMAINS'
-
-# Default Scores
-SOCIALS_SCORE_FAILED_METADATA = 100             # Score assigned if metadata fetch fails
-```
-
----
-
-### 📄 database_handler.py
-
-```python
-"""
-Database module.
-Handles PostgreSQL connections and CRUD operations.
+This script uses the PyGAD library to evolve a population of trading parameter sets
+by evaluating their performance on historical data using the backtester module.
+It leverages multiprocessing for parallel fitness evaluation and implements token
+subset sampling for faster fitness calculation.
 """
 
 import os
-import glob
-from datetime import datetime, timezone,timedelta
 import asyncio
-import asyncpg
-import aiofiles
-import json
-import pandas as pd
-from dotenv import load_dotenv
-from logger import logger
-from config import _TOTAL_SUPPLY
-import config as base_config_module
-from state_manager import GlobalState
-import pandas as pd
+import pygad
 import numpy as np
-from datetime import datetime, timezone, timedelta
-from typing import Dict, Optional, List, Tuple, Any
-from utils import calculate_volatility
-import inspect 
-from typing import Optional
-import statistics 
-
-# Load environment variables from .env file
-load_dotenv()
-
-# Construct the database URL from environment variables
-DB_USER = os.getenv("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_HOST = os.getenv("DB_HOST")
-DB_DATABASE = os.getenv("DB_DATABASE")
-DB_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}/{DB_DATABASE}?options=-c%20timezone%3Dutc"
-
-# --- Helper Function to Convert Module to Dict ---
-# (Place this helper function outside the class, near the imports)
-def _config_module_to_dict(module) -> dict:
-    """Converts public, uppercase attributes of a module into a dictionary."""
-    config_dict = {}
-    for key in dir(module):
-        # Load only uppercase variables that are not modules/classes/functions/private
-        if key.isupper() and not key.startswith('_'):
-            value = getattr(module, key)
-            # Check type to exclude modules etc.
-            if not inspect.ismodule(value) and \
-               not inspect.isclass(value) and \
-               not inspect.isfunction(value):
-                config_dict[key] = value
-    logger.debug(f"Converted config module to dict: {list(config_dict.keys())}")
-    return config_dict
-
-class DatabaseClient:
-    """Client to manage database connections and operations."""
-
-    _DEFAULT_CONFIG = _config_module_to_dict(base_config_module)
-    
-    def __init__(self, config_dict: Optional[dict] = None):
-        self.config = config_dict
-        self.pool = None
-        self.state = GlobalState.get_instance()
-
-        # Use the provided config_dict if available, otherwise use the class default
-        if config_dict is not None:
-            self.config = config_dict
-            logger.debug("DatabaseClient initialized with provided config_dict.")
-        else:
-            # Use a copy of the default to prevent modifications affecting others
-            self.config = self._DEFAULT_CONFIG.copy()
-            logger.debug("DatabaseClient initialized with default config from config.py.")
-
-        # Ensure self.config is always a dictionary
-        if not isinstance(self.config, dict):
-             logger.error(f"DatabaseClient self.config is not a dict! Type: {type(self.config)}. Falling back to default.")
-             self.config = self._DEFAULT_CONFIG.copy() # Fallback just in case
-
-    async def connect(self):
-        """Establish a connection pool to the PostgreSQL database."""
-        try:
-            # Use the DB_URL constructed from environment variables
-            self.pool = await asyncpg.create_pool(dsn=DB_URL)
-            logger.info("Connected to the database successfully.")
-        except Exception as e:
-            logger.exception("Error connecting to the database: %s", e)
-            raise
-
-    async def init_db(self):
-        """
-        Initialize the database schema by reading and executing all SQL files 
-        from the 'sql' subfolder. Additionally, restore the creator_wallets 
-        table from the backup file if necessary.
-        """
-        sql_folder = os.path.join(os.path.dirname(__file__), "sql")
-        sql_files = sorted(glob.glob(os.path.join(sql_folder, "*.sql")))
-        
-        async with self.pool.acquire() as conn:
-            # Execute schema SQL files
-            for file_path in sql_files:
-                try:
-                    with open(file_path, "r") as f:
-                        sql = f.read()
-                    await conn.execute(sql)
-                    logger.info("Executed SQL file: %s", os.path.basename(file_path))
-                except Exception as e:
-                    logger.exception("Error executing SQL file %s: %s", os.path.basename(file_path), e)
-                    raise
-
-    async def insert_sol_price(self, price: float, timestamp: datetime = datetime.now(timezone.utc)):
-        """Insert a new SOL price into the database."""
-        try:
-            async with self.pool.acquire() as conn:
-                await conn.execute("INSERT INTO sol_price_usd (price, timestamp) VALUES ($1, $2)", price, timestamp)
-        except Exception as e:
-            logger.exception("Error inserting SOL price into the database: %s", e)
-            raise
-
-    async def insert_token(self, data: dict):
-        """Checks if the token is valid and stores it if conditions are met."""
-        async with self.pool.acquire() as conn:
-            mint = data.get('mint')
-            if not mint:
-                logger.warning("Mint address is missing in the token data.")
-                return False
-            try:
-                async with conn.transaction():
-                    # 1. Check if token already exists in tokens or tokens_backup
-                    token_exists = await conn.fetchval("""
-                        SELECT 1 FROM tokens WHERE mint = $1
-                        UNION
-                        SELECT 1 FROM tokens_backup WHERE mint = $1
-                    """, mint)
-                    if token_exists:
-                        logger.info(f"Token {mint} is already stored. Skipping.")
-                        return False  # Token already exists, no need to insert
-
-                    # 2. Check how many tokens the creator has recently created
-                    creator = data.get('traderPublicKey')
-                    now = datetime.now(timezone.utc)
-                    row = await conn.fetchrow(
-                        "SELECT token_count, last_token_time FROM creator_wallets WHERE wallet_address = $1",
-                        creator
-                    )
-                    
-                    token_count = 1
-                    if row:
-                        token_count, last_token_time = row
-                        if last_token_time and (now - last_token_time).total_seconds() < 604800:
-                            token_count += 1
-
-                        await conn.execute(
-                            "UPDATE creator_wallets SET token_count = $1, last_token_time = $2 WHERE wallet_address = $3",
-                            token_count, now, creator
-                        )
-                    else:
-                        await conn.execute(
-                            "INSERT INTO creator_wallets (wallet_address, token_count, last_token_time) VALUES ($1, $2, $3)",
-                            creator, token_count, now
-                        )
-
-                    if token_count > 2:
-                            logger.debug(f"🤬 [bold red]Suspicious creator[/bold red] %s for token %s with %s tokens in 7 days", creator, data['mint'], token_count)
-                            return False
-
-                    sol_price = await self.state.get_sol_price()
-                    if sol_price is None or sol_price <= 0:
-                        logger.warning(f"⚠ Invalid SOL_PRICE ({sol_price}); skipping insert token operation.")
-                        return # Cannot proceed without valid SOL price
-                    
-                    # 3. Insert/update token
-                    await conn.execute("""
-                        INSERT INTO tokens(mint, traderPublicKey, initialBuy, solAmount, bondingCurveKey, 
-                            vTokensInBondingCurve, vSolInBondingCurve, marketCapSol, name, symbol, uri, sol_price_usd,
-                            is_active, timestamp)
-                        VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, True, NOW());
-                        """, 
-                        data.get('mint'), 
-                        data.get('traderPublicKey'), 
-                        data.get('initialBuy'), 
-                        data.get('solAmount'), 
-                        data.get('bondingCurveKey'), 
-                        data.get('vTokensInBondingCurve'),
-                        data.get('vSolInBondingCurve'), 
-                        data.get('marketCapSol'), 
-                        data.get('name'),
-                        data.get('symbol'), 
-                        data.get('uri'),
-                        sol_price
-                    )
-                    logger.debug("Inserted/Updated token %s", data.get('mint'))
-                    return True
-            except Exception as e:
-                logger.exception("Error inserting token data: %s", e)
-                raise
-
-    async def insert_migration(self, data: dict):
-        """Batch-insert trade data into trades table."""
-        try:
-            async with self.pool.acquire() as conn:
-                async with conn.transaction():
-                    try:
-                        await conn.execute('''
-                            INSERT INTO migrations (signature, mint, txType, pool)
-                            VALUES ($1, $2, $3, $4)
-                        ''',data["signature"], data["mint"], data["txType"], data["pool"])
-
-                        logger.debug(f"Stored migration event for token {data['mint']}")
-                    except Exception as e:
-                        logger.error(f"❌ Storing migration for {data['mint']} failed: {e}", exc_info=True)
-                        raise
-        except Exception as e:
-            logger.error(f"🚨 Error on storing migration: {e}", exc_info=True)
-            await asyncio.sleep(5)
-
-    async def insert_trades_batch(self, trade_params: list, mints: list):
-        """
-        Inserts a batch of trades into the database and updates the last_trade timestamp for the tokens.
-        """
-        if not trade_params:
-            return
-
-        async with self.pool.acquire() as conn:
-            async with conn.transaction():
-                try:
-                    # Batch insert trades
-                    await conn.executemany('''
-                        INSERT INTO trades (
-                            signature, mint, tx_type, token_amount, sol_amount, price,
-                            bondingCurveKey, vTokensInBondingCurve, vSolInBondingCurve,
-                            marketCapSol,sol_price_usd, market_cap_calculated, timestamp
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-                        ON CONFLICT (signature) DO NOTHING
-                    ''', trade_params)
-
-                    # Batch update last_trade timestamps
-                    if mints:
-                        # Ensure mints are unique before updating
-                        unique_mints = list(set(mints))
-                        await conn.execute('''
-                            UPDATE tokens
-                            SET last_trade = NOW()
-                            WHERE mint = ANY($1::text[])
-                        ''', unique_mints)
-
-                    logger.debug(f"✅ Processed {len(trade_params)} trades in batch")
-
-                except Exception as e:
-                    logger.error(f"🚨 Error during batch trade insert: {e}", exc_info=True)
-                    # The transaction will be rolled back automatically
-                    raise # Re-raise the exception so the caller knows about the failure
-
-    async def get_tokens_to_unsubscribe(self, mc_drop_threshold, inactivity_period, min_token_age):
-        """Fetch tokens to unsubscribe based on market cap drop and inactivity."""
-        query = """
-            SELECT t.mint
-            FROM tokens t
-            INNER JOIN (
-                SELECT mint, marketCapSol, timestamp,
-                    ROW_NUMBER() OVER (PARTITION BY mint ORDER BY timestamp DESC) AS rn
-                FROM trades
-            ) latest ON t.mint = latest.mint AND latest.rn = 1
-            WHERE 
-                (
-                    (latest.marketCapSol * 100.0 / t.marketCapSol) < (100 - $1)
-                    OR
-                    latest.timestamp <= NOW() - (INTERVAL '1 minute' * $2)
-                )
-                AND t.timestamp <= NOW() - (INTERVAL '1 minute' * $3)
-                AND t.mint NOT IN (SELECT mint FROM portfolio WHERE status = 'active')
-            ORDER BY t.timestamp DESC;
-        """
-        async with self.pool.acquire() as conn:
-            return await conn.fetch(query, mc_drop_threshold, inactivity_period, min_token_age)
-
-    async def get_active_tokens(self, limit: int = 10000):
-        """Fetch active tokens from the database."""
-        query = """
-            SELECT mint FROM tokens WHERE is_active = True
-            ORDER BY timestamp DESC LIMIT $1
-        """
-        async with self.pool.acquire() as conn:
-            return await conn.fetch(query, limit)
-        
-    async def is_suspicious_creator(self, creator: str):
-        """Check if a creator is suspicious based on the number of tokens created."""
-        query = """
-            SELECT token_count FROM creator_wallets WHERE wallet_address = $1
-        """
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(query, creator)
-            if row and row['token_count'] > 2:
-                return True
-            return False
-
-    async def fetch_tokens_by_creator(self, creator: str, respect_portfolio: bool = False):
-        if respect_portfolio:
-            query = """
-                SELECT mint FROM tokens 
-                WHERE traderpublickey = $1
-                    AND mint NOT IN (SELECT mint FROM portfolio)
-            """
-        else:
-            query = """
-                SELECT mint FROM tokens 
-                WHERE traderpublickey = $1
-            """
-        async with self.pool.acquire() as conn:
-            return await conn.fetch(query, creator)
-        
-    async def has_active_buy_order(self, mint: str):
-        query = """
-            SELECT 1 FROM portfolio WHERE mint = $1 AND tx_type = 'buy' AND status = 'active'
-        """
-        async with self.pool.acquire() as conn:
-            result = await conn.fetchval(query, mint)
-            return result is not None
-        
-    async def get_total_supply(self, mint: str):
-        """Fetch the total supply of a token."""
-        query = """
-            SELECT total_supply FROM rugcheck WHERE mint = $1
-        """
-        async with self.pool.acquire() as conn:
-            result = await conn.fetchrow(query, mint)
-            return result['total_supply'] if result else _TOTAL_SUPPLY
-
-
-    async def find_trading_opportunities(self, sol_price: float, volume_threshold: float, marketcap_threshold: float, rugcheck_threshold: int, social_score_threshold: int, time_interval_minutes: int, min_volatility: float):
-        """
-        Identify potential token buy opportunities based on trading activity, volatility, and risk metrics.
-        
-        Criteria:
-        - Analyzes trades within a rolling time window ($6 minutes)
-        - Filters by volume, market cap, volatility, and risk scores
-        - Excludes tokens already in active portfolio positions
-
-        CTEs:
-        1. LatestTradeData: Gets most recent trade price/status for each token
-            - Uses row_number() to select latest trade per mint
-        2. RecentTrades: Calculates buy/sell volume and trade count
-            - total_buys_recent: SOL spent on buys
-            - total_sells_recent: SOL received from sells
-            - volume_recent: Total trading volume (SOL)
-        3. VolatilityData: Computes price volatility using log returns
-            - log_return = LN(price/previous_price)
-            - volatility = STDDEV(log_return) * SQRT(return_count)
-            - Requires min 5 valid returns
-
-        Main Query:
-        - Joins token data with rugcheck scores and latest trade metrics
-        - Converts SOL values to USD using $1 (SOL price)
-        - Filters tokens where:
-            * rugcheck_score < $4 AND socials_score < $5
-            * (volume_recent * SOL_price) >= volume_threshold
-            * (market_cap * SOL_price) >= marketcap_threshold
-            * volatility >= min_volatility
-            * NOT already in active portfolio positions
-        - Orders by descending recent volume
-
-        Parameters (Bound in Query):
-        $1: sol_price (float)           - Current SOL/USD price for conversions
-        $2: volume_threshold (float)    - Min USD trading volume requirement
-        $3: marketcap_threshold (float) - Min USD market cap requirement
-        $4: rugcheck_threshold (float)  - Max allowed security risk score
-        $5: social_score_threshold (float) - Max allowed social risk score
-        $6: time_interval_minutes (int) - Analysis window duration (minutes)
-        $7: min_volatility (float)      - Min price volatility requirement
-
-        Volatility Calculation:
-        Computed as standard deviation of log returns multiplied by sqrt(n):
-        volatility = STDDEV(LN(price/prev_price)) * SQRT(GREATEST(COUNT(*), 1))
-        - Uses natural log for continuous compounding returns
-        - Multiplied by sqrt(n) to estimate volatility over full time window
-        - Requires min 5 valid price changes
-
-        Returns:
-        List of candidate tokens sorted by volume, with metrics including:
-        - Latest price, market cap, bonding curve balances
-        - Recent volume/volatility metrics
-        - Token metadata and risk scores
-        """
-        
-        query = """
-            WITH LatestTradeData AS (
-                SELECT
-                    mint,
-                    price,
-                    marketCapSol,
-                    vTokensInBondingCurve,
-                    vSolInBondingCurve,
-                    timestamp,
-                    ROW_NUMBER() OVER (PARTITION BY mint ORDER BY timestamp DESC) AS rn
-                FROM trades
-                WHERE timestamp >= NOW() - ($6 || ' minutes')::interval
-            ),
-            RecentTrades AS (
-                SELECT
-                    mint,
-                    SUM(CASE WHEN tx_type = 'buy' THEN sol_amount ELSE 0 END) AS total_buys_recent,
-                    SUM(CASE WHEN tx_type = 'sell' THEN sol_amount ELSE 0 END) AS total_sells_recent,
-                    SUM(sol_amount) AS volume_recent,
-                    COUNT(*) as trade_count
-                FROM trades
-                WHERE timestamp >= NOW() - ($6 || ' minutes')::interval
-                GROUP BY mint
-            ),
-            VolatilityData AS (
-                SELECT
-                    mint,
-                    STDDEV(log_return) * SQRT(GREATEST(COUNT(*), 1)) AS volatility
-                FROM (
-                    SELECT
-                        mint,
-                        price,
-                        LAG(price) OVER (PARTITION BY mint ORDER BY timestamp) AS prev_price,
-                        CASE
-                            WHEN price > 0 AND LAG(price) OVER (PARTITION BY mint ORDER BY timestamp) > 0
-                            THEN LN(price / LAG(price) OVER (PARTITION BY mint ORDER BY timestamp))
-                            ELSE NULL
-                        END AS log_return
-                    FROM trades
-                    WHERE timestamp >= NOW() - ($6 || ' minutes')::interval
-                ) sub
-                WHERE log_return IS NOT NULL
-                GROUP BY mint
-                HAVING COUNT(*) > 5
-            )
-            SELECT
-                t.mint,
-                t.marketCapSol,
-                t.vTokensInBondingCurve,
-                t.vSolInBondingCurve,
-                COALESCE(ltd.marketCapSol, t.marketCapSol) AS latest_market_cap_sol,
-                COALESCE(ltd.vTokensInBondingCurve, t.vTokensInBondingCurve) AS latest_v_tokens,
-                COALESCE(ltd.vSolInBondingCurve, t.vSolInBondingCurve) AS latest_v_sol,
-                COALESCE(ltd.price, 0) AS latest_price,
-                COALESCE(rt.volume_recent, 0) AS volume_in_interval,
-                COALESCE(vd.volatility, 0) AS volatility_in_interval,
-                r.tokenMeta_name AS name,
-                r.tokenMeta_symbol AS symbol,
-                r.score AS rugcheck_score,
-                t.socials_score
-            FROM tokens AS t
-            JOIN rugcheck AS r ON t.mint = r.mint
-            JOIN LatestTradeData AS ltd ON t.mint = ltd.mint AND ltd.rn = 1
-            LEFT JOIN RecentTrades AS rt ON t.mint = rt.mint
-            LEFT JOIN VolatilityData AS vd ON t.mint = vd.mint
-            WHERE
-                t.is_active = TRUE AND
-                r.score IS NOT NULL AND
-                t.socials_score IS NOT NULL AND
-                r.score < $4 AND
-                t.socials_score < $5 AND
-                (COALESCE(rt.volume_recent, 0) * $1) >= $2 AND
-                (COALESCE(ltd.marketCapSol, t.marketCapSol, 0) * $1) >= $3 AND
-                COALESCE(vd.volatility, 0) >= $7 AND
-                t.mint NOT IN (SELECT mint FROM portfolio WHERE status = 'active')
-            ORDER BY rt.volume_recent DESC;
-        """
-        async with self.pool.acquire() as conn:
-            try:
-                return await conn.fetch(query, sol_price, volume_threshold, marketcap_threshold, rugcheck_threshold, social_score_threshold, str(time_interval_minutes), min_volatility)
-            except Exception as e:
-                logger.error(f"Error finding trading opportunities: {e}", exc_info=True)
-                return [] # Return empty list on error
-
-    async def get_active_buy_positions(self, conn=None):
-        """Fetches active buy positions from the portfolio."""
-        query = '''
-            SELECT id, mint, price AS buy_price, initial_tokens, remaining_tokens, total_investment_sol,
-                   stop_loss_price, highest_price, initial_tp_price, second_tp_price, first_tp_hit
-            FROM portfolio
-            WHERE status = 'active' AND tx_type = 'buy'
-        '''
-        connection = conn or await self.pool.acquire()
-        try:
-            return await connection.fetch(query)
-        finally:
-            if not conn and connection: # Release connection only if it was acquired here
-                await self.pool.release(connection)
-
-    async def get_latest_prices(self, mints: list[str], conn=None):
-        """Fetches the latest price and market cap for a list of mints."""
-        if not mints:
-            return {}
-        query = f'''
-            WITH LatestTrades AS (
-                SELECT
-                    mint,
-                    price,
-                    marketCapSol, -- This is 'marketcapsol' in your DB schema
-                    ROW_NUMBER() OVER (PARTITION BY mint ORDER BY timestamp DESC) as rn
-                FROM trades
-                WHERE mint = ANY($1::text[])
-            )
-            SELECT mint, price, marketCapSol FROM LatestTrades WHERE rn = 1
-        '''
-        connection = conn or await self.pool.acquire()
-        try:
-            rows = await connection.fetch(query, mints)
-            results = {}
-            for row in rows:
-                mint = row['mint']
-                price_val = float(row['price']) if row['price'] is not None else None
-                market_cap_val = float(row['marketcapsol']) if row['marketcapsol'] is not None else None # Ensure marketcapsol from DB
-
-                # Store market cap if it's valid, regardless of price for now
-                # Store price only if it's valid and positive
-                current_data = {'price': None, 'market_cap': None}
-
-                if market_cap_val is not None and market_cap_val > 0: # Require positive MC
-                    current_data['market_cap'] = market_cap_val
-                
-                if price_val is not None and price_val > 0:
-                    current_data['price'] = price_val
-                
-                # Only add to results if we have at least a valid market_cap or a valid price
-                if current_data['market_cap'] is not None or current_data['price'] is not None:
-                    results[mint] = current_data
-                else:
-                    logger.warning(f"For mint {mint}, latest trade had invalid price ({row['price']}) AND invalid marketcap ({row['marketcapsol']}). Not returning data.")
-            return results
-        finally:
-            if not conn and connection:
-                await self.pool.release(connection)
-
-    async def update_portfolio_highest_price(self, position_id: int, price: float, conn=None):
-        """Updates the highest price for a given portfolio position."""
-        query = 'UPDATE portfolio SET highest_price = $1 WHERE id = $2'
-        connection = conn or await self.pool.acquire()
-        try:
-            await connection.execute(query, price, position_id)
-        finally:
-            if not conn and connection:
-                await self.pool.release(connection)
-
-    async def mark_first_tp_hit_and_adjust_sl(self, position_id: int, buy_price: float, conn=None):
-        """Marks the first TP as hit and adjusts the stop loss to breakeven."""
-        query = 'UPDATE portfolio SET first_tp_hit = TRUE, stop_loss_price = $1 WHERE id = $2'
-        connection = conn or await self.pool.acquire()
-        try:
-            await connection.execute(query, buy_price, position_id)
-        finally:
-            if not conn and connection:
-                await self.pool.release(connection)
-
-    async def get_portfolio_entry_for_update(self, position_id: int, conn=None):
-        """Fetches a specific portfolio buy entry needed for sell calculations."""
-        query = '''
-            SELECT price AS buy_price, initial_tokens, remaining_tokens, total_investment_sol, fee AS buy_fee, tip AS buy_tip
-            FROM portfolio
-            WHERE id = $1 AND status = 'active' AND tx_type = 'buy'
-        '''
-        connection = conn or await self.pool.acquire()
-        try:
-            return await connection.fetchrow(query, position_id)
-        finally:
-            if not conn and connection:
-                await self.pool.release(connection)
-
-    async def update_portfolio_entry_after_sell(self, position_id: int, new_remaining_tokens: float, new_status: str, conn=None):
-        """Updates remaining tokens and status of a portfolio entry after a sell."""
-        query = 'UPDATE portfolio SET remaining_tokens = $1, status = $2 WHERE id = $3'
-        connection = conn or await self.pool.acquire()
-        try:
-            await connection.execute(query, new_remaining_tokens, new_status, position_id)
-        finally:
-            if not conn and connection:
-                await self.pool.release(connection)
-
-    async def insert_portfolio_sell_record(self, mint: str, current_price: float, market_cap_sol: float, net_sol_received: float, sol_price_usd: float, tokens_sold: float, sell_fee: float, sell_tip: float, profit: float, reason: str, timestamp: datetime, settings: dict, conn=None):
-        """Inserts a sell transaction record into the portfolio, including settings."""
-        query = '''
-            INSERT INTO portfolio
-            (mint, tx_type, price, market_cap, sol_amount, sol_price_usd, tokens, fee, tip, profit, total_investment_sol,
-             remaining_tokens, status, reason, timestamp, initial_tokens, stop_loss_price, highest_price, settings)
-            VALUES ($1, 'sell', $2, $3, $4, $5, $6, $7, $8, $9, 0, 0, 'closed', $10, $11, 0, 0, 0, $12)
-        '''
-        connection = conn or await self.pool.acquire()
-        try:
-            settings_json = json.dumps(settings) # Convert dict to JSON string
-            await connection.execute(query, mint, current_price, market_cap_sol, net_sol_received, sol_price_usd, tokens_sold,
-                                   sell_fee, sell_tip, profit, reason, timestamp, settings_json)
-        finally:
-            if not conn and connection:
-                await self.pool.release(connection)
-
-    async def get_token_name(self, mint: str, conn=None):
-        """Fetches the name of a token given its mint address."""
-        query = "SELECT name FROM tokens WHERE mint = $1"
-        connection = conn or await self.pool.acquire()
-        try:
-            return await connection.fetchrow(query, mint)
-        finally:
-            if not conn and connection:
-                await self.pool.release(connection)
-
-    async def insert_portfolio_buy_record(self, mint: str, current_price: float, market_cap_sol: float, sol_base_amount: float, sol_price_usd: float, total_sol_investment: float, tokens_bought: float, buy_fee: float, buy_tip: float, initial_stop_loss_price: float, initial_tp_price: float, second_tp_price: float, timestamp: datetime, settings: dict, conn=None):
-        """Inserts a buy transaction record into the portfolio, including settings."""
-        query = """
-            INSERT INTO portfolio
-                (mint, tx_type, price, market_cap, sol_amount, sol_price_usd, total_investment_sol, tokens,
-                 fee, tip, remaining_tokens, stop_loss_price, highest_price,
-                 initial_tp_price, second_tp_price, first_tp_hit,
-                 status, timestamp, initial_tokens, settings)
-            VALUES ($1, 'buy', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, FALSE, 'active', $15, $16, $17)
-        """
-        connection = conn or await self.pool.acquire()
-        try:
-            settings_json = json.dumps(settings) # Convert dict to JSON string
-            await connection.execute(query, mint, current_price, market_cap_sol, sol_base_amount, sol_price_usd, total_sol_investment, tokens_bought,
-                                   buy_fee, buy_tip, tokens_bought, # remaining_tokens = initial_tokens
-                                   initial_stop_loss_price, current_price, # highest_price = current_price
-                                   initial_tp_price, second_tp_price,
-                                   timestamp, tokens_bought, # initial_tokens
-                                   settings_json) # settings
-        finally:
-            if not conn and connection:
-                await self.pool.release(connection)
-
-    # Modify existing has_active_buy_order to accept optional connection
-    async def has_active_buy_order(self, mint: str, conn=None):
-        query = """
-            SELECT 1 FROM portfolio WHERE mint = $1 AND tx_type = 'buy' AND status = 'active'
-        """
-        connection = conn or await self.pool.acquire()
-        try:
-            result = await connection.fetchval(query, mint)
-            return result is not None
-        finally:
-            if not conn and connection:
-                await self.pool.release(connection)
-
-    async def get_trade_history(self, mints: list[str]):
-        """Fetches price and timestamp for given mints from trades and trades_backup."""
-        if not mints:
-            return []
-        # Ensure logger is accessible if used within the method, assuming it's defined globally or passed in
-        # from logger import logger # Uncomment if logger is needed and not globally accessible
-        # Use the v_trades view which combines trades and trades_backup
-        query = """
-            SELECT mint, price, timestamp
-            FROM v_trades -- Use the view
-            WHERE mint = ANY($1::text[])
-            ORDER BY mint, timestamp;
-        """
-        async with self.pool.acquire() as conn:
-            try:
-                results = await conn.fetch(query, mints)
-                # Convert asyncpg Record objects to dictionaries for easier handling
-                return [dict(row) for row in results]
-            except Exception as e:
-                # Log the error using the logger instance
-                logger.error(f"Error fetching trade history for mints {mints}: {e}", exc_info=True)
-                return [] # Return empty list on error
-
-    async def get_all_unique_mints_with_names(self):
-        """Fetches all unique mint addresses and their names from relevant tables."""
-        # This query prioritizes names from the 'tokens' table, falling back to 'tokens_backup'.
-        # It assumes mints exist in trades/trades_backup might also exist in tokens/tokens_backup.
-        # Use the v_tokens and v_rugcheck views
-        # Fetch symbol, socials_score, and latest rugcheck score for display
-        query = """
-            WITH LatestRugcheck AS (
-                SELECT
-                    mint,
-                    score,
-                    ROW_NUMBER() OVER(PARTITION BY mint ORDER BY last_checked DESC) as rn
-                FROM v_rugcheck -- Use the rugcheck view
-            )
-            SELECT
-                vt.mint,
-                COALESCE(vt.name, vt.mint) AS name, -- Fallback to mint if name is null
-                vt.symbol,
-                vt.socials_score,
-                lr.score AS rugcheck_score
-            FROM v_tokens vt -- Use the tokens view
-            LEFT JOIN LatestRugcheck lr ON vt.mint = lr.mint AND lr.rn = 1
-            WHERE vt.mint IS NOT NULL -- Ensure mint is not null from the view
-            ORDER BY name, vt.mint; -- Order by name from the view
-        """
-        async with self.pool.acquire() as conn:
-            try:
-                results = await conn.fetch(query) # No parameters needed for this version using views
-                # Return list of dictionaries
-                # Return richer dictionary including scores
-                return [
-                    {
-                        'mint': row['mint'],
-                        'name': row['name'],
-                        'symbol': row['symbol'],
-                        'socials_score': row['socials_score'],
-                        'rugcheck_score': row['rugcheck_score'] # Might be None
-                    } for row in results
-                ]
-            except Exception as e:
-                logger.error(f"Error fetching unique mints with names: {e}", exc_info=True)
-                return []
-
-    async def get_filtered_tokens(self, max_socials=100, max_rugcheck=10000, min_volume_sol=0, time_window_minutes=60, portfolio_only=False):
-        """
-        Fetches tokens filtered by:
-        - socials score <= max_socials
-        - latest rugcheck score <= max_rugcheck (or NULL)
-        - trade volume in the last time_window_minutes relative to the token's latest trade >= min_volume_sol
-        - optionally filters to tokens in the active portfolio
-        """
-
-        try:
-            max_socials = int(max_socials)
-            max_rugcheck = int(max_rugcheck)
-            min_volume_sol = float(min_volume_sol)
-            time_window_minutes = str(time_window_minutes)
-        except (ValueError, TypeError):
-            logger.error("Invalid filter parameter types received.")
-            return []
-
-        params = [max_socials, max_rugcheck, min_volume_sol, time_window_minutes]
-
-        query = """
-        WITH LatestRugcheck AS (
-            SELECT
-                mint,
-                score,
-                ROW_NUMBER() OVER(PARTITION BY mint ORDER BY last_checked DESC) AS rn
-            FROM v_rugcheck
-        ),
-        LastTrades AS (
-            SELECT
-                mint,
-                MAX(timestamp) AS last_trade_time
-            FROM v_trades
-            GROUP BY mint
-        ),
-        FilteredTrades AS (
-            SELECT
-                t.mint,
-                SUM(t.sol_amount) AS volume_sol
-            FROM v_trades t
-            JOIN LastTrades lt ON t.mint = lt.mint
-            WHERE t.timestamp BETWEEN (lt.last_trade_time - ($4 || ' minutes')::INTERVAL) AND lt.last_trade_time
-            GROUP BY t.mint
-        )
-        SELECT DISTINCT
-            vt.mint,
-            COALESCE(vt.name, vt.mint) AS name,
-            vt.socials_score,
-            lr.score AS rugcheck_score,
-            COALESCE(ft.volume_sol, 0) AS recent_volume_sol
-        FROM v_tokens vt
-        LEFT JOIN LatestRugcheck lr ON vt.mint = lr.mint AND lr.rn = 1
-        LEFT JOIN FilteredTrades ft ON vt.mint = ft.mint
-        """
-
-        if portfolio_only:
-            query += """
-            INNER JOIN portfolio p ON vt.mint = p.mint
-            """
-
-        query += """
-        WHERE
-            vt.socials_score IS NOT NULL AND vt.socials_score <= $1
-            AND (lr.score IS NULL OR lr.score <= $2)
-            AND COALESCE(ft.volume_sol, 0) >= $3
-        ORDER BY name, vt.mint;
-        """
-        print(f"Query: {query}")
-        print(f"params: {params}")
-        async with self.pool.acquire() as conn:
-            try:
-                results = await conn.fetch(query, *params)
-                return [
-                    {
-                        'mint': row['mint'],
-                        'name': row['name'],
-                        'socials': row['socials_score'],
-                        'rugcheck': row['rugcheck_score'],
-                        'volume': round(row['recent_volume_sol'], 4)
-                    } for row in results
-                ]
-            except Exception as e:
-                logger.error(f"Error fetching filtered tokens: {e}", exc_info=True)
-                return []
-
-
-    async def get_portfolio_transactions(self, mints: list[str]):
-        """Fetches buy/sell transaction timestamps and prices for given mints from the portfolio."""
-        if not mints:
-            return {} # Return empty dict if no mints provided
-
-        query = """
-            SELECT mint, tx_type, timestamp, price
-            FROM portfolio
-            WHERE mint = ANY($1::text[])
-            ORDER BY mint, timestamp;
-        """
-        async with self.pool.acquire() as conn:
-            try:
-                results = await conn.fetch(query, mints)
-                portfolio_data = {}
-                for row in results:
-                    mint = row['mint']
-                    if mint not in portfolio_data:
-                        portfolio_data[mint] = {'buys': [], 'sells': []}
-
-                    # Keep the original timestamp object and ensure price is float
-                    tx_info = {'timestamp': row['timestamp'], 'price': float(row['price'])}
-
-                    if row['tx_type'] == 'buy':
-                        portfolio_data[mint]['buys'].append(tx_info)
-                    elif row['tx_type'] == 'sell':
-                        portfolio_data[mint]['sells'].append(tx_info)
-
-                logger.debug(f"Fetched portfolio transactions for mints: {mints}")
-                return portfolio_data
-            except Exception as e:
-                logger.error(f"Error fetching portfolio transactions for mints {mints}: {e}", exc_info=True)
-                return {} # Return empty dict on error
-
-    async def backup_and_delete_token(self, mint: str, archived_at: datetime, reason: str=None):
-        """Backup core table data to a corresponding backup table."""
-        final_reason = reason # Initialize final_reason with the provided reason
-
-        if reason == "rugged_dead":
-                # Get this from your bot's configuration system
-                # Example: RESTART_GAP_THRESHOLD_SECONDS = self.config.get('RESTART_GAP_THRESHOLD_SECONDS', 600)
-                # Ensure self.config is available or pass the value directly.
-                # For this example, let's assume it's accessed via self.config.
-                if not hasattr(self, 'config') or 'RESTART_GAP_THRESHOLD_SECONDS' not in self.config:
-                    logger.warning("RESTART_GAP_THRESHOLD_SECONDS not found in config. Using default of 600s.")
-                    RESTART_GAP_THRESHOLD_SECONDS = 600 # Default to 10 minutes
-                else:
-                    RESTART_GAP_THRESHOLD_SECONDS = self.config['RESTART_GAP_THRESHOLD_SECONDS']
-
-
-                if await self.check_for_data_gap_on_restart(archived_at, RESTART_GAP_THRESHOLD_SECONDS):
-                    logger.info(f"Token {mint} ({reason}) archived at {archived_at}. Pre-archival data gap detected. "
-                                f"Changing reason to 'interrupted_gap_fill'.")
-                    final_reason = "interrupted_gap_fill"
-                else:
-                    logger.info(f"Token {mint} ({reason}) archived at {archived_at}. No significant pre-archival data gap. Reason remains '{final_reason}'.")
-
-
-
-        try:
-            async with self.pool.acquire() as conn:
-                async with conn.transaction():
-                    try:
-                        await conn.execute('''
-                            INSERT INTO tokens_backup SELECT *, $1, NOW() FROM tokens WHERE mint = $2
-                        ''', final_reason, mint)
-                        
-                        await conn.execute('''
-                            INSERT INTO trades_backup SELECT *, NOW() FROM trades WHERE mint = $1
-                        ''', mint)
-
-                        await conn.execute('''
-                            INSERT INTO rugcheck_backup SELECT *, NOW() FROM rugcheck WHERE mint = $1
-                        ''', mint)
-
-                        # Backup migrations, ignoring conflicts on the primary key
-                        await conn.execute('''
-                            INSERT INTO migrations_backup SELECT *, NOW() FROM migrations WHERE mint = $1
-                            ON CONFLICT (signature) DO NOTHING -- Conflict check on signature
-                        ''', mint)
-
-                        await conn.execute("DELETE FROM tokens WHERE mint = $1", mint)
-                        await conn.execute("DELETE FROM trades WHERE mint = $1", mint)
-                        await conn.execute("DELETE FROM rugcheck WHERE mint = $1", mint)
-                        await conn.execute("DELETE FROM migrations WHERE mint = $1", mint)
-
-                        logger.debug(f"🧹 Backup & deletion completed for {mint}")
-
-                    except Exception as e:
-                        logger.error(f"❌ Backup failed for {mint}: {e}", exc_info=True)
-                        raise
-        except Exception as e:
-            logger.error(f"🚨 backup_and_delete_token: {e}", exc_info=True)
-            await asyncio.sleep(5)
-
-    async def backup_creator_wallets(self):
-        """Dumps the creator_wallets table to a JSON file."""
-        backup_file_path = os.path.join(os.path.dirname(__file__), "data", "creator_wallets_backup.json")
-        os.makedirs(os.path.dirname(backup_file_path), exist_ok=True)  # Ensure data directory exists
-
-        logger.info("Backing up creator_wallets table...")
-        try:
-            async with self.pool.acquire() as conn:
-                rows = await conn.fetch("SELECT wallet_address, token_count, last_token_time FROM creator_wallets")
-                
-                # Convert rows to a list of dictionaries
-                data = [
-                    {
-                        "wallet_address": row["wallet_address"],
-                        "token_count": row["token_count"],
-                        "last_token_time": row["last_token_time"].isoformat() if row["last_token_time"] else None
-                    }
-                    for row in rows
-                ]
-                
-                # Write the data to a JSON file
-                async with aiofiles.open(backup_file_path, "w") as f:
-                    await f.write(json.dumps(data, indent=4))
-                
-                logger.info(f"✅ Successfully backed up {len(rows)} creator wallets to {backup_file_path}")
-        except Exception as e:
-            logger.exception(f"Error backing up creator_wallets table: {e}")
-            # Decide if we should raise or just log
-
-
-    async def restore_creator_wallets(self):
-        backup_path = os.path.abspath(os.path.join(
-            os.path.dirname(__file__), 
-            "data", 
-            "creator_wallets_backup.json"
-        ))
-
-        if not os.path.exists(backup_path):
-            logger.warning("Backup file not found: %s", backup_path)
-            return
-
-        try:
-            with open(backup_path, "r") as f:
-                data = json.load(f)
-
-            # Convert JSON data into tuples for faster insertion
-            records = [
-                (
-                    record["wallet_address"],
-                    record["token_count"],
-                    datetime.fromisoformat(record["last_token_time"]) if record.get("last_token_time") else None
-                )
-                for record in data
-            ]
-
-            # Batch size
-            BATCH_SIZE = 100
-
-            # Insert using batches
-            for i in range(0, len(records), BATCH_SIZE):
-                batch = records[i:i + BATCH_SIZE]
-                sql = """
-                    INSERT INTO creator_wallets (wallet_address, token_count, last_token_time)
-                    VALUES ($1, $2, $3)
-                    ON CONFLICT (wallet_address) DO UPDATE SET
-                        token_count = GREATEST(creator_wallets.token_count, EXCLUDED.token_count),
-                        last_token_time = CASE
-                            WHEN EXCLUDED.token_count > creator_wallets.token_count THEN EXCLUDED.last_token_time
-                            ELSE creator_wallets.last_token_time
-                        END;
-                """
-                async with self.pool.acquire() as conn:
-                    await conn.executemany(sql, batch)
-
-            logger.info("Loaded backup data from %s (%d records)", backup_path, len(records))
-
-        except Exception as e:
-            logger.exception("Error loading backup data: %s", e)
-            raise
-
-    # --- START: Refactored Price Calculation Logic ---
-    async def _get_raw_trades_for_window(self, mint: str, window_minutes: int, conn) -> List[Dict[str, Any]]:
-        """Fetches raw trades (timestamp, sol_amount, token_amount) for a given window."""
-        query = """
-            SELECT timestamp, sol_amount, token_amount
-            FROM trades
-            WHERE mint = $1
-            AND timestamp >= NOW() - ($2 || ' minutes')::interval
-            AND token_amount > 0 AND sol_amount > 0 -- Ensure valid amounts for price calculation
-            ORDER BY timestamp ASC;
-        """
-        return await conn.fetch(query, mint, str(window_minutes))
-
-    def _apply_iqr_to_trades(self, trade_records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Calculates prices for trades and applies IQR filtering.
-        Returns a list of trade records that are considered inliers.
-        """
-        if not trade_records:
-            return []
-
-        prices = []
-        for r in trade_records:
-            try:
-                price = float(r['sol_amount']) / float(r['token_amount'])
-                prices.append(price)
-            except (TypeError, ValueError, ZeroDivisionError):
-                prices.append(None) # Mark invalid prices
-
-        # Filter out None prices before IQR
-        valid_prices_for_iqr = [p for p in prices if p is not None]
-        if not valid_prices_for_iqr:
-            logger.warning("No valid prices to apply IQR filtering.")
-            return [] # Return all trades if no valid prices for IQR
-
-        q1 = np.percentile(valid_prices_for_iqr, 25)
-        q3 = np.percentile(valid_prices_for_iqr, 75)
-        iqr_val = q3 - q1
-        lower_bound = q1 - 1.5 * iqr_val
-        upper_bound = q3 + 1.5 * iqr_val
-
-        inlier_trades = []
-        for i, r in enumerate(trade_records):
-            price = prices[i]
-            if price is not None and lower_bound <= price <= upper_bound:
-                # Add the calculated price to the trade record for convenience
-                r_copy = dict(r) # Create a copy to avoid modifying the original record list
-                r_copy['price'] = price
-                inlier_trades.append(r_copy)
-
-        if not inlier_trades:
-            logger.warning("All trades filtered out as outliers by IQR. No inlier trades to use.")
-            # Fallback: could return unfiltered trades or a subset based on other criteria
-            # For now, returning empty list, forcing price calculation to fail or use other fallbacks.
-            return []
-        return inlier_trades
-
-    async def _calculate_median_price_with_iqr(self, mint: str, window_minutes: int, conn) -> float | None:
-        """Calculates median price with IQR filtering."""
-        trade_records = await self._get_raw_trades_for_window(mint, window_minutes, conn)
-        if not trade_records:
-            logger.debug(f"No trades found for {mint} in the last {window_minutes} minutes for median calculation.")
-            return None
-
-        # Prices are calculated and IQR applied within _apply_iqr_to_trades
-        # Here, we just need the prices from the inlier trades
-        inlier_trades = self._apply_iqr_to_trades(trade_records) # this adds 'price' key
-        if not inlier_trades:
-            # Attempt fallback to unfiltered median if all were outliers
-            all_prices = [float(r['sol_amount'])/float(r['token_amount']) for r in trade_records if r['token_amount'] and r['sol_amount']]
-            if all_prices:
-                 logger.warning(f"All prices for {mint} filtered out as outliers. Falling back to unfiltered median for median calculation.")
-                 return statistics.median(all_prices)
-            logger.warning(f"No inlier trades for {mint} after IQR for median calculation, and no fallback possible.")
-            return None
-
-        inlier_prices = [float(trade['price']) for trade in inlier_trades]
-        return statistics.median(inlier_prices) if inlier_prices else None
-
-    async def _calculate_vwap_price_with_iqr(self, mint: str, window_minutes: int, conn) -> float | None:
-        """Calculates VWAP with IQR filtering on individual trade prices."""
-        trade_records = await self._get_raw_trades_for_window(mint, window_minutes, conn)
-        if not trade_records:
-            logger.debug(f"No trades found for {mint} in the last {window_minutes} minutes for VWAP calculation.")
-            return None
-
-        inlier_trades = self._apply_iqr_to_trades(trade_records)
-        if not inlier_trades:
-            logger.warning(f"No inlier trades for {mint} after IQR for VWAP calculation.")
-            return None # Or implement fallback to unfiltered VWAP
-
-        total_sol_inliers = sum(float(trade['sol_amount']) for trade in inlier_trades)
-        total_tokens_inliers = sum(float(trade['token_amount']) for trade in inlier_trades)
-
-        if total_tokens_inliers == 0:
-            logger.warning(f"Total token amount for inliers is zero for {mint}. Cannot calculate VWAP.")
-            return None
-        return total_sol_inliers / total_tokens_inliers
-
-    async def _calculate_twap_price_with_iqr(self, mint: str, window_minutes: int, interval_seconds: int, conn) -> float | None:
-        """Calculates TWAP with IQR filtering on individual trade prices before resampling."""
-        trade_records = await self._get_raw_trades_for_window(mint, window_minutes, conn)
-        if not trade_records:
-            logger.debug(f"No trades found for {mint} in the last {window_minutes} minutes for TWAP calculation.")
-            return None
-
-        inlier_trades_with_price = self._apply_iqr_to_trades(trade_records) # This adds 'price' to each dict
-        if not inlier_trades_with_price:
-            logger.warning(f"No inlier trades for {mint} after IQR for TWAP calculation.")
-            return None
-
-        # Create DataFrame from inlier trades with their calculated (inlier) prices and original timestamps
-        df_data = [{'timestamp': pd.to_datetime(trade['timestamp']), 'price': float(trade['price'])} for trade in inlier_trades_with_price]
-        df = pd.DataFrame(df_data)
-
-        if df.empty:
-            return None
-
-        df = df.set_index('timestamp')
-        # Resample into intervals and take the median price of each interval (using inlier prices)
-        interval_prices = df['price'].resample(f'{interval_seconds}S').median(numeric_only=True)
-        valid_interval_prices = interval_prices.dropna()
-
-        if valid_interval_prices.empty:
-            return None
-
-        twap = valid_interval_prices.mean()
-        return float(twap) if pd.notnull(twap) else None
-
-    async def get_price_and_market_cap_for_decision(self, mint: str, config: dict, conn) -> Dict[str, Optional[float]]:
-        """
-        Centralized function to get the decision price and latest market cap for a token.
-        The decision price is determined by PRICE_DETERMINATION_METHOD.
-        The market cap is always from the single latest trade.
-        """
-        decision_price: Optional[float] = None
-        latest_market_cap_sol: Optional[float] = None
-        raw_latest_price: Optional[float] = None
-
-        # 1. Fetch the absolute latest trade for market_cap and raw_latest_price
-        latest_trade_query = """
-            SELECT price, marketCapSol
-            FROM trades
-            WHERE mint = $1
-            ORDER BY timestamp DESC
-            LIMIT 1;
-        """
-        latest_trade_record = await conn.fetchrow(latest_trade_query, mint)
-
-        if latest_trade_record:
-            raw_latest_price = float(latest_trade_record['price']) if latest_trade_record['price'] is not None else None
-            latest_market_cap_sol = float(latest_trade_record['marketcapsol']) if latest_trade_record['marketcapsol'] is not None else None
-            # Ensure market_cap is positive, otherwise treat as None for safety
-            if latest_market_cap_sol is not None and latest_market_cap_sol <= 0:
-                latest_market_cap_sol = None
-            if raw_latest_price is not None and raw_latest_price <=0:
-                raw_latest_price = None # Don't use non-positive as raw latest price
-        else:
-            logger.warning(f"No trades found at all for {mint} to determine latest market cap or price.")
-            return {'price': None, 'market_cap': None}
-
-        # 2. Determine the decision_price based on the configured method
-        method = config.get("PRICE_DETERMINATION_METHOD", "LATEST")
-        window_minutes = config.get("PRICE_AVG_WINDOW_MINUTES", 3) # Default to 3 mins from config.py
-
-        try:
-            if method == "LATEST":
-                decision_price = raw_latest_price
-            elif method == "MEDIAN":
-                decision_price = await self._calculate_median_price_with_iqr(mint, window_minutes, conn)
-            elif method == "VWAP":
-                decision_price = await self._calculate_vwap_price_with_iqr(mint, window_minutes, conn)
-            elif method == "TWAP":
-                interval_seconds = config.get("TWAP_SUB_INTERVAL_SECONDS", 60)
-                decision_price = await self._calculate_twap_price_with_iqr(mint, window_minutes, interval_seconds, conn)
-            else:
-                logger.warning(f"Unknown PRICE_DETERMINATION_METHOD: {method}. Defaulting to LATEST.")
-                decision_price = raw_latest_price
-
-            # Fallback: If chosen method fails to return a price, but raw_latest_price is available, use it.
-            if decision_price is None and raw_latest_price is not None:
-                logger.warning(f"Price determination method '{method}' for {mint} resulted in None. Falling back to raw latest price: {raw_latest_price}.")
-                decision_price = raw_latest_price
-            elif decision_price is not None and decision_price <= 0:
-                 logger.warning(f"Price determination method '{method}' for {mint} resulted in non-positive price: {decision_price}. Attempting fallback to raw_latest_price.")
-                 decision_price = raw_latest_price if raw_latest_price is not None and raw_latest_price > 0 else None
-
-
-        except Exception as e:
-            logger.error(f"Error during price determination for {mint} with method {method}: {e}", exc_info=True)
-            decision_price = raw_latest_price # Fallback to raw latest on error if available
-
-        if decision_price is None:
-            logger.error(f"Could not determine a valid price for {mint} using method '{method}' and fallback failed.")
-
-
-        logger.debug(f"Price decision for {mint}: Method='{method}', DecidedPrice={decision_price}, LatestMC={latest_market_cap_sol}, RawLatestPrice={raw_latest_price}")
-        return {'price': decision_price, 'market_cap': latest_market_cap_sol}
-
-    async def get_total_tracked_tokens(self, backedup=False):
-        """Fetches the total number of tracked tokens from the database."""
-        query = "SELECT COUNT(*) FROM tokens"
-        if backedup:
-            query = "SELECT COUNT(*) FROM v_tokens"
-        
-        async with self.pool.acquire() as conn:
-            try:
-                result = await conn.fetchval(query)
-                return result if result is not None else 0
-            except Exception as e:
-                logger.error(f"Error fetching total tracked tokens: {e}", exc_info=True)
-                return 0
-
-    async def insert_heartbeat(self, event_type: str = 'heartbeat', details: Optional[dict] = None):
-        """Insert a new heartbeat or event into the bot_heartbeat table."""
-        try:
-            async with self.pool.acquire() as conn:
-                await conn.execute(
-                    "INSERT INTO bot_heartbeat (event_type, details) VALUES ($1, $2)",
-                    event_type, json.dumps(details) if details else None
-                )
-            # logger.debug(f"Heartbeat event '{event_type}' inserted.") # Optional logging
-        except Exception as e:
-            logger.error(f"Error inserting heartbeat event: {e}", exc_info=True)
-            # Decide if you want to raise, as heartbeat failure could be critical
-
-    async def get_last_heartbeat_before(self, timestamp: datetime) -> Optional[datetime]:
-        """Get the last heartbeat recorded before a given timestamp."""
-        query = "SELECT timestamp FROM bot_heartbeat WHERE timestamp < $1 ORDER BY timestamp DESC LIMIT 1"
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(query, timestamp)
-            return row['timestamp'] if row else None
-
-    async def get_first_heartbeat_after(self, timestamp: datetime) -> Optional[datetime]:
-        """Get the first heartbeat recorded after a given timestamp."""
-        query = "SELECT timestamp FROM bot_heartbeat WHERE timestamp > $1 ORDER BY timestamp ASC LIMIT 1"
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(query, timestamp)
-            return row['timestamp'] if row else None
-
-    async def check_for_data_gap_on_restart(self,
-                                            archived_at: datetime,
-                                            gap_detection_threshold_seconds: int) -> bool:
-        """
-        Checks if there was a significant gap in bot operation (missing heartbeats)
-        immediately before the 'archived_at' timestamp.
-        """
-        try:
-            query = """
-                SELECT timestamp FROM bot_heartbeat
-                WHERE timestamp < $1
-                ORDER BY timestamp DESC
-                LIMIT 1;
-            """
-            # Ensure self.pool is the correct way to get a connection
-            # This might be self.db_pool or similar depending on your class structure
-            async with self.pool.acquire() as conn:
-                last_heartbeat_record = await conn.fetchrow(query, archived_at)
-
-            if not last_heartbeat_record:
-                # No heartbeats recorded before this token's archival.
-                # Check if any heartbeats exist at all to distinguish a new bot from a long-dead one.
-                async with self.pool.acquire() as conn: # Re-acquire if needed, or use existing conn if scope allows
-                    first_ever_heartbeat = await conn.fetchval("SELECT MIN(timestamp) FROM bot_heartbeat")
-                
-                if first_ever_heartbeat and first_ever_heartbeat < archived_at:
-                    # Heartbeats exist in the table, but none before the current archival time.
-                    # This implies the bot was down for the entire period leading up to 'archived_at'.
-                    logger.warning(f"No heartbeats found before {archived_at}, but older heartbeats exist. Gap detected.")
-                    return True
-                elif not first_ever_heartbeat:
-                    logger.info(f"No heartbeats found in bot_heartbeat table. Cannot determine gap for token archived at {archived_at}. Assuming no gap for safety.")
-                    return False # Cannot determine, conservatively assume no gap.
-                else: # Should not happen if archived_at is current time and heartbeats exist after.
-                    logger.debug(f"First heartbeat {first_ever_heartbeat} is after {archived_at}. No gap determined.")
-                    return False
-
-            last_heartbeat_ts = last_heartbeat_record['timestamp']
-            # Ensure archived_at is offset-aware if last_heartbeat_ts is, or vice-versa.
-            # If one is naive and the other is aware, comparison will raise an error.
-            # Assuming both are consistently offset-aware (e.g., UTC from TIMESTAMPTZ).
-            time_since_last_heartbeat_seconds = (archived_at - last_heartbeat_ts).total_seconds()
-
-            logger.debug(f"Token archived_at: {archived_at}, Last heartbeat: {last_heartbeat_ts}, "
-                        f"Duration since last heartbeat: {time_since_last_heartbeat_seconds:.2f}s, "
-                        f"Gap threshold: {gap_detection_threshold_seconds}s")
-
-            if time_since_last_heartbeat_seconds > gap_detection_threshold_seconds:
-                logger.info(f"Data gap detected: Last heartbeat was {time_since_last_heartbeat_seconds:.2f}s ago "
-                            f"(threshold: {gap_detection_threshold_seconds}s). Token lifecycle likely interrupted.")
-                return True
-            
-            logger.debug("No significant pre-archival data gap detected based on heartbeats.")
-            return False
-
-        except Exception as e:
-            logger.error(f"Error in check_for_data_gap_on_restart: {e}", exc_info=True)
-            return False # Fail safe
-
-    async def check_for_data_gap(self, token_start_time: datetime, token_end_time: datetime, gap_threshold_seconds: int = 300) -> bool:
-        """
-        Checks for significant data gaps in bot_heartbeat table during the token's active period.
-        A gap is significant if the time between two consecutive heartbeats exceeds gap_threshold_seconds.
-        """
-        last_hb_before_token_end = await self.get_last_heartbeat_before(token_end_time)
-        first_hb_after_token_start = await self.get_first_heartbeat_after(token_start_time)
-
-        if not last_hb_before_token_end or not first_hb_after_token_start:
-            # If no heartbeats surround the token's activity, assume a potential gap (conservative approach)
-            # This might happen if the token's entire lifecycle was during a bot downtime.
-            logger.warning(f"Heartbeat data missing around token activity ({token_start_time} - {token_end_time}). Assuming potential data gap.")
-            return True
-
-        # Check gap between the heartbeat just before the token died (or script stopped)
-        # and the heartbeat just after the script restarted (which would be after the token_start_time if it was an existing token)
-
-        # Scenario 1: Gap *during* the token's recorded lifecycle
-        # This requires iterating heartbeats within the token_start_time and token_end_time,
-        # but a simpler proxy is to check the continuity around the point of potential script failure.
-
-        # Let's refine: We are interested if the bot was down for a period that *ended*
-        # shortly before token_end_time (when it was marked dead).
-        # And this downtime started *after* token_start_time.
-
-        query_heartbeats_in_range = """
-            SELECT timestamp FROM bot_heartbeat
-            WHERE timestamp >= $1 AND timestamp <= $2
-            ORDER BY timestamp ASC;
-        """
-        async with self.pool.acquire() as conn:
-            heartbeats = await conn.fetch(query_heartbeats_in_range, token_start_time, token_end_time)
-
-        if not heartbeats: # No heartbeats during the token's entire active period
-            logger.debug(f"No bot heartbeats found during token {token_start_time} - {token_end_time} lifecycle. Likely a gap.")
-            return True
-
-        previous_hb_ts = None
-        for record in heartbeats:
-            current_hb_ts = record['timestamp']
-            if previous_hb_ts:
-                if (current_hb_ts - previous_hb_ts).total_seconds() > gap_threshold_seconds:
-                    logger.info(f"Data gap detected for token: {previous_hb_ts} to {current_hb_ts} ({(current_hb_ts - previous_hb_ts).total_seconds()}s)")
-                    return True
-            previous_hb_ts = current_hb_ts
-
-        # Also check the gap between the last known heartbeat *before* the token ended its lifecycle
-        # and the token's end time. This covers the case where the bot stopped *while* this token was live.
-        if previous_hb_ts and (token_end_time - previous_hb_ts).total_seconds() > gap_threshold_seconds:
-            logger.info(f"Data gap detected leading up to token end: last heartbeat at {previous_hb_ts}, token ended at {token_end_time}")
-            return True
-
-
-        return False
-
-    async def cleanup_db(self, cleanup_flag: bool):
-        """Drop all application tables if cleanup_flag is True."""
-        if cleanup_flag:
-            logger.warning("🚨 Starting full database cleanup - Dropping all application tables...")
-            async with self.pool.acquire() as conn:
-                # List all known application tables (main and backup)
-                # Add any other tables managed by the application if necessary (e.g., creator_wallets)
-                tables_to_drop = [
-                    'portfolio',          
-                    'rugcheck',           # Depends on tokens
-                    'trades',             # No explicit FK, but related to tokens
-                    'migrations',         # Standalone or related? Assuming standalone for drop order
-                    'tokens',             # Drop after dependents
-                    'portfolio_backup',          
-                    'rugcheck_backup',
-                    'trades_backup',
-                    'migrations_backup',
-                    'tokens_backup'
-                ]
-                # Drop tables in an order that respects potential dependencies, or use CASCADE
-                # Using DROP TABLE IF EXISTS ... CASCADE is generally safer
-                for table in tables_to_drop:
-                    try:
-                        # Use CASCADE to handle potential foreign key dependencies automatically
-                        await conn.execute(f"DROP TABLE IF EXISTS {table} CASCADE;")
-                        logger.info(f"🗑️ Dropped table {table}")
-                    except Exception as e:
-                        # Log error but continue trying to drop other tables
-                        logger.error(f"Error dropping table {table}: {e}", exc_info=False) # Keep log concise
-
-            logger.warning("✅ Full database cleanup finished.")
-
-    async def backup_db(self, backup_flag: bool):
-        """Backup tables based on backup_flag."""
-        if backup_flag:
-            async with self.pool.acquire() as conn:
-                try:
-                    tables_to_backup = [
-                        'tokens', 'trades', 'rugcheck', 'migrations', 'portfolio'
-                    ]
-                    for table in tables_to_backup:
-                        # Insert into backup table, ignoring rows that already exist based on primary key 'id'
-                        # Determine the correct primary key for conflict resolution based on table schema
-                        if table == 'tokens':
-                            conflict_key = 'mint'
-                        elif table == 'trades':
-                            conflict_key = 'signature'
-                        elif table == 'rugcheck':
-                            conflict_key = 'mint'
-                        elif table == 'migrations':
-                            conflict_key = 'signature'
-                        elif table == 'portfolio':
-                            table_columns = await conn.fetch(f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table}'")
-                            conflict_key = 'id'
-                            columns = ", ".join([col for col in table_columns if col != "id"])
-                            await conn.execute(f"""
-                                INSERT INTO {table}_backup (id, {columns})
-                                SELECT nextval('{table}_backup_id_seq'), {columns}
-                                FROM {table} 
-                                ORDER BY id
-                                ON CONFLICT ({conflict_key}) DO NOTHING;
-                            """)
-                            logger.info("🗄️ Backed up table %s", table)
-                            await conn.execute(f"TRUNCATE TABLE {table} RESTART IDENTITY CASCADE;")
-                            logger.info("🧹 Truncated table %s", table)
-                        else:
-                            # Should not happen with the current list, but add a warning
-                            logger.warning(f"Unexpected table '{table}' in backup_db conflict handling.")
-                            # If other tables are added later, their PK needs to be handled here.
-                            # For now, skip conflict handling for unknown tables to avoid errors.
-                            await conn.execute(f"INSERT INTO {table}_backup SELECT * FROM {table};") # Original insert without ON CONFLICT
-                            logger.info("🗄️ Backed up table %s (without conflict check)", table)
-                            await conn.execute(f"TRUNCATE TABLE {table} RESTART IDENTITY CASCADE;")
-                            continue # Skip the rest of the loop for this table
-
-                        # Execute the INSERT with the correct ON CONFLICT clause
-                        await conn.execute(f"INSERT INTO {table}_backup SELECT * FROM {table} ON CONFLICT ({conflict_key}) DO NOTHING;")
-                        logger.info("🗄️ Backed up table %s", table)
-                        await conn.execute(f"TRUNCATE TABLE {table} RESTART IDENTITY CASCADE;")
-                        logger.info("🧹 Truncated table %s", table)
-                except Exception as e:
-                    logger.exception("Error during database backup: %s", e)
-                    raise
-
-    async def close(self):
-        """Close the database connection pool."""
-        if self.pool:
-            logger.info("Closing database connection pool...")
-            await self.pool.close()
-            logger.info("Database connection pool closed.")
-
-    async def get_token_lifespan(self, mint: str) -> Optional[Dict[str, datetime]]:
-        """
-        Fetches the approximate start and end timestamp of a token's activity
-        based on its first and last trade records in the v_trades view.
-
-        Args:
-            mint: The mint address of the token.
-
-        Returns:
-            A dictionary {'start_ts': datetime, 'end_ts': datetime} if trades exist,
-            otherwise None. Timestamps are timezone-aware (UTC).
-        """
-        if not self.pool:
-            logger.error("Database pool not initialized.")
-            return None
-
-        query = """
-            SELECT
-                MIN(timestamp) as first_trade_ts,
-                MAX(timestamp) as last_trade_ts
-            FROM v_trades
-            WHERE mint = $1;
-        """
-        async with self.pool.acquire() as conn:
-            try:
-                row = await conn.fetchrow(query, mint)
-                if row and row['first_trade_ts'] and row['last_trade_ts']:
-                    # Ensure timestamps are timezone-aware UTC
-                    start_ts = row['first_trade_ts'].replace(tzinfo=timezone.utc) if row['first_trade_ts'].tzinfo is None else row['first_trade_ts'].astimezone(timezone.utc)
-                    end_ts = row['last_trade_ts'].replace(tzinfo=timezone.utc) if row['last_trade_ts'].tzinfo is None else row['last_trade_ts'].astimezone(timezone.utc)
-                    return {'start_ts': start_ts, 'end_ts': end_ts}
-                else:
-                    logger.warning(f"No trade timestamps found for mint {mint} to determine lifespan.")
-                    return None
-            except Exception as e:
-                logger.error(f"Error fetching token lifespan for {mint}: {e}", exc_info=True)
-                return None
-
-    def ohlcv_sql_like(self, df):
-        """Aggregates trade data into OHLCV format, using pre-calculated rolling metrics."""
-        # Ensure data is sorted by time within the group
-        df = df.sort_values('timestamp')
-        if df.empty:
-            # Return a Series with expected columns and NaN/0 values if the group is empty
-            return pd.Series({
-                'Open': np.nan, 'High': np.nan, 'Low': np.nan, 'Close': np.nan,
-                'Volume': 0.0, # Use the rolling volume name
-                'market_cap_calculated': np.nan,
-                'marketCapSol': np.nan,
-                'volatility': 0.0 # Use the rolling volatility name
-            })
-
-        # Use .iloc[-1] to safely get the last value, handling potential index issues
-        # Use .fillna(0.0) or other appropriate defaults if iloc[-1] could be NaN
-        last_rolling_volume = df['rolling_volume_sql'].iloc[-1] if not df['rolling_volume_sql'].empty else 0.0
-        last_rolling_volatility = df['rolling_volatility_sql'].iloc[-1] if not df['rolling_volatility_sql'].empty else 0.0
-        last_market_cap = df['market_cap_calculated'].iloc[-1] if not df['market_cap_calculated'].isnull().all() else np.nan
-        last_market_cap_sol = df['marketCapSol'].iloc[-1] if not df['marketCapSol'].empty and pd.notna(df['marketCapSol'].iloc[-1]) else np.nan
-
-        return pd.Series({
-            'Open': df['price'].iloc[0] if not df['price'].empty else np.nan,
-            'High': df['price'].max() if not df['price'].empty else np.nan,
-            'Low': df['price'].min() if not df['price'].empty else np.nan,
-            'Close': df['price'].iloc[-1] if not df['price'].empty else np.nan,
-            # --- MODIFIED LINES ---
-            'Volume': last_rolling_volume,         # Take the LAST rolling volume in the interval
-            'market_cap_calculated': last_market_cap,
-            'marketCapSol': last_market_cap_sol,
-            'volatility': last_rolling_volatility   # Take the LAST rolling volatility in the interval
-            # --- END MODIFIED LINES ---
-        })
-
-    async def get_historical_data_for_backtesting(
-            self, # Assuming this is part of the DatabaseClient class
-            mints: List[str],
-            start_date: datetime,
-            end_date: datetime
-        ) -> Dict[str, pd.DataFrame]:
-            """
-            Fetches comprehensive historical data for specified tokens within a date range,
-            structured as 5-second OHLCV candles for backtesting.
-            Calculates rolling volume and volatility similar to the SQL trading logic.
-            """
-            if not mints:
-                logger.warning("get_historical_data_for_backtesting called with empty mints list.")
-                return {}
-            if not self.pool:
-                logger.error("Database pool not initialized.")
-                return {}
-
-            if start_date.tzinfo is None: start_date = start_date.replace(tzinfo=timezone.utc)
-            if end_date.tzinfo is None: end_date = end_date.replace(tzinfo=timezone.utc)
-
-            logger.info(f"Fetching historical data for {len(mints)} tokens from {start_date.isoformat()} to {end_date.isoformat()}...")
-
-            # Fetch all necessary data within the time range
-            trade_query = """
-                SELECT
-                    mint, timestamp, price, (sol_amount*sol_price_usd) AS volume, market_cap_calculated, marketCapSol 
-                FROM v_trades
-                WHERE mint = ANY($1::text[])
-                AND timestamp >= $2 AND timestamp < $3
-                AND price > 0 AND sol_amount IS NOT NULL AND price IS NOT NULL
-                ORDER BY mint, timestamp;
-            """
-            rugcheck_query = """
-                WITH RankedRugcheck AS (
-                    SELECT
-                        mint, last_checked AS timestamp, score AS rugcheck_score,
-                        ROW_NUMBER() OVER (PARTITION BY mint ORDER BY last_checked DESC) as rn
-                    FROM v_rugcheck
-                    WHERE mint = ANY($1::text[])
-                    AND last_checked < $3 -- Get checks before the period end
-                )
-                -- Select the latest check before the period OR any check within the period
-                SELECT mint, timestamp, rugcheck_score
-                FROM RankedRugcheck
-                WHERE rn = 1 OR timestamp >= $2;
-            """
-            token_info_query = """
-                WITH LatestTokenInfo AS (
-                    SELECT
-                        mint,
-                        socials_score,
-                        timestamp AS token_creation_time,
-                        ROW_NUMBER() OVER (PARTITION BY mint ORDER BY timestamp DESC) as rn
-                    FROM v_tokens
-                    WHERE mint = ANY($1::text[])
-                    AND timestamp < $2 -- Get info created before the end_date
-                )
-                SELECT mint, token_creation_time, socials_score
-                FROM LatestTokenInfo
-                WHERE rn = 1;
-            """
-
-            results_dict = {}
-            async with self.pool.acquire() as conn:
-                try:
-                    logger.debug("Fetching trade data...")
-                    trade_records_raw = await conn.fetch(trade_query, mints, start_date, end_date)
-                    logger.debug(f"Fetched {len(trade_records_raw)} raw trades.")
-
-                    logger.debug("Fetching rugcheck data...")
-                    rugcheck_records_raw = await conn.fetch(rugcheck_query, mints, start_date, end_date)
-                    logger.debug(f"Fetched {len(rugcheck_records_raw)} rugchecks.")
-
-                    logger.debug("Fetching token info data...")
-                    token_info_records_raw = await conn.fetch(token_info_query, mints, end_date)
-                    logger.debug(f"Fetched {len(token_info_records_raw)} token infos.")
-
-                    if not trade_records_raw:
-                        logger.warning("No trade records found for the specified mints and period.")
-                        return {}
-
-                    # --- Process Trade Data ---
-                    trades_df = pd.DataFrame(trade_records_raw, columns=['mint', 'timestamp', 'price', 'volume', 'market_cap_calculated', 'marketCapSol'])
-                    trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'], errors='coerce', utc=True)
-                    trades_df.dropna(subset=['timestamp'], inplace=True) # Drop rows where timestamp couldn't be parsed
-
-                    # Convert relevant columns to numeric early, handling errors
-                    trades_df['price'] = pd.to_numeric(trades_df['price'], errors='coerce')
-                    trades_df['volume'] = pd.to_numeric(trades_df['volume'], errors='coerce') # This is sol_amount
-                    trades_df['market_cap_calculated'] = pd.to_numeric(trades_df['market_cap_calculated'], errors='coerce')
-                    trades_df['marketCapSol'] = pd.to_numeric(trades_df['marketCapSol'], errors='coerce')
-                    trades_df.dropna(subset=['price', 'volume'], inplace=True) # Drop rows essential for calcs if invalid
-
-                    # --- Calculate SQL-like Rolling Volume & Volatility per Mint ---
-                    logger.info("Calculating rolling volume and volatility per mint...")
-                    all_processed_trades = []
-                    time_interval_minutes = self.config['DEFAULT_TIME_INTERVALL'] # Get from config
-                    time_interval_minutes = self.config['DEFAULT_TIME_INTERVALL'] # Get from config
-                    window_duration = f"{time_interval_minutes}min"
-                    logger.debug(f"Using rolling window duration: {window_duration}")
-
-                    for mint_name, mint_df in trades_df.groupby('mint'):
-                        if mint_df.empty:
-                            continue
-
-                        mint_df = mint_df.sort_values('timestamp').copy() # Sort and copy to avoid SettingWithCopyWarning
-
-                        # Set timestamp as index for rolling calculations
-                        mint_df_indexed = mint_df.set_index('timestamp')
-
-                        # Calculate Rolling Volume (SQL-like)
-                        mint_df['rolling_volume_sql'] = mint_df_indexed['volume']\
-                                                        .rolling(window_duration, closed='left')\
-                                                        .sum().values
-                        mint_df['rolling_volume_sql'] = mint_df['rolling_volume_sql'].fillna(0.0)
-
-                        # Calculate Rolling Volatility (SQL-like)
-                        prices = mint_df['price']
-                        if len(prices) > 1:
-                            # Calculate log returns, handle potential division by zero or invalid values
-                            log_returns = np.log(prices / prices.shift(1)).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
-                            # Use rolling window on log_returns indexed by time
-                            rolling_obj = log_returns.set_axis(mint_df['timestamp'])\
-                                                    .rolling(window_duration, closed='left')
-
-                            # Calculate rolling std deviation and count
-                            rolling_std = rolling_obj.std()
-                            rolling_count = rolling_obj.count()
-
-                            # Apply the SQL logic: std * sqrt(count), handle count <= 5
-                            # Ensure intermediate arrays are float for sqrt
-                            rolling_std_float = rolling_std.fillna(0.0).astype(float)
-                            rolling_count_float = rolling_count.fillna(0.0).astype(float)
-
-                            volatility_sql = rolling_std_float * np.sqrt(np.maximum(rolling_count_float, 1.0)) # Use maximum to avoid sqrt(0)
-                            mint_df['rolling_volatility_sql'] = volatility_sql.where(rolling_count > 5, 0.0).values # Set to 0 if count <= 5
-                        else:
-                            mint_df['rolling_volatility_sql'] = 0.0 # Not enough data for log returns
-
-                        mint_df['rolling_volatility_sql'] = mint_df['rolling_volatility_sql'].fillna(0.0) # Fill any remaining NaNs
-
-                        all_processed_trades.append(mint_df)
-
-                    if not all_processed_trades:
-                        logger.warning("No trades remained after processing rolling metrics.")
-                        return {}
-
-                    processed_trades_df = pd.concat(all_processed_trades)
-
-                    # --- Resample to 5-second OHLCV using SQL-like metrics ---
-                    logger.info("Resampling trades to 5-second OHLCV intervals...")
-                    # Apply the modified aggregation function
-                    ohlcv_df = processed_trades_df.groupby(['mint', pd.Grouper(key='timestamp', freq='5s')])\
-                                                .apply(self.ohlcv_sql_like).reset_index()
-
-                    # Handle potential NaNs from empty groups BEFORE setting index
-                    ohlcv_df.dropna(subset=['mint', 'timestamp'], inplace=True) # Drop rows if group keys are NaN
-                    # Fill NaNs in OHLC columns resulting from empty groups (e.g., with ffill/bfill or 0)
-                    ohlc_cols = ['Open', 'High', 'Low', 'Close']
-                    # Forward fill first, then backfill to handle NaNs at the start/end
-                    ohlcv_df[ohlc_cols] = ohlcv_df.groupby('mint')[ohlc_cols].ffill().bfill()
-                    # Fill remaining NaNs (if entire mint group was NaN) with 0 or a suitable value
-                    ohlcv_df[ohlc_cols] = ohlcv_df[ohlc_cols].fillna(0.0)
-                    # Also fill Volume/Volatility/MarketCap NaNs that resulted from empty intervals
-                    ohlcv_df[['Volume', 'volatility', 'market_cap_calculated', 'marketCapSol']] = ohlcv_df[['Volume', 'volatility', 'market_cap_calculated', 'marketCapSol']].fillna(0.0)
-
-
-                    ohlcv_df = ohlcv_df.set_index('timestamp')
-
-                    # ---> FIX: Handle duplicate index before resampling <---
-                    # This should ideally happen *after* groupby.apply but *before* resample
-                    # Check if duplicates exist after setting the index
-                    if ohlcv_df.index.has_duplicates:
-                        logger.warning(f"Duplicate timestamps found in aggregated OHLCV index before resampling. Keeping last entry.")
-                        # Group by mint *and* timestamp, take the last row within each duplicate group
-                        ohlcv_df = ohlcv_df.loc[~ohlcv_df.index.duplicated(keep='last')]
-                    # ---> END FIX <---
-
-                    # Resample to ensure continuous 5s intervals and interpolate missing values (if any remain)
-                    # Group by mint *before* resampling to resample each token independently
-                    resampled_ohlcv_list = []
-                    for mint_name, group_df in ohlcv_df.groupby('mint'):
-                        # Ensure index is unique within the group before resampling
-                        if group_df.index.has_duplicates:
-                            logger.warning(f"Duplicate timestamps found for mint {mint_name} before resampling. Keeping last.")
-                            group_df = group_df.loc[~group_df.index.duplicated(keep='last')]
-
-                        # Define the full time range for this mint based on its first/last resampled point
-                        # This ensures resampling covers the actual activity period for the mint
-                        min_ts = group_df.index.min()
-                        max_ts = group_df.index.max()
-                        full_range = pd.date_range(start=min_ts, end=max_ts, freq='5s', tz='UTC')
-
-                        # ---> FIX: Call infer_objects() before interpolating <---
-                        # group_resampled = group_df.reindex(full_range).interpolate(method='time')
-                        # Reindex first, creating the DataFrame that might have object dtypes due to NaNs
-                        group_reindexed = group_df.reindex(full_range)
-
-                        try:
-                            # Attempt to convert columns to more specific dtypes (e.g., float, int)
-                            # copy=False modifies inplace if possible, potentially saving memory
-                            group_reindexed = group_reindexed.infer_objects(copy=False)
-                        except Exception as e:
-                            # Log if infer_objects fails, but proceed cautiously
-                            logger.warning(f"Failed to infer objects for {mint_name} before interpolation: {e}")
-
-                        # Reindex and interpolate within the group's actual range
-                        # Now interpolate. This should operate on more appropriate dtypes.
-                        group_resampled = group_reindexed.interpolate(method='time')
-                        # ---> END FIX <---
-                        
-                       
-                       
-                        # Add the mint column back after reindexing
-                        group_resampled['mint'] = mint_name
-                        resampled_ohlcv_list.append(group_resampled)
-
-                    if not resampled_ohlcv_list:
-                        logger.warning("No data remained after resampling OHLCV data.")
-                        return {}
-
-                    resampled_ohlcv_df = pd.concat(resampled_ohlcv_list)
-                    resampled_ohlcv_df.index.name = 'timestamp' # Ensure index has a name
-
-                    # --- Process RugCheck Data ---
-                    # (Same as before)
-                    if rugcheck_records_raw:
-                        rugcheck_df = pd.DataFrame(rugcheck_records_raw, columns=['mint', 'timestamp', 'rugcheck_score'])
-                        rugcheck_df['timestamp'] = pd.to_datetime(rugcheck_df['timestamp'], errors='coerce', utc=True)
-                        rugcheck_df.dropna(subset=['timestamp'], inplace=True)
-                        # Set index AFTER sorting and dropping duplicates
-                        rugcheck_df = rugcheck_df.sort_values(['mint', 'timestamp'])
-                        # Keep the last score for duplicate timestamps within the same mint
-                        rugcheck_df = rugcheck_df.drop_duplicates(subset=['mint', 'timestamp'], keep='last')
-                        rugcheck_df.set_index('timestamp', inplace=True)
-                        rugcheck_df['rugcheck_score'] = pd.to_numeric(rugcheck_df['rugcheck_score'], errors='coerce')
-                        rugcheck_df = rugcheck_df[['mint', 'rugcheck_score']] # Keep mint for merge_asof
-                    else:
-                        # Create an empty DataFrame with the correct columns and index type
-                        rugcheck_df = pd.DataFrame(columns=['mint', 'rugcheck_score']).set_index(pd.DatetimeIndex([], name='timestamp', tz='UTC'))
-
-
-                    # --- Process Token Info ---
-                    # (Same as before)
-                    token_info = {}
-                    if token_info_records_raw:
-                        for r in token_info_records_raw:
-                            mint = r['mint']
-                            # Use pd.to_datetime which handles NaT gracefully
-                            creation_time = pd.to_datetime(r['token_creation_time'], errors='coerce', utc=True)
-                            socials = pd.to_numeric(r['socials_score'], errors='coerce')
-                            if pd.notna(creation_time): # Check if creation_time is valid
-                                token_info[mint] = {'creation_time': creation_time, 'socials_score': socials}
-
-
-                    # --- Combine data per mint ---
-                    logger.info("Combining OHLCV, RugCheck, and Token Info data per mint...")
-                    required_final_cols = ['Open', 'High', 'Low', 'Close', 'Volume', 'market_cap_calculated', 'volatility', 'rugcheck_score', 'socials_score', 'token_creation_time']
-
-                    # Process each mint group from the resampled data
-                    grouped_ohlcv = resampled_ohlcv_df.groupby('mint')
-
-                    for mint_name in grouped_ohlcv.groups:
-                        # Select the mint's OHLCV data
-                        mint_ohlcv = grouped_ohlcv.get_group(mint_name)[['Open', 'High', 'Low', 'Close', 'Volume', 'market_cap_calculated', 'marketCapSol', 'volatility']]
-
-                        # Prepare mint-specific rugcheck data for merge_asof
-                        mint_rugcheck_data = rugcheck_df[rugcheck_df['mint'] == mint_name][['rugcheck_score']] if not rugcheck_df.empty else None
-
-                        # Create the combined DataFrame starting with OHLCV data
-                        combined_df = mint_ohlcv.copy()
-
-                        # Merge RugCheck data using merge_asof
-                        if mint_rugcheck_data is not None and not mint_rugcheck_data.empty:
-                            # Ensure both sides are sorted by index for merge_asof
-                            combined_df = combined_df.sort_index()
-                            mint_rugcheck_data = mint_rugcheck_data.sort_index()
-                            # Handle potential duplicates in rugcheck index before merging
-                            if mint_rugcheck_data.index.has_duplicates:
-                                logger.warning(f"Duplicate timestamps found in RugCheck data for {mint_name}. Keeping last.")
-                                mint_rugcheck_data = mint_rugcheck_data.loc[~mint_rugcheck_data.index.duplicated(keep='last')]
-
-                            combined_df = pd.merge_asof(
-                                combined_df,
-                                mint_rugcheck_data,
-                                left_index=True,
-                                right_index=True,
-                                direction='backward', # Find the latest rugcheck score at or before the OHLCV timestamp
-                                tolerance=pd.Timedelta('1d') # Allow matching recent score
-                            )
-                        else:
-                            combined_df['rugcheck_score'] = np.nan # Add column if no rugcheck data
-
-                        # Add Token Info (Creation Time, Socials Score)
-                        mint_info_data = token_info.get(mint_name)
-                        if mint_info_data:
-                            combined_df['token_creation_time'] = mint_info_data['creation_time']
-                            combined_df['socials_score'] = mint_info_data['socials_score']
-                        else:
-                            logger.warning(f"Missing token info for {mint_name}. Using defaults.")
-                            combined_df['token_creation_time'] = pd.NaT # Use NaT for missing dates
-                            combined_df['socials_score'] = 100 # Default high risk score
-
-                        # --- Final Fill and Type Conversion ---
-                        # Forward fill scores and creation time
-                        fill_cols = ['rugcheck_score', 'socials_score', 'token_creation_time']
-                        combined_df[fill_cols] = combined_df[fill_cols].ffill()
-                        # Backfill only if needed (e.g., if NaNs remain at the beginning)
-                        combined_df[fill_cols] = combined_df[fill_cols].bfill()
-
-
-                        # Convert score columns to integer types after filling NaNs
-                        # Fill NaN scores with default high-risk values before converting to int
-                        combined_df['rugcheck_score'] = combined_df['rugcheck_score'].fillna(10000).astype(int)
-                        combined_df['socials_score'] = combined_df['socials_score'].fillna(100).astype(int)
-
-                        # Ensure other numeric columns are floats, fill NaNs with 0.0 AFTER interpolation/ffill
-                        numeric_cols_to_zero = ['Open', 'High', 'Low', 'Close', 'Volume', 'market_cap_calculated', 'marketCapSol', 'volatility']
-                        for col in numeric_cols_to_zero:
-                            if col in combined_df.columns:
-                                combined_df[col] = pd.to_numeric(combined_df[col], errors='coerce').fillna(0.0)
-                            else:
-                                # Add the column if completely missing after merges (shouldn't happen ideally)
-                                logger.warning(f"Column '{col}' missing for {mint_name} after merge. Adding default 0.0.")
-                                combined_df[col] = 0.0
-
-
-                        # Ensure all required columns exist, adding defaults if somehow missing
-                        for r_col in required_final_cols:
-                            if r_col not in combined_df.columns:
-                                logger.warning(f"Required column '{r_col}' missing for {mint_name} at final stage. Adding default.")
-                                if r_col == 'token_creation_time': combined_df[r_col] = pd.NaT
-                                elif r_col in ['rugcheck_score', 'socials_score']: combined_df[r_col] = 100 if r_col == 'socials_score' else 10000
-                                else: combined_df[r_col] = 0.0
-
-                        # --- Final Filtering and Validation ---
-                        # Filter final DataFrame to the originally requested date range
-                        # This ensures we don't include data outside the requested bounds introduced by resampling/filling
-                        final_df = combined_df[(combined_df.index >= start_date) & (combined_df.index < end_date)].copy() # Use .copy()
-
-                        # Final check for validity before adding to results
-                        if not final_df.empty and all(col in final_df.columns for col in required_final_cols):
-                            # Select and ensure correct dtypes before returning
-                            final_df = final_df[required_final_cols].astype({
-                                'Open': float, 'High': float, 'Low': float, 'Close': float, 'Volume': float,
-                                'market_cap_calculated': float, 'marketCapSol': float, 'volatility': float, 'rugcheck_score': int, 'socials_score': int
-                                # Keep token_creation_time as datetime
-                            })
-                            # Ensure the index is still a DatetimeIndex and timezone-aware
-                            final_df.index = pd.to_datetime(final_df.index, utc=True)
-                            results_dict[mint_name] = final_df
-                        else:
-                            logger.warning(f"No valid data remained for {mint_name} after final processing/filtering. Skipping.")
-
-
-                    logger.info(f"Finished processing data for {len(results_dict)} tokens.")
-
-                except asyncpg.exceptions.InterfaceError as iface_err:
-                    logger.error(f"InterfaceError during historical data processing: {iface_err}", exc_info=True)
-                    # Consider connection recovery logic or re-raising
-                    return {}
-                except Exception as e:
-                    logger.error(f"Error processing historical data ({type(e).__name__}): {e}", exc_info=True)
-                    return {}
-
-            logger.info(f"Successfully fetched and processed historical data for {len(results_dict)} tokens.")
-            return results_dict
-
-# Helper function moved outside class for potential reuse (optional)
-async def get_token_lifespan(db_client: DatabaseClient, mint: str) -> Optional[Dict[str, datetime]]:
+import pandas as pd
+from datetime import datetime, timezone
+import time
+import json
+import random # For sampling
+from multiprocessing import Pool, cpu_count, freeze_support, Manager
+from typing import List, Dict, Any, Tuple, Optional, Union
+import traceback
+import copy
+
+# --- Project Modules ---
+from bot_logger import logger, setup_logging
+from ga_config import (
+    OPTIMIZABLE_PARAMETERS, POPULATION_SIZE, NUM_GENERATIONS,
+    CROSSOVER_PROBABILITY, MUTATION_PROBABILITY, FITNESS_METRIC, FITNESS_GOAL,
+    DATA_SPLIT, BACKTEST_INITIAL_CAPITAL, RESULTS_DIR,
+    HISTORICAL_DATA_START_TS, HISTORICAL_DATA_END_TS, MULTIPROCESSING_CORES,
+    KEEP_ELITISM, PARENT_SELECTION_TYPE, CROSSOVER_TYPE, MUTATION_TYPE,
+    GA_FITNESS_SAMPLE_SIZE # Import the sample size config
+)
+from database_handler import DatabaseClient # Keep DatabaseClient for potential future use if needed directly
+from backtester import run_backtest, calculate_performance_metrics
+# Use the improved data loading utility
+from utils import load_and_split_data, NpEncoder
+
+# --- Global Variables ---
+manager = None
+historical_data_sets_shared = None
+# Store token lifespans (start_ts, end_ts) fetched once
+token_lifespans_shared = None
+pool_ref: Optional[Pool] = None
+
+
+# --- Fitness Function Worker ---
+
+def run_backtest_sync_worker(task_data: Tuple[int, Dict[str, Any], str, pd.DataFrame, Optional[datetime], float, str]) -> Optional[Tuple[int, str, float]]:
     """
-    Fetches the approximate start and end timestamp of a token's activity
-    based on its first and last trade records in the v_trades view.
+    Synchronous wrapper for run_backtest suitable for multiprocessing pool workers.
+    Includes handling for token max_timestamp (lifespan end).
+
+    Args:
+        task_data: A tuple containing:
+            - solution_idx (int): Index of the solution in the population.
+            - parameters (dict): The parameter set for this solution.
+            - mint (str): The mint address of the token to backtest.
+            - df_data (pd.DataFrame): Historical data for the mint.
+            - max_timestamp (Optional[datetime]): The timestamp when the token died, or None.
+            - initial_capital (float): Starting capital for the backtest.
+            - fitness_metric (str): The metric to extract from results.
+
+    Returns:
+        A tuple (solution_idx, mint, fitness_value) on success,
+        or None if the backtest fails or the metric is invalid.
     """
-    if not db_client or not db_client.pool:
-        logger.error("Database client not initialized or connected for get_token_lifespan.")
+    solution_idx, parameters, mint, df_data, max_timestamp, initial_capital, fitness_metric = task_data
+    # logger.debug(f"[Worker {os.getpid()}] Starting sync backtest for Sol {solution_idx}, Mint {mint}, End: {max_timestamp}") # Optional detailed log
+    parameters['mint'] = mint # Include mint in parameters for backtest
+
+    # Ensure DataFrame index is DatetimeIndex for resampling in backtester
+    if not isinstance(df_data.index, pd.DatetimeIndex):
+        try:
+            df_data.index = pd.to_datetime(df_data.index, utc=True)
+        except Exception as e:
+            logger.error(f"[Worker {os.getpid()}] Failed to convert index to DatetimeIndex for Mint {mint}: {e}")
+            return None
+
+    if df_data.empty:
+        logger.warning(f"[Worker {os.getpid()}] Empty DataFrame received for Mint {mint}. Skipping backtest.")
         return None
 
-    query = """
-        SELECT
-            MIN(timestamp) as first_trade_ts,
-            MAX(timestamp) as last_trade_ts
-        FROM v_trades
-        WHERE mint = $1;
-    """
-    async with db_client.pool.acquire() as conn:
-        try:
-            row = await conn.fetchrow(query, mint)
-            if row and row['first_trade_ts'] and row['last_trade_ts']:
-                start_ts = row['first_trade_ts'].replace(tzinfo=timezone.utc) if row['first_trade_ts'].tzinfo is None else row['first_trade_ts'].astimezone(timezone.utc)
-                end_ts = row['last_trade_ts'].replace(tzinfo=timezone.utc) if row['last_trade_ts'].tzinfo is None else row['last_trade_ts'].astimezone(timezone.utc)
-                end_ts += timedelta(seconds=1) # Add buffer
-                return {'start_ts': start_ts, 'end_ts': end_ts}
-            else:
-                logger.warning(f"No trade timestamps found for mint {mint} to determine lifespan.")
-                return None
-        except Exception as e:
-            logger.error(f"Error fetching token lifespan for {mint}: {e}", exc_info=True)
-            return None
+    result: Optional[Dict[str, Any]] = None
+    fitness: Optional[float] = None
 
+    try:
+        # Execute the asynchronous backtest function with max_timestamp
+        result = asyncio.run(run_backtest(parameters, df_data, initial_capital, max_timestamp)) # Pass max_timestamp
+
+        if isinstance(result, dict):
+            fitness = result.get(fitness_metric)
+            if fitness is not None and pd.notna(fitness) and np.isfinite(fitness):
+                # logger.debug(f"[Worker {os.getpid()}] Finished backtest Sol {solution_idx}, Mint {mint}. Fitness ({fitness_metric}): {fitness:.4f}")
+                return solution_idx, mint, float(fitness)
+            else:
+                logger.warning(f"[Worker {os.getpid()}] Invalid/non-finite fitness metric '{fitness_metric}' for Sol {solution_idx}, Mint {mint}. Result: {result}, Fitness: {fitness}")
+                return None # Indicate invalid fitness
+        else:
+             logger.warning(f"[Worker {os.getpid()}] Unexpected result type {type(result)} for Sol {solution_idx}, Mint {mint}.")
+             return None # Indicate failure
+
+    except ValueError as ve: # Catch specific errors like empty data in backtester
+         logger.error(f"[Worker {os.getpid()}] ValueError in backtest for Sol {solution_idx}, Mint {mint}: {ve}")
+         return None
+    except Exception as e:
+        logger.error(f"[Worker {os.getpid()}] Exception in run_backtest_sync for Sol {solution_idx}, Mint {mint}: {e.__class__.__name__}")
+        # logger.exception(f"[Worker {os.getpid()}] Full traceback for Sol {solution_idx}, Mint {mint}:") # Optional full traceback log
+        return None # Return failure indicator
+
+# --- Fitness Function (Main Process) ---
+
+def fitness_func_main_process(ga_instance, solution: np.ndarray, solution_idx: int) -> float:
+    """
+    PyGAD fitness function executed in the main process.
+    Prepares tasks for the multiprocessing pool using a *sample* of training tokens
+    and aggregates results.
+
+    Args:
+        ga_instance: The pygad.GA instance.
+        solution: The numpy array representing the parameter set (genes).
+        solution_idx: The index of the solution in the current population.
+
+    Returns:
+        The calculated average fitness for the solution over the sampled tokens,
+        or a penalty value if errors occur.
+    """
+    global pool_ref, historical_data_sets_shared, token_lifespans_shared
+    if pool_ref is None:
+        logger.critical("Multiprocessing pool (pool_ref) is None! Cannot run fitness.")
+        return -float('inf') if FITNESS_GOAL == 'max' else float('inf')
+    if historical_data_sets_shared is None or token_lifespans_shared is None:
+        logger.critical("Shared historical data or token lifespans are None!")
+        return -float('inf') if FITNESS_GOAL == 'max' else float('inf')
+
+    worst_fitness = -float('inf') if FITNESS_GOAL == 'max' else float('inf')
+    data_for_backtest = dict(historical_data_sets_shared.get('train', {}))
+    token_lifespans = dict(token_lifespans_shared) # Get lifespan info
+
+    if not data_for_backtest:
+        logger.error("[Main] Training data not found in shared dict for fitness calculation.")
+        return worst_fitness
+
+    # Convert solution to parameter dictionary
+    parameters = {}
+    for i, param_config in enumerate(OPTIMIZABLE_PARAMETERS):
+        param_type = param_config['type']
+        # Ensure correct type casting (rounding for int)
+        parameters[param_config['name']] = param_type(np.round(solution[i])) if param_type == int else param_type(solution[i])
+
+    # --- Token Sampling ---
+    available_mints = list(data_for_backtest.keys())
+    mints_to_evaluate = []
+    if GA_FITNESS_SAMPLE_SIZE is None or GA_FITNESS_SAMPLE_SIZE <= 0 or GA_FITNESS_SAMPLE_SIZE >= len(available_mints):
+        # Use all available tokens if sampling is disabled or sample size is too large
+        mints_to_evaluate = available_mints
+        # logger.debug(f"Sol {solution_idx}: Evaluating on all {len(available_mints)} training tokens.")
+    else:
+        # Randomly sample tokens without replacement
+        if len(available_mints) > GA_FITNESS_SAMPLE_SIZE:
+            mints_to_evaluate = random.sample(available_mints, GA_FITNESS_SAMPLE_SIZE)
+            # logger.debug(f"Sol {solution_idx}: Evaluating on {GA_FITNESS_SAMPLE_SIZE} sampled tokens.")
+        else:
+             mints_to_evaluate = available_mints # Sample size larger than available, use all
+             # logger.debug(f"Sol {solution_idx}: Sample size >= available tokens, evaluating on all {len(available_mints)}.")
+
+    # Prepare tasks for the sampled tokens (same as before)
+    tasks = []
+    for mint in mints_to_evaluate:
+        df_data = data_for_backtest.get(mint)
+        lifespan = token_lifespans.get(mint)
+        max_timestamp = lifespan['end_ts'] if lifespan else None
+
+        if isinstance(df_data, pd.DataFrame) and not df_data.empty and isinstance(df_data.index, pd.DatetimeIndex):
+            # Task items are the tuples that run_backtest_sync_worker expects as its single argument
+            tasks.append((solution_idx, parameters.copy(), mint, df_data, max_timestamp, BACKTEST_INITIAL_CAPITAL, FITNESS_METRIC))
+        else:
+            logger.warning(f"[Main] Invalid data for sampled mint {mint}. Skipping.")
+
+    if not tasks:
+        logger.warning(f"[Main] No valid backtest tasks generated for solution {solution_idx} after sampling.")
+        return worst_fitness
+
+    aggregated_fitness: float = 0.0
+    valid_results_count: int = 0
+
+    try:
+        # ***** CHANGE STARMAP TO MAP *****
+        # pool.map applies the worker function to each item (tuple) in the tasks list
+        results: List[Optional[Tuple[int, str, float]]] = pool_ref.map(run_backtest_sync_worker, tasks)
+        # ***** END CHANGE *****
+
+        # Aggregate results (same as before)
+        for result_tuple in results:
+            if result_tuple is not None:
+                # Check if the result corresponds to the current solution index
+                # This check might be redundant with pool.map if order is preserved, but safe
+                res_sol_idx, _, fitness_value = result_tuple
+                if res_sol_idx == solution_idx:
+                     aggregated_fitness += fitness_value
+                     valid_results_count += 1
+                # else: # Log if results seem out of order (shouldn't happen with map)
+                #    logger.warning(f"Received result for solution {res_sol_idx} while processing {solution_idx}")
+
+        if valid_results_count > 0:
+            average_fitness = aggregated_fitness / valid_results_count
+            # logger.debug(f"[Main] Sol {solution_idx}: Avg Fitness ({valid_results_count} tokens) = {average_fitness:.6f}")
+        else:
+            logger.warning(f"[Main] No valid backtest results for solution {solution_idx} (sampled {len(tasks)}).")
+            average_fitness = worst_fitness
+
+    except Exception as e:
+        # Log the specific exception type and message
+        logger.error(f"[Main] Error during pool fitness calculation for solution {solution_idx} ({type(e).__name__}): {e}")
+        # Include traceback for detailed debugging if needed
+        # import traceback
+        # logger.error(traceback.format_exc())
+        average_fitness = worst_fitness # Assign penalty on error
+
+    # Final check for NaN/inf fitness before returning (same as before)
+    if pd.isna(average_fitness) or not np.isfinite(average_fitness):
+        logger.warning(f"[Main] Fitness for Sol {solution_idx} is NaN/Inf ({average_fitness}). Returning penalty.")
+        return -1e10 if FITNESS_GOAL == 'max' else 1e10
+
+    return average_fitness
+
+# --- PyGAD Callbacks ---
+
+def on_generation(ga_instance):
+    """Callback function executed after each generation."""
+    generation = ga_instance.generations_completed
+    if ga_instance.last_generation_fitness is None or len(ga_instance.last_generation_fitness) == 0:
+        logger.warning(f"--- Generation {generation} Finished --- Fitness values not yet available.")
+        return
+
+    try:
+        best_solution, best_fitness, _ = ga_instance.best_solution(ga_instance.last_generation_fitness)
+        avg_fitness = np.mean(ga_instance.last_generation_fitness)
+        logger.info(f"--- Generation {generation} Finished --- Best Fitness: {best_fitness:.6f} | Avg Fitness: {avg_fitness:.6f}")
+
+        # Log best parameters periodically
+        if generation % 5 == 0 or generation == ga_instance.num_generations:
+            best_params_dict = {}
+            for i, param_config in enumerate(OPTIMIZABLE_PARAMETERS):
+                param_type = param_config['type']
+                best_params_dict[param_config['name']] = param_type(np.round(best_solution[i])) if param_type == int else param_type(best_solution[i])
+            logger.info(f"Best Solution Parameters @ Gen {generation}:\n{json.dumps(best_params_dict, indent=2)}")
+    except Exception as e:
+        logger.error(f"Error in on_generation callback: {e}", exc_info=True)
+
+
+# --- Helper to Run Backtests on Final Solution ---
+
+async def evaluate_solution(
+    parameters: Dict[str, Any],
+    data_set_key: str,
+    historical_data: Dict[str, pd.DataFrame], # Use regular dict here
+    token_lifespans: Dict[str, Dict[str, datetime]], # Pass lifespan info
+    initial_capital: float
+) -> Dict[str, Any]:
+    """
+    Runs backtests for a given parameter set on all tokens in a specified data set,
+    respecting token lifespans.
+
+    Args:
+        parameters: The parameter set to evaluate.
+        data_set_key: 'validation' or 'test'.
+        historical_data: Dictionary containing the dataframes for the specified set.
+        token_lifespans: Dictionary mapping mints to their {'start_ts', 'end_ts'}.
+        initial_capital: Starting capital.
+
+    Returns:
+        Dictionary containing aggregated performance metrics.
+    """
+    logger.info(f"--- Evaluating Solution on '{data_set_key}' Set ---")
+    data_to_use = historical_data.get(data_set_key, {})
+    if not data_to_use:
+        logger.warning(f"No data for '{data_set_key}' set.")
+        return {"error": f"No data in {data_set_key} set"}
+
+    tasks = []
+    for mint, df_data in data_to_use.items():
+        if isinstance(df_data, pd.DataFrame) and not df_data.empty and isinstance(df_data.index, pd.DatetimeIndex):
+            # Ensure index is datetime before passing
+            if not isinstance(df_data.index, pd.DatetimeIndex):
+                 try:
+                     df_data.index = pd.to_datetime(df_data.index, utc=True)
+                 except Exception as e:
+                     logger.error(f"Failed to convert index for eval mint {mint}: {e}. Skipping.")
+                     continue
+
+            # Get max_timestamp for this token
+            lifespan = token_lifespans.get(mint)
+            max_timestamp = lifespan['end_ts'] if lifespan else None
+
+            parameters['mint'] = mint # Include mint in parameters for backtest
+
+            tasks.append(asyncio.create_task(
+                run_backtest(parameters, df_data, initial_capital, max_timestamp), # Pass max_timestamp
+                name=f"eval_{mint}"
+            ))
+        else:
+             logger.warning(f"Skipping eval for mint {mint} ('{data_set_key}') due to invalid data.")
+
+    if not tasks:
+         logger.warning(f"No valid eval tasks created for '{data_set_key}' set.")
+         return {"error": f"No valid tasks for {data_set_key} set"}
+
+    # Execute tasks and gather results
+    results_raw = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # --- Aggregate Results ---
+    successful_results = []
+    total_pnl_agg, total_trades_agg, total_wins_agg, final_portfolio_value_agg = 0.0, 0, 0, 0.0
+    initial_capital_sum = 0.0 # Sum initial capital across runs for avg calc base
+
+    for i, res in enumerate(results_raw):
+        mint_name = tasks[i].get_name().split('_')[-1] # Extract mint from task name
+        if isinstance(res, dict):
+            # Validate essential metrics
+            pnl = res.get('total_pnl')
+            final_val = res.get('final_portfolio_value')
+            num_trades = res.get('total_trades', 0)
+            init_cap = res.get('initial_capital', initial_capital)
+
+            if pnl is not None and final_val is not None and pd.notna(pnl) and pd.notna(final_val):
+                successful_results.append(res)
+                total_pnl_agg += pnl
+                total_trades_agg += num_trades
+                total_wins_agg += res.get('winning_trades', 0)
+                final_portfolio_value_agg += final_val
+                initial_capital_sum += init_cap
+                logger.debug(f"Eval success ({data_set_key}, {mint_name}): PnL={pnl:.4f}, FinalVal={final_val:.4f}, Trades={num_trades}")
+            else:
+                logger.warning(f"Eval backtest for {mint_name} ('{data_set_key}') produced invalid result (NaN/missing): {res}")
+        elif isinstance(res, Exception):
+            logger.error(f"Eval backtest task for {mint_name} ('{data_set_key}') failed: {res}", exc_info=False) # Keep log concise
+        else:
+            logger.warning(f"Unexpected eval result type for {mint_name} ('{data_set_key}'): {type(res)}")
+
+    # --- Calculate Aggregated Metrics ---
+    num_valid_backtests = len(successful_results)
+    if num_valid_backtests == 0:
+        logger.error(f"All eval backtests failed for '{data_set_key}' set.")
+        return {"error": f"All backtests failed for {data_set_key} set"}
+
+    avg_final_value = final_portfolio_value_agg / num_valid_backtests
+    avg_pnl = total_pnl_agg / num_valid_backtests
+    overall_win_rate = (total_wins_agg / total_trades_agg * 100) if total_trades_agg > 0 else 0.0
+    # Calculate average return percentage based on initial capital
+    avg_return_percent = (avg_pnl / (initial_capital_sum / num_valid_backtests) * 100) if initial_capital_sum > 0 else 0.0
+    avg_max_drawdown = sum(r.get('max_drawdown', 0.0) for r in successful_results) / num_valid_backtests
+    # Determine the primary fitness metric value for this evaluation set
+    if FITNESS_METRIC == "final_portfolio_value":
+        fitness_metric_value_eval = avg_final_value
+    elif FITNESS_METRIC == "total_pnl":
+        fitness_metric_value_eval = avg_pnl
+    # Add other FITNESS_METRIC options here if needed
+    else:
+         fitness_metric_value_eval = avg_final_value # Default to final value
+
+    aggregated_metrics = {
+        "data_set": data_set_key,
+        "num_tokens_evaluated": num_valid_backtests,
+        f"average_{FITNESS_METRIC}": fitness_metric_value_eval,
+        "average_final_portfolio_value": avg_final_value,
+        "average_total_pnl": avg_pnl,
+        "average_return_percent": avg_return_percent, # Added average return %
+        "overall_win_rate_percent": overall_win_rate,
+        "average_max_drawdown_percent": avg_max_drawdown,
+        "total_trades_executed": total_trades_agg # Renamed for clarity
+    }
+    logger.info(f"--- Evaluation Metrics ({data_set_key}) ---")
+    for k, v in aggregated_metrics.items():
+        logger.info(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
+    logger.info("-------------------------------------")
+    return aggregated_metrics
+
+
+# --- Main Execution Logic (Async) ---
+
+async def main_async_logic():
+    """Main asynchronous function to set up and run the GA optimization."""
+    global historical_data_sets_shared, token_lifespans_shared, pool_ref # Access globals
+    setup_logging(logger_name="ga_optimizer") # Initialize logging
+    db_client = None # Initialize db_client
+
+    # --- Database Connection ---
+    try:
+        db_client = DatabaseClient()
+        await db_client.connect()
+        logger.info("[Async Main] Database connected successfully.")
+    except Exception as e:
+        logger.critical(f"[Async Main] Failed to connect database: {e}")
+        return # Exit if DB connection fails
+
+    # --- Load and Prepare Data (using improved function) ---
+    start_date = HISTORICAL_DATA_START_TS
+    end_date = HISTORICAL_DATA_END_TS
+    data_split_config = DATA_SPLIT
+
+    logger.info("Loading and splitting historical data...")
+    loaded_results = None
+    try:
+        # load_and_split_data now returns a tuple: (datasets, lifespans)
+        loaded_results = await load_and_split_data(db_client, start_date, end_date, data_split_config)
+    except Exception as e:
+         logger.error(f"Error occurred during load_and_split_data: {e}", exc_info=True)
+         if db_client: await db_client.close()
+         logger.info("[Async Main] Database connection closed after data load error.")
+         return # Exit if data loading fails
+
+    if loaded_results is None:
+        logger.critical("Failed to load or split data. Exiting.")
+        if db_client: await db_client.close()
+        logger.info("[Async Main] Database connection closed.")
+        return
+
+    loaded_data_sets, token_lifespans = loaded_results # Unpack the results
+    if not loaded_data_sets or not loaded_data_sets.get('train') or not token_lifespans:
+         logger.critical("Training set or token lifespans are empty after loading. Exiting.")
+         if db_client: await db_client.close()
+         logger.info("[Async Main] Database connection closed.")
+         return
+
+    # --- Populate the shared Manager dictionaries ---
+    historical_data_sets_shared.update(loaded_data_sets) # Update shared data
+    token_lifespans_shared.update(token_lifespans)       # Update shared lifespans
+    logger.info("Data and token lifespans loaded into shared dictionary proxies.")
+    logger.info(f"Training set size: {len(historical_data_sets_shared.get('train', {}))}")
+    logger.info(f"Validation set size: {len(historical_data_sets_shared.get('validation', {}))}")
+    logger.info(f"Test set size: {len(historical_data_sets_shared.get('test', {}))}")
+    logger.info(f"Lifespan info loaded for {len(token_lifespans_shared)} tokens.")
+
+    # --- PyGAD Configuration ---
+    gene_space = []
+    init_range_low = []
+    init_range_high = []
+    gene_type = [] # Keep track of types for casting later if needed
+
+    for param in OPTIMIZABLE_PARAMETERS:
+        if 'values' in param:
+            # For discrete values, use the list directly
+            gene_space.append(param['values'])
+            init_range_low.append(min(param['values']))
+            init_range_high.append(max(param['values']))
+            gene_type.append(param['type'])
+        elif 'low' in param and 'high' in param:
+            # For continuous range, use the dictionary format PyGAD expects
+            gene_space.append({'low': param['low'], 'high': param['high']})
+            init_range_low.append(param['low']) # These might not be strictly needed by PyGAD if gene_space is dicts
+            init_range_high.append(param['high'])# but are useful for initial population generation logic if default
+            gene_type.append(param['type'])
+        else:
+            logger.error(f"Invalid configuration for parameter {param['name']}. Missing 'values' or 'low'/'high'.")
+            if db_client: await db_client.close()
+            return
+        # No change needed for gene_type list itself, just populate it
+
+    logger.info(f"Setting up PyGAD: Pop={POPULATION_SIZE}, Gens={NUM_GENERATIONS}, Genes={len(OPTIMIZABLE_PARAMETERS)}")
+    if pool_ref is None:
+        logger.critical("Pool reference (pool_ref) is None before GA initialization.")
+        if db_client: await db_client.close() # Close DB before exiting
+        return
+
+    # Ensure num_parents_mating is at least 2 and reasonable
+    num_parents_mating = max(2, int(POPULATION_SIZE * 0.3)) # Example: 30% parents mate
+
+    ga_instance = pygad.GA(
+        num_generations=NUM_GENERATIONS,
+        num_parents_mating=num_parents_mating,
+        fitness_func=fitness_func_main_process,
+        sol_per_pop=POPULATION_SIZE,
+        num_genes=len(OPTIMIZABLE_PARAMETERS),
+        gene_space=gene_space,          # Provide the defined gene space
+        # gene_type=gene_type,          # gene_type is implicitly handled by gene_space if values are correct type
+        # init_range_low/high might be redundant if using complex gene_space, but kept for safety
+        init_range_low=init_range_low,
+        init_range_high=init_range_high,
+        parent_selection_type=PARENT_SELECTION_TYPE,
+        crossover_type=CROSSOVER_TYPE,
+        crossover_probability=CROSSOVER_PROBABILITY,
+        mutation_type=MUTATION_TYPE,
+        mutation_probability=MUTATION_PROBABILITY,
+        mutation_by_replacement=True,   # Consider if this is appropriate
+        keep_elitism=max(0, KEEP_ELITISM),
+        on_generation=on_generation,
+        # stop_criteria=["reach_100.0"] # Example: stop if fitness reaches 100
+    )
+
+    # --- Run GA ---
+    logger.info("--- Starting Genetic Algorithm Optimization ---")
+    start_ga_time = time.time()
+    try:
+        ga_instance.run() # This is blocking
+    except Exception as ga_err:
+        logger.exception(f"Error during GA execution: {ga_err}")
+    end_ga_time = time.time()
+    logger.info(f"--- GA Optimization Finished (Duration: {end_ga_time - start_ga_time:.2f} seconds) ---")
+
+    # --- Results Processing ---
+    if hasattr(ga_instance, 'best_solution_generation') and ga_instance.best_solution_generation != -1:
+        solution, solution_fitness, _ = ga_instance.best_solution()
+        logger.info(f"Best solution found (Training Fitness = {solution_fitness:.6f}):")
+
+        # Decode best solution into parameters dictionary
+        best_params = {}
+        for i, param_config in enumerate(OPTIMIZABLE_PARAMETERS):
+             param_type = param_config['type']
+             best_params[param_config['name']] = param_type(np.round(solution[i])) if param_type == int else param_type(solution[i])
+        logger.info(f"Best Parameters:\n{json.dumps(best_params, indent=2)}")
+
+        # --- Final Evaluation (using non-shared data and lifespans) ---
+        validation_metrics = await evaluate_solution(best_params, 'validation', loaded_data_sets, token_lifespans, BACKTEST_INITIAL_CAPITAL)
+        test_metrics = await evaluate_solution(best_params, 'test', loaded_data_sets, token_lifespans, BACKTEST_INITIAL_CAPITAL)
+
+        # --- Save Results ---
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+        results_filename = os.path.join(RESULTS_DIR, f"ga_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+
+        # Make optimizable params config serializable
+        optimizable_params_serializable = copy.deepcopy(OPTIMIZABLE_PARAMETERS)
+        for param in optimizable_params_serializable:
+            if 'type' in param: param['type'] = str(param['type']) # Convert type object to string
+
+        results_data = {
+            'best_solution_parameters': best_params,
+            'best_solution_fitness_training': solution_fitness,
+            'validation_metrics': validation_metrics,
+            'test_metrics': test_metrics,
+            'ga_config': {
+                'population_size': POPULATION_SIZE,
+                'num_generations': NUM_GENERATIONS,
+                'num_parents_mating': num_parents_mating,
+                'crossover_probability': CROSSOVER_PROBABILITY,
+                'mutation_probability': MUTATION_PROBABILITY,
+                'elitism': KEEP_ELITISM,
+                'parent_selection': PARENT_SELECTION_TYPE,
+                'crossover_type': CROSSOVER_TYPE,
+                'mutation_type': MUTATION_TYPE,
+                'fitness_metric': FITNESS_METRIC,
+                'fitness_goal': FITNESS_GOAL,
+                'fitness_sample_size': GA_FITNESS_SAMPLE_SIZE,
+                'data_start_date': HISTORICAL_DATA_START_TS.isoformat(),
+                'data_end_date': HISTORICAL_DATA_END_TS.isoformat()
+            },
+            'optimizable_parameters_config': optimizable_params_serializable
+        }
+
+        try:
+            with open(results_filename, 'w') as f:
+                # Use the custom NpEncoder from utils.py
+                json.dump(results_data, f, indent=4, cls=NpEncoder)
+            logger.info(f"Saved GA results to {results_filename}")
+        except Exception as e:
+             logger.error(f"Failed to save results to JSON: {e}", exc_info=True)
+
+        # --- Plotting ---
+        try:
+            if ga_instance.generations_completed > 0 :
+                os.makedirs(RESULTS_DIR, exist_ok=True)
+                plot_save_path = os.path.join(RESULTS_DIR, f"ga_fitness_plot_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+                # Check if fitness values exist before plotting
+                if ga_instance.best_solutions_fitness:
+                    ga_instance.plot_fitness(save_dir=plot_save_path)
+                    logger.info(f"Saved fitness plot to {plot_save_path}.png")
+                else:
+                    logger.warning("No fitness data recorded by PyGAD, cannot generate plot.")
+            else:
+                 logger.warning("GA did not complete any generations, skipping plot.")
+        except Exception as plot_err:
+             logger.error(f"Failed to save fitness plot: {plot_err}", exc_info=False)
+    else:
+         logger.error("GA did not complete successfully or find a valid best solution.")
+
+    # --- Cleanup DB Connection ---
+    if db_client:
+        await db_client.close()
+        logger.info("[Async Main] Database connection closed.")
+    logger.info("Optimizer async logic finished.")
+
+
+# --- Entry Point Guard ---
+if __name__ == "__main__":
+    # Crucial for multiprocessing safety, especially on Windows
+    freeze_support()
+
+    manager_context = None
+    pool_context = None
+    try:
+        # Use context managers for cleaner resource handling
+        with Manager() as manager:
+            historical_data_sets_shared = manager.dict()
+            token_lifespans_shared = manager.dict() # Add shared dict for lifespans
+
+            # Determine number of processes
+            num_processes = os.cpu_count() - 2 if os.cpu_count() > 2 else 1
+            if isinstance(MULTIPROCESSING_CORES, int) and MULTIPROCESSING_CORES >= 1:
+                num_processes = MULTIPROCESSING_CORES
+            elif isinstance(MULTIPROCESSING_CORES, str) and MULTIPROCESSING_CORES.isdigit():
+                 num_processes = int(MULTIPROCESSING_CORES)
+
+            num_processes = max(1, num_processes) # Ensure at least 1 process
+
+            logger.info(f"[Main Entry] Creating Multiprocessing Pool with {num_processes} processes.")
+            # Use Pool context manager for automatic cleanup
+            with Pool(processes=num_processes) as pool:
+                pool_ref = pool # Set global pool reference
+
+                # Run the main asynchronous logic using the created pool
+                asyncio.run(main_async_logic())
+
+    except KeyboardInterrupt:
+        logger.info("[Main Entry] Keyboard interrupt received. Shutting down...")
+    except Exception as e:
+         logger.critical(f"[Main Entry] Critical error in GA optimizer entry point: {e}", exc_info=True)
+    finally:
+        # Pool and Manager cleanup is handled by 'with' statements
+        logger.info("[Main Entry] Optimizer finished.")
 ```
 
 ---
@@ -2631,12 +876,12 @@ OBSERVATION_FEATURES: List[str] = [
 
     # Market Indicators (Normalized)
     'volatility',           # Rolling volatility (e.g., normalized 0-1)
-    'market_cap_sol_norm',  # Market cap in SOL (e.g., log-normalized)
+    'live_market_cap_sol_norm',  # Normalized LIVE SOL market cap
+    'live_market_cap_usd_norm',  # Normalized LIVE USD market cap
     'volume_sol_norm',      # Trade volume in SOL (e.g., log-normalized)
     'rugcheck_score_norm',  # RugCheck score (normalized 0-1, where 1=low risk)
     'socials_score_norm',   # Socials score (normalized 0-1, where 1=low risk)
     'time_since_creation_norm', # Time since token creation (normalized 0-1)
-    'market_cap_initial_ratio_norm', # Market cap in SOL (normalized, using actual marketCapSol)
 
     # Portfolio State Features (Normalized)
     'is_holding',           # Binary flag (0 or 1)
@@ -2653,8 +898,8 @@ OBSERVATION_SPACE_DIM: int = len(OBSERVATION_FEATURES)
 # Note: Observation normalization is handled by Stable Baselines3's VecNormalize.
 # The bounds defined here are the *expected* range after normalization,
 # but the Box space itself is defined by the shape only.
-OBSERVATION_LOW: float = -1.0 # Removed as normalization is external
-OBSERVATION_HIGH: float = 1.0 # Removed as normalization is external
+OBSERVATION_LOW: float = -np.inf 
+OBSERVATION_HIGH: float = np.inf 
 
 # --- Action Space Configuration (Continuous Parameter Tuning) ---
 # Parameters controlled by the RL agent.
@@ -2668,12 +913,22 @@ RL_TUNABLE_PARAMETERS: List[Tuple[str, float, float, type]] = [
     ('SECOND_TAKE_PROFIT_PERCENT', 100.0, 1000.0, float), # 100% to 1000% TP2
     ('DEFAULT_VOLUME_THRESHOLD', 5000, 50000, int),     # 5k to 50k USD volume threshold
     ('DEFAULT_MARKETCAP_THRESHOLD', 10000, 100000, int), # 10k to 100k USD market cap threshold
-    ('MIN_VOLATILITY', 0.1, 1.0, float),                # 0.1% to 1% volatility threshold
-    ('DEFAULT_RUGCHECK_SCORE_THRESHOLD', 500, 1002, int), # 1 to 1000 score threshold
-    ('DEFAULT_SOCIAL_SCORE_THRESHOLD', 40, 100, int),  # 1 to 100 score threshold
+    ('MIN_VOLATILITY', 0.01, 1.0, float),                # 0.01% to 1% volatility threshold
+    ('DEFAULT_RUGCHECK_SCORE_THRESHOLD', 1, 1002, int), # 1 to 1000 score threshold
+    ('DEFAULT_SOCIAL_SCORE_THRESHOLD', 1, 100, int),  # 1 to 100 score threshold
     # ('DEFAULT_TIME_INTERVALL', 1, 60, int),
     ('SOL_TO_BUY', 0.1, 0.5, float), # Add buy amount later if needed
     ('MC_DROP_THRESHOLD_RL', 5.0, 95.0, float), # 5% to 70% market cap drop threshold
+    ('USE_TREND_REVERSAL_CONFIRMATION', 0.0, 1.0, float), # Agent outputs float; env converts (e.g., > 0.5 is True)
+    ('STOP_LOSS_COOLDOWN_MINUTES', 0.0, 60.0, int),
+    ('TREND_REVERSAL_RECENCY_HOURS', 0.25, 12.0, int),
+    ('TREND_REVERSAL_RSI_NEUTRAL_LEVEL', 30.0, 60.0, float),
+    ('INDICATOR_LOOKBACK_HOURS', 0.25, 6.0, int),
+    ('RSI_PERIOD', 7.0, 28.0, int),
+    ('BBANDS_PERIOD', 10.0, 30.0, int),
+    ('BBANDS_STD_DEV', 1.5, 2.5, float),
+    ('FAST_EMA_PERIOD', 5.0, 15.0, int),
+    ('SLOW_EMA_PERIOD', 15.0, 30.0, int),
 ]
 ACTION_SPACE_DIM: int = len(RL_TUNABLE_PARAMETERS)
 
@@ -2706,12 +961,8 @@ DEFAULT_SELL_TIP: float = 0.001
 # SECOND_TAKE_PROFIT_PERCENT: float = 550.0 # Fixed second TP target
 
 # Fixed thresholds for the *simulated* buy decision (agent learns parameters, not timing)
-# DEFAULT_VOLUME_THRESHOLD: int = 19000
-# DEFAULT_MARKETCAP_THRESHOLD: int = 10000
-# DEFAULT_RUGCHECK_SCORE_THRESHOLD: int = 801
-# DEFAULT_SOCIAL_SCORE_THRESHOLD: int = 50
-# MIN_VOLATILITY: float = 0.1
-# MIN_MARKET_CAP: int = 3600 # Emergency sell market cap threshold (USD)
+# MIN_MARKET_CAP is an absolute USD threshold, used as a fallback if MC_DROP_THRESHOLD logic doesn't trigger
+MIN_MARKET_CAP_USD_FALLBACK: int = 3500 # Renamed for clarity
 
 VOLATILITY_WINDOW: int = 120 # Window size (steps) for volatility calculation in env
 
@@ -2777,7 +1028,7 @@ from typing import Dict, List, Optional, Tuple, Any, Union
 from datetime import timezone, datetime
 
 # --- Project Modules ---
-from logger import logger
+from bot_logger import logger
 import rl_config # Import RL specific configurations
 from utils import calculate_volatility # Keep utility for potential recalculation
 
@@ -2804,7 +1055,8 @@ class TradingEnv(gym.Env):
         historical_data_dict: Dict[str, pd.DataFrame], # Expects OHLCV data per mint
         token_lifespans: Dict[str, Dict[str, datetime]],
         initial_capital: float = rl_config.RL_INITIAL_CAPITAL,
-        max_steps: int = rl_config.MAX_STEPS_PER_EPISODE
+        max_steps: int = rl_config.MAX_STEPS_PER_EPISODE,
+        render_mode: Optional[str] = None
     ):
         """
         Initializes the Trading Environment with OHLCV data.
@@ -2830,7 +1082,16 @@ class TradingEnv(gym.Env):
         # --- Validate and Store OHLCV Data ---
         self.historical_data_dict = {}
         self.token_lifespans = {}
-        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume', 'market_cap_calculated', 'marketCapSol', 'rugcheck_score', 'socials_score', 'token_creation_time']
+
+        # These are the columns expected in the DataFrame for each mint
+        required_cols = [
+            'Open', 'High', 'Low', 'Close', 'Volume',
+            'market_cap_calculated',     # Live USD MC
+            'marketCapSol',              # Live SOL MC
+            'creation_init_market_cap_sol', # Creation-time SOL MC
+            'volatility', 'rugcheck_score', 'socials_score',
+            'token_creation_time'
+        ]
 
         for mint, df in historical_data_dict.items():
             if isinstance(df, pd.DataFrame) and not df.empty and isinstance(df.index, pd.DatetimeIndex):
@@ -2840,18 +1101,12 @@ class TradingEnv(gym.Env):
                  if mint not in token_lifespans:
                       logger.warning(f"Lifespan info missing for mint {mint}. Skipping.")
                       continue
-
-                 # Check for required OHLCV columns
-                 missing_cols = [col for col in required_cols if col not in df.columns]
-                 if missing_cols:
-                     logger.error(f"Missing required OHLCV columns in data for mint {mint}: {missing_cols}. Skipping.")
+                 missing_cols_check = [col for col in required_cols if col not in df.columns]
+                 if missing_cols_check:
+                     logger.error(f"Missing required OHLCV columns in data for mint {mint}: {missing_cols_check}. Skipping.")
                      continue
-
-                 # Basic NaN check (more thorough checks happen in _get_observation)
                  if df[required_cols].isnull().values.any():
                       logger.warning(f"NaN values found in required columns for mint {mint}. Will attempt fill/clip later.")
-                      # Consider attempting to fill NaNs here if preferred
-
                  self.historical_data_dict[mint] = df
                  self.token_lifespans[mint] = token_lifespans[mint]
             else:
@@ -2864,7 +1119,6 @@ class TradingEnv(gym.Env):
         self.initial_capital = initial_capital
         self._max_episode_steps = max_steps
 
-        # --- Define Action Space (Same as before) ---
         self.action_space = spaces.Box(
             low=rl_config.ACTION_LOW,
             high=rl_config.ACTION_HIGH,
@@ -2873,165 +1127,128 @@ class TradingEnv(gym.Env):
         )
         self._action_param_names = [p[0] for p in rl_config.RL_TUNABLE_PARAMETERS]
 
-        # --- Define Observation Space (Same as before) ---
         self.observation_space = spaces.Box(
-            low=rl_config.OBSERVATION_LOW,
-            high=rl_config.OBSERVATION_HIGH,
+            low=rl_config.OBSERVATION_LOW, # Using -np.inf
+            high=rl_config.OBSERVATION_HIGH, # Using np.inf
             shape=(rl_config.OBSERVATION_SPACE_DIM,),
             dtype=np.float32
         )
 
-        # --- Internal State Variables (Same as before) ---
         self.current_step: int = 0
         self.current_sol: float = 0.0
         self.current_data_df: Optional[pd.DataFrame] = None
         self.current_mint: Optional[str] = None
         self.current_token_end_ts: Optional[datetime] = None
+        self.initial_creation_market_cap_sol: Optional[float] = None # For MC drop %
         self.active_position: Optional[Dict[str, Any]] = None
         self.trade_history: List[Dict[str, Any]] = []
         self.current_parameters: Dict[str, Any] = {}
         self.last_observation: np.ndarray = np.zeros(self.observation_space.shape, dtype=np.float32)
-        # Use 'Close' price for history
         self._price_history: deque = deque(maxlen=rl_config.OBSERVATION_PRICE_HISTORY_LENGTH)
         self._previous_unrealized_pnl: float = 0.0
         self._last_step_processed_index = -1
-        self.initial_market_cap_sol: Optional[float] = None
 
         logger.info(f"TradingEnv (OHLCV) initialized. Observation space dim: {rl_config.OBSERVATION_SPACE_DIM}, Action space dim: {rl_config.ACTION_SPACE_DIM}")
 
+
     def _get_observation(self) -> np.ndarray:
-        """
-        Calculates and returns the raw observation vector using OHLCV data.
-        Normalization is handled by the VecNormalize wrapper.
-        """
         default_obs = np.zeros(self.observation_space.shape, dtype=np.float32)
         if self.current_data_df is None or self._last_step_processed_index < 0 or self._last_step_processed_index >= len(self.current_data_df):
             return default_obs
-
         try:
             current_row = self.current_data_df.iloc[self._last_step_processed_index]
             current_timestamp = self.current_data_df.index[self._last_step_processed_index]
-        except IndexError:
-            logger.warning(f"IndexError getting observation at index {self._last_step_processed_index} (Step {self.current_step}) for mint {self.current_mint}. Returning zeros.")
-            return default_obs
+        except IndexError: return default_obs
 
-        # --- Update Price History (using Close price) ---
         current_price = current_row.get('Close', 0.0)
-        if pd.notna(current_price) and isinstance(current_price, (int, float)):
-            self._price_history.append(float(current_price))
-        else:
-            last_valid_price = self._price_history[-1] if self._price_history else 0.0
-            self._price_history.append(last_valid_price) # Use last valid if current is NaN
+        self._price_history.append(float(current_price) if pd.notna(current_price) and isinstance(current_price, (int, float)) else (self._price_history[-1] if self._price_history else 0.0))
 
-        # --- Extract Base Features from OHLCV row ---
         try:
-            market_cap_usd = float(current_row.get('market_cap_calculated', 0.0)) # This is USD MC
-            market_cap_sol_actual = float(current_row.get('marketCapSol', 0.0))  # GET ACTUAL SOL MARKET CAP
-            volume = float(current_row.get('Volume', 0.0)) # Use 'Volume' column
+            live_usd_market_cap = float(current_row.get('market_cap_calculated', 0.0))
+            live_sol_market_cap = float(current_row.get('marketCapSol', 0.0)) # Live SOL MC
+            volume = float(current_row.get('Volume', 0.0))
             rugcheck_score = int(current_row.get('rugcheck_score', 10000))
             socials_score = int(current_row.get('socials_score', 100))
             creation_time_ts = current_row.get('token_creation_time', pd.NaT)
-            # Use pre-calculated volatility if available, otherwise default to 0
             volatility = float(current_row.get('volatility', 0.0))
-            if pd.isna(volatility): volatility = 0.0
 
-            # Fill potential NaNs extracted (should ideally be handled in __init__ or data loading)
-            market_cap_usd_actual = 0.0 if pd.isna(market_cap_usd) else market_cap_usd
-            market_cap_sol_actual = 0.0 if pd.isna(market_cap_sol_actual) else market_cap_sol_actual
+            live_usd_market_cap = 0.0 if pd.isna(live_usd_market_cap) else live_usd_market_cap
+            live_sol_market_cap = 0.0 if pd.isna(live_sol_market_cap) else live_sol_market_cap
             volume = 0.0 if pd.isna(volume) else volume
             rugcheck_score = 10000 if pd.isna(rugcheck_score) else int(rugcheck_score)
             socials_score = 100 if pd.isna(socials_score) else int(socials_score)
+            volatility = 0.0 if pd.isna(volatility) else volatility
 
-        except (KeyError, ValueError, TypeError) as e:
-            logger.error(f"Error accessing/converting OHLCV features at index {self._last_step_processed_index} for mint {self.current_mint}: {e}", exc_info=True)
-            return default_obs
+        except (KeyError, ValueError, TypeError) as e: return default_obs
 
-        # --- Calculate Derived Features (using Close price history) ---
-        prices = np.array(self._price_history, dtype=np.float32)
-        safe_prices = prices[prices > 1e-12]
+        prices_arr = np.array(self._price_history, dtype=np.float32)
+        safe_prices = prices_arr[prices_arr > 1e-12]
         price_change_1 = np.log(safe_prices[-1] / safe_prices[-2]) if len(safe_prices) >= 2 else 0.0
         price_change_5 = np.log(safe_prices[-1] / safe_prices[-6]) if len(safe_prices) >= 6 else 0.0
         price_change_10 = np.log(safe_prices[-1] / safe_prices[-11]) if len(safe_prices) >= 11 else 0.0
 
         time_since_creation_seconds = 0.0
         if pd.notna(creation_time_ts) and isinstance(current_timestamp, pd.Timestamp):
-            # Ensure creation_time_ts is timezone-aware for correct calculation
-            if creation_time_ts.tzinfo is None: creation_time_ts = creation_time_ts.tz_localize('UTC')
-            time_diff = current_timestamp - creation_time_ts
+            ct_ts_aware = creation_time_ts.tz_localize('UTC') if creation_time_ts.tzinfo is None else creation_time_ts.astimezone(timezone.utc)
+            time_diff = current_timestamp - ct_ts_aware
             time_since_creation_seconds = max(0.0, time_diff.total_seconds())
 
         is_holding = 1.0 if self.active_position else 0.0
         position_pnl_current_unrealized = 0.0
-        time_holding_seconds = 0
+        time_holding_seconds = 0.0
         if self.active_position:
-            buy_price = self.active_position['buy_price']
-            rem_tokens = self.active_position['remaining_tokens']
-            total_investment = self.active_position.get('total_investment_sol', 1.0)
-            last_price = prices[-1] if prices.size > 0 else buy_price # Use last Close price
-            current_value = last_price * rem_tokens
-            initial_tokens = self.active_position.get('initial_tokens', rem_tokens)
-            cost_fraction = rem_tokens / initial_tokens if initial_tokens > 0 else 1.0
-            cost_basis_remaining = total_investment * cost_fraction
-            position_pnl_current_unrealized = current_value - cost_basis_remaining
-            entry_timestamp = self.active_position.get('entry_timestamp')
-            if entry_timestamp:
-                time_holding_seconds = max(0.0, (current_timestamp - entry_timestamp).total_seconds())
-
-        # --- Calculate Time Features ---
-        # Weekday: Monday=0, Sunday=6.
+            buy_p = self.active_position['buy_price']
+            rem_t = self.active_position['remaining_tokens']
+            total_inv = self.active_position.get('total_investment_sol', 1.0)
+            last_p = prices_arr[-1] if prices_arr.size > 0 else buy_p
+            curr_val = last_p * rem_t
+            init_t = self.active_position.get('initial_tokens', rem_t)
+            cost_frac = rem_t / init_t if init_t > 0 else 1.0
+            cost_basis_rem = total_inv * cost_frac
+            position_pnl_current_unrealized = curr_val - cost_basis_rem
+            entry_ts = self.active_position.get('entry_timestamp')
+            if entry_ts: time_holding_seconds = max(0.0, (current_timestamp - entry_ts).total_seconds())
+        
         weekday = float(current_timestamp.weekday())
-
-        # Daytime: Hour of the day (0-23).
         hour = float(current_timestamp.hour)
 
-        # --- Include Tunable Parameters ---
-        tunable_params_values = []
-        for param_name, _, _, p_type in rl_config.RL_TUNABLE_PARAMETERS:
-             # Get current value from environment's parameters, use midpoint if not set
-            # Find the index of the current parameter in RL_TUNABLE_PARAMETERS
-            try:
-                param_index = [j for j, p in enumerate(rl_config.RL_TUNABLE_PARAMETERS) if p[0] == param_name][0]
-                current_val = self.current_parameters.get(param_name, (rl_config.ACTION_LOW[param_index] + rl_config.ACTION_HIGH[param_index]) / 2.0)
-            except IndexError:
-                logger.error(f"Parameter '{param_name}' not found in RL_TUNABLE_PARAMETERS. Cannot get default value.")
-                current_val = 0.0 # Default to 0.0 or handle appropriately
-            if p_type == int:
-                 tunable_params_values.append(float(int(current_val)))
-            else:
-                 tunable_params_values.append(float(current_val))
-
-
-        # --- Construct Raw Observation Vector (Order MUST match rl_config.OBSERVATION_FEATURES) ---
+        # These are raw values; VecNormalize will handle scaling
         observation_list = [
             price_change_1, price_change_5, price_change_10,
-            volatility, market_cap_sol_actual, volume,
-            float(rugcheck_score), float(socials_score), time_since_creation_seconds,
-            is_holding, position_pnl_current_unrealized, time_holding_seconds, self.current_sol,
-            weekday, hour # Add raw time features
+            volatility,
+            live_sol_market_cap,    # For 'live_market_cap_sol_norm'
+            live_usd_market_cap,    # For 'live_market_cap_usd_norm'
+            volume,
+            float(rugcheck_score), 
+            float(socials_score), 
+            time_since_creation_seconds,
+            is_holding, 
+            position_pnl_current_unrealized, 
+            time_holding_seconds, 
+            self.current_sol,
+            weekday, 
+            hour
         ]
-        # Add raw tunable parameters
+        
         observation = np.array(observation_list, dtype=np.float32)
-
-        # --- Final Validation ---
-        if not np.all(np.isfinite(observation)):
-            logger.warning(f"NaN/inf in raw OHLCV observation @ Index {self._last_step_processed_index}, Mint {self.current_mint}. Replacing with zeros. Raw Obs: {observation}")
-            observation = default_obs
-        elif observation.shape != self.observation_space.shape:
-            logger.error(f"Raw OHLCV Observation shape mismatch! Expected {self.observation_space.shape}, got {observation.shape}. Returning zeros.")
-            observation = default_obs
-
-        self.last_observation = observation # Store raw observation
+        if not np.all(np.isfinite(observation)): observation = default_obs
+        elif observation.shape != self.observation_space.shape: observation = default_obs
+        
+        self.last_observation = observation
         self._previous_unrealized_pnl = position_pnl_current_unrealized
         return observation
 
     def _apply_action(self, action: np.ndarray):
-        """Applies the agent's action."""
         new_params = {}
         clipped_action = np.clip(action, rl_config.ACTION_LOW, rl_config.ACTION_HIGH)
         for i, param_config in enumerate(rl_config.RL_TUNABLE_PARAMETERS):
             param_name, _, _, p_type = param_config
             val = clipped_action[i]
-            new_params[param_name] = p_type(np.round(val)) if p_type == int else float(val)
+            if param_name == "USE_TREND_REVERSAL_CONFIRMATION":
+                # Convert float action (0.0-1.0) to boolean for this parameter
+                new_params[param_name] = bool(val > 0.5)
+            else:
+                new_params[param_name] = p_type(np.round(val)) if p_type == int else float(val)
         self.current_parameters = new_params
 
     def _run_trading_logic_step(self) -> Tuple[float, float]:
@@ -3042,277 +1259,229 @@ class TradingEnv(gym.Env):
         realized_pnl_this_step = 0.0
         reward_bonus_penalty = 0.0
 
-        current_data_index = self.current_step
-        if self.current_data_df is None or current_data_index >= len(self.current_data_df):
-            logger.warning(f"Attempted to run trading logic at invalid step index {current_data_index}.")
-            self._last_step_processed_index = -1
-            return realized_pnl_this_step, reward_bonus_penalty
+        current_data_index = self.current_step # Use current_step as index into current_data_df
+        self._last_step_processed_index = current_data_index # Update for observation
 
-        self._last_step_processed_index = current_data_index
+        if self.current_data_df is None or current_data_index >= len(self.current_data_df):
+            return realized_pnl_this_step, reward_bonus_penalty
 
         try:
             current_row = self.current_data_df.iloc[current_data_index]
-            current_timestamp = self.current_data_df.index[self._last_step_processed_index]
-            # Use OHLCV columns
-            price = float(current_row.get('Close', 0.0))
-            volume = float(current_row.get('Volume', 0.0))
-            high_price = float(current_row.get('High', 0.0))
-            # ---
-            market_cap_sol = float(current_row.get('market_cap_calculated', 0.0))
-            current_market_cap_sol_value = float(current_row.get('marketCapSol', 0.0)) 
+            current_timestamp = self.current_data_df.index[current_data_index] # Use current_data_index
             
+            price = float(current_row.get('Close', 0.0))
+            volume_ohlcv = float(current_row.get('Volume', 0.0)) # OHLCV volume
+            high_price = float(current_row.get('High', 0.0))
+            
+            # Live market caps from current row
+            current_live_sol_mc = float(current_row.get('marketCapSol', 0.0))
+            current_live_usd_mc = float(current_row.get('market_cap_calculated', 0.0))
+            # Token-specific creation time features
+            rugcheck_val = int(current_row.get('rugcheck_score', 10000)) # From OHLCV data
+            socials_val = int(current_row.get('socials_score', 100))     # From OHLCV data
+            volatility_val = float(current_row.get('volatility', 0.0))   # From OHLCV data
 
-            if price <= 1e-12:
-                return realized_pnl_this_step, reward_bonus_penalty
 
-            # --- Get parameters (Agent's or Defaults) ---
+            if price <= 1e-12: return realized_pnl_this_step, reward_bonus_penalty
+
             agent_params = self.current_parameters
-            if not agent_params:
-                agent_params = {p[0]: (p[1] + p[2]) / 2 for p in rl_config.RL_TUNABLE_PARAMETERS}
+            if not agent_params: # Should be set by _apply_action
+                agent_params = {p[0]: (p[1] + p[2]) / 2.0 for p in rl_config.RL_TUNABLE_PARAMETERS}
+                agent_params['MC_DROP_THRESHOLD'] = 70.0 # Default if not set
 
-            initial_sl_percent = agent_params.get('INITIAL_STOP_LOSS_PERCENT', 50.0)
-            first_sell_perc = agent_params.get('FIRST_SELL_PERCENT', 75.0) / 100.0
+            # Get parameters tuned by the agent
+            initial_sl_percent = agent_params.get('INITIAL_STOP_LOSS_PERCENT', 40.0)
+            first_sell_perc_fraction = agent_params.get('FIRST_SELL_PERCENT', 35.0) / 100.0
             trailing_sl_percent = agent_params.get('TRAILING_STOP_LOSS_PERCENT', 50.0)
-            first_profit_margin = agent_params.get('FIRST_SELL_PROFIT_MARGIN', 100.0) / 100.0
-            volume_thresh = agent_params.get('DEFAULT_VOLUME_THRESHOLD', 5000)
-            mcap_thresh_buy = agent_params.get('DEFAULT_MARKETCAP_THRESHOLD', 10000)
-            rug_thresh = agent_params.get('DEFAULT_RUGCHECK_SCORE_THRESHOLD', 1000)
-            social_thresh = agent_params.get('DEFAULT_SOCIAL_SCORE_THRESHOLD', 100)
-            volatility_thresh = agent_params.get('MIN_VOLATILITY', 0.0)
-            buy_amount_sol = agent_params.get('SOL_TO_BUY', 0.1)
-            second_tp_margin = agent_params.get('SECOND_TAKE_PROFIT_PERCENT', 550.0) / 100.0
-            mc_drop_threshold_param = agent_params.get('MC_DROP_THRESHOLD', 70.0) # Default to a 70% drop if not in params
+            first_profit_margin_fraction = agent_params.get('FIRST_SELL_PROFIT_MARGIN', 70.0) / 100.0
+            second_tp_margin_fraction = agent_params.get('SECOND_TAKE_PROFIT_PERCENT', 800.0) / 100.0
+            
+            # Thresholds for buy decisions (tuned by agent)
+            volume_thresh_usd = agent_params.get('DEFAULT_VOLUME_THRESHOLD', 40000) # USD
+            mcap_thresh_buy_usd = agent_params.get('DEFAULT_MARKETCAP_THRESHOLD', 45000) # USD
+            rug_thresh_agent = agent_params.get('DEFAULT_RUGCHECK_SCORE_THRESHOLD', 401)
+            social_thresh_agent = agent_params.get('DEFAULT_SOCIAL_SCORE_THRESHOLD', 100)
+            volatility_thresh_agent = agent_params.get('MIN_VOLATILITY', 0.18)
+            buy_amount_sol_agent = agent_params.get('SOL_TO_BUY', 0.5)
+            mc_drop_threshold_param = agent_params.get('MC_DROP_THRESHOLD', 70.0) # Tuned by agent
 
-            # Fixed simulation parameters (matching rl_config defaults)
+            # Fixed simulation parameters from rl_config
             buy_fee = rl_config.DEFAULT_BUY_FEE
             buy_tip = rl_config.DEFAULT_BUY_TIP
             sell_fee = rl_config.DEFAULT_SELL_FEE
             sell_tip = rl_config.DEFAULT_SELL_TIP
-            min_mcap_sell_usd = rl_config.MIN_MARKET_CAP # Use the uncommented value
+            min_mcap_usd_fallback = rl_config.MIN_MARKET_CAP_USD_FALLBACK # Absolute USD fallback
 
         except (KeyError, ValueError, TypeError) as e:
-            logger.error(f"Error getting data/params in trading logic at index {current_data_index}: {e}", exc_info=True)
+            logger.error(f"RL Env: Error getting data/params at step {self.current_step}, index {current_data_index}: {e}", exc_info=True)
             return realized_pnl_this_step, reward_bonus_penalty
-
-        # --- Sell Logic (using Close price for checks, High for highest_price) ---
+        
+        # --- Sell Logic ---
         if self.active_position:
             pos = self.active_position
-            # Update highest price using the High of the current candle
-            hp = max(pos['highest_price'], high_price)
-            pos['highest_price'] = hp
+            pos['highest_price'] = max(pos['highest_price'], high_price)
 
-            current_stop_loss_price = pos['stop_loss_price']
+            active_sl_price = pos['stop_loss_price']
             initial_tp_price = pos['initial_tp_price']
             second_tp_price = pos['second_tp_price']
-            first_tp_hit = pos['first_tp_hit']
-
+            is_first_tp_hit = pos['first_tp_hit']
+            
             current_trailing_sl_price = 0.0
-            if first_tp_hit: # Trailing SL is active only AFTER first TP
-                current_trailing_sl_price = hp * (1.0 - trailing_sl_percent / 100.0)
+            if is_first_tp_hit:
+                current_trailing_sl_price = pos['highest_price'] * (1.0 - trailing_sl_percent / 100.0)
 
-            sell_reason = None
-            sell_all = False; sell_partial = False
-            sell_percentage = 0.0
+            sell_reason = None; sell_all = False; sell_partial = False; sell_percentage = 0.0
 
-            # Order of checks: SL > Second TP > First TP > Trailing SL > MCap SL (Matching trading_logic.py)
-            if price <= current_stop_loss_price:
-                sell_reason = "Stop Loss" if not first_tp_hit else "Breakeven SL"; sell_all = True; sell_percentage = 1.0
+            if price <= active_sl_price:
+                sell_reason = "Stop Loss" if not is_first_tp_hit else "Breakeven SL"; sell_all = True; sell_percentage = 1.0
                 reward_bonus_penalty += rl_config.REWARD_SL_HIT_PENALTY
             elif price >= second_tp_price:
                 sell_reason = "Second TP"; sell_all = True; sell_percentage = 1.0
                 reward_bonus_penalty += rl_config.REWARD_TP_HIT_BONUS
-            elif not first_tp_hit and price >= initial_tp_price:
-                sell_reason = "First TP"; sell_partial = True; sell_percentage = first_sell_perc
+            elif not is_first_tp_hit and price >= initial_tp_price:
+                sell_reason = "First TP"; sell_partial = True; sell_percentage = first_sell_perc_fraction
                 reward_bonus_penalty += rl_config.REWARD_TP_HIT_BONUS
-            elif first_tp_hit and price <= current_trailing_sl_price: # Trailing SL checked only if first TP hit
+            elif is_first_tp_hit and current_trailing_sl_price > 0 and price <= current_trailing_sl_price:
                 sell_reason = "Trailing SL"; sell_all = True; sell_percentage = 1.0
                 reward_bonus_penalty += rl_config.REWARD_SL_HIT_PENALTY
-            # Emergency SL (MCap) - Added to match trading_logic.py
-            elif self.initial_market_cap_sol is not None and self.initial_market_cap_sol > 1e-9 and current_market_cap_sol_value > 0 and current_market_cap_sol_value < (self.initial_market_cap_sol * (1.0 - (mc_drop_threshold_param / 100.0))):
-                sell_reason = f"Emergency SL (MCap Drop > {mc_drop_threshold_param:.1f}%)"
-                sell_all = True; sell_percentage = 1.0 # Assuming MC Drop emergency sell always sells all
-                reward_bonus_penalty += rl_config.REWARD_SL_HIT_PENALTY # Can use existing or a new penalty
-                trigger_values_for_log = { # For potential logging if needed
-                    "initial_market_cap_sol_at_entry": self.initial_market_cap_sol,
-                    "current_market_cap_sol_at_trigger": current_market_cap_sol_value,
-                    "mc_drop_threshold_config_pct": mc_drop_threshold_param
-                }
-
-
+            elif self.initial_creation_market_cap_sol is not None and self.initial_creation_market_cap_sol > 1e-9 and \
+                 current_live_sol_mc > 0 and \
+                 current_live_sol_mc < (self.initial_creation_market_cap_sol * (1.0 - (mc_drop_threshold_param / 100.0))):
+                sell_reason = f"Emergency SL (MCap % Drop > {mc_drop_threshold_param:.1f}%)"
+                sell_all = True; sell_percentage = 1.0
+                reward_bonus_penalty += rl_config.REWARD_SL_HIT_PENALTY # Consider a different penalty if needed
+            elif current_live_usd_mc > 0 and current_live_usd_mc < min_mcap_usd_fallback: # Absolute USD fallback
+                 sell_reason = f"Emergency SL (Abs USD MCap < {min_mcap_usd_fallback})"
+                 sell_all = True; sell_percentage = 1.0
+                 reward_bonus_penalty += rl_config.REWARD_SL_HIT_PENALTY
+            
             if sell_reason:
                 initial_tokens = pos['initial_tokens']
                 remaining_tokens = pos['remaining_tokens']
-                total_investment = pos['total_investment_sol']
+                total_investment_sol_for_pos = pos['total_investment_sol']
                 tokens_to_sell = 0.0
 
-                if sell_partial:
-                    tokens_to_sell = initial_tokens * sell_percentage
-                    tokens_to_sell = min(tokens_to_sell, remaining_tokens)
-                elif sell_all:
-                    tokens_to_sell = remaining_tokens
-
+                if sell_partial: tokens_to_sell = min(initial_tokens * sell_percentage, remaining_tokens)
+                elif sell_all: tokens_to_sell = remaining_tokens * sell_percentage # sell_percentage will be 1.0 here
+                
                 if tokens_to_sell > 1e-9:
-                    # Execute sell using Close price
-                    gross_sol = tokens_to_sell * price
-                    net_sol = gross_sol - sell_fee - sell_tip
-                    cost_basis = total_investment * (tokens_to_sell / initial_tokens) if initial_tokens > 0 else 0
-                    pnl = net_sol - cost_basis
+                    gross_sol_recv = tokens_to_sell * price
+                    net_sol_recv = gross_sol_recv - sell_fee - sell_tip
+                    cost_basis_sold = total_investment_sol_for_pos * (tokens_to_sell / initial_tokens) if initial_tokens > 0 else 0
+                    pnl = net_sol_recv - cost_basis_sold
                     realized_pnl_this_step += pnl
-
-                    self.current_sol += net_sol
+                    self.current_sol += net_sol_recv
                     pos['remaining_tokens'] -= tokens_to_sell
-                    self.trade_history.append({
-                        'step': self.current_step, 'index': current_data_index, 'type': 'sell', 'price': price,
-                        'tokens': tokens_to_sell, 'net_sol': net_sol, 'pnl': pnl, 'reason': sell_reason
-                    })
-
+                    self.trade_history.append({'step': self.current_step, 'type': 'sell', 'price': price, 'tokens': tokens_to_sell, 'pnl': pnl, 'reason': sell_reason})
                     if sell_partial:
                         pos['first_tp_hit'] = True
-                        # In trading_logic.py, SL is adjusted to buy_price after TP1. Replicate this.
-                        pos['stop_loss_price'] = pos['buy_price']
-
-                    if pos['remaining_tokens'] < 1e-9:
-                        self.active_position = None
-
-        # --- Buy Logic (using OHLCV Volume) ---
-        # The environment decides *when* a token is available (based on data).
-        # The agent's parameters determine *if* the bot buys when presented with an opportunity.
-        # The buy criteria here should match the thresholds used in trading_logic.py's find_trading_opportunities.
-        if not self.active_position and self.current_sol >= (buy_amount_sol + buy_fee + buy_tip):
-            rugcheck_score = int(current_row.get('rugcheck_score', 10000))
-            socials_score = int(current_row.get('socials_score', 100))
-            volatility = float(current_row.get('volatility', 0.0))
-
+                        pos['stop_loss_price'] = pos['buy_price'] # Adjust SL to breakeven
+                    if pos['remaining_tokens'] < 1e-9: self.active_position = None
+        
+        # --- Buy Logic ---
+        if not self.active_position and self.current_sol >= (buy_amount_sol_agent + buy_fee + buy_tip):
             meets_buy_criteria = (
-                volume >= volume_thresh and # Use OHLCV Volume
-                market_cap_sol >= mcap_thresh_buy and
-                rugcheck_score < rug_thresh and
-                socials_score < social_thresh and
-                volatility >= volatility_thresh
+                volume_ohlcv >= volume_thresh_usd and # OHLCV volume (USD)
+                current_live_usd_mc >= mcap_thresh_buy_usd and # Live USD MC
+                rugcheck_val < rug_thresh_agent and
+                socials_val < social_thresh_agent and
+                volatility_val >= volatility_thresh_agent
             )
-
-            # logger.debug(f"Buy criteria: Volume {volume} >= {volume_thresh}, Market Cap {market_cap_sol} >= {mcap_thresh_buy}, "
-            #              f"RugCheck {rugcheck_score} < {rug_thresh}, Socials {socials_score} < {social_thresh}, "
-            #              f"Volatility {volatility} >= {volatility_thresh}")
-
             if meets_buy_criteria:
-                total_investment = buy_amount_sol + buy_fee + buy_tip
-                tokens_bought = buy_amount_sol / price if price > 0 else 0
-
+                total_investment = buy_amount_sol_agent + buy_fee + buy_tip
+                tokens_bought = buy_amount_sol_agent / price if price > 0 else 0
                 if tokens_bought > 0:
                     self.current_sol -= total_investment
-
-                    # Calculate initial SL/TPs using agent's CURRENT parameters and Close price
-                    initial_sl_price = price * (1.0 - initial_sl_percent / 100.0)
-
-                    # First Take Profit (TP1) Price Calculation (Net Income Approach - Matching trading_logic.py)
-                    sell_fee_tp1 = float(rl_config.DEFAULT_SELL_FEE)
-                    sell_tip_tp1 = float(rl_config.DEFAULT_SELL_TIP)
-                    fees_for_tp1_sell = sell_fee_tp1 + sell_tip_tp1
-
-                    profit_margin_tp1_fraction = float(agent_params.get('FIRST_SELL_PROFIT_MARGIN', 100.0)) / 100.0 # Use agent's param
-                    sell_percent_tp1_fraction = float(agent_params.get('FIRST_SELL_PERCENT', 75.0)) / 100.0 # Use agent's param
-
-                    tokens_to_sell_tp1 = tokens_bought * sell_percent_tp1_fraction
-                    if tokens_to_sell_tp1 <= 1e-9:
-                         # This case should ideally not happen if tokens_bought > 0 and sell_percent_tp1_fraction > 0
-                         # but handle defensively.
-                         initial_tp_price = float('inf') # Set TP1 very high if sell amount is negligible
-                         logger.warning(f"Calculated tokens to sell at TP1 ({tokens_to_sell_tp1}) is negligible for mint {self.current_mint}. Setting TP1 price to infinity.")
-                    else:
-                        # Cost basis of the portion of tokens sold at TP1
-                        cost_of_tp1_tokens_sold = total_investment * sell_percent_tp1_fraction
-                        # Desired profit on this portion
-                        desired_profit_on_tp1_tokens = cost_of_tp1_tokens_sold * profit_margin_tp1_fraction
-                        # Total SOL needed from the gross sale at TP1 price
-                        gross_sol_needed_from_tp1_sale = cost_of_tp1_tokens_sold + desired_profit_on_tp1_tokens + fees_for_tp1_sell
-                        # TP1 Price calculation
-                        initial_tp_price = gross_sol_needed_from_tp1_sale / tokens_to_sell_tp1
-
-
-                    # Second Take Profit Price Calculation (Matching trading_logic.py)
-                    second_tp_price = price * (1 + float(agent_params.get('SECOND_TAKE_PROFIT_PERCENT', 550.0)) / 100.0) # Use agent's param
-
+                    sl_price = price * (1.0 - initial_sl_percent / 100.0)
+                    
+                    cost_of_tp1_portion = total_investment * first_sell_perc_fraction
+                    desired_profit_tp1 = cost_of_tp1_portion * first_profit_margin_fraction
+                    gross_sol_needed_tp1 = cost_of_tp1_portion + desired_profit_tp1 + (sell_fee + sell_tip)
+                    tp1_price = gross_sol_needed_tp1 / (tokens_bought * first_sell_perc_fraction) if (tokens_bought * first_sell_perc_fraction) > 1e-9 else float('inf')
+                    
+                    tp2_price = price * (1.0 + second_tp_margin_fraction)
 
                     self.active_position = {
                         'buy_price': price, 'initial_tokens': tokens_bought,
                         'remaining_tokens': tokens_bought, 'total_investment_sol': total_investment,
-                        'stop_loss_price': initial_sl_price, 'initial_tp_price': initial_tp_price,
-                        'second_tp_price': second_tp_price, 'highest_price': price, # Use Close price as initial high
-                        'first_tp_hit': False, 'entry_step': self.current_step,
-                        'entry_timestamp': current_timestamp
+                        'stop_loss_price': sl_price, 'initial_tp_price': tp1_price,
+                        'second_tp_price': tp2_price, 'highest_price': price,
+                        'first_tp_hit': False, 'entry_timestamp': current_timestamp
                     }
-                    self.trade_history.append({
-                        'step': self.current_step, 'index': current_data_index, 'type': 'buy', 'price': price,
-                        'tokens': tokens_bought, 'investment': total_investment
-                    })
-
+                    self.trade_history.append({'step': self.current_step, 'type': 'buy', 'price': price, 'tokens': tokens_bought})
+        
         return realized_pnl_this_step, reward_bonus_penalty
 
-    def _calculate_reward(self, realized_pnl: float, bonus_penalty: float, is_token_death: bool) -> float:
-        """Calculates reward (Same as before, includes death penalty)."""
+    def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict]:
+        if self.current_data_df is None:
+            obs = np.zeros(self.observation_space.shape, dtype=np.float32)
+            return obs, 0.0, True, False, {"error": "Environment not reset"}
+
+        self._apply_action(action) # Agent sets self.current_parameters
+        realized_pnl, bonus_penalty = self._run_trading_logic_step()
+        
+        terminated = self.current_sol <= 0
+        
+        # Check if EOD or token death, current_step has not yet been incremented for next state
+        # So current_data_index is self.current_step
+        current_data_idx_for_check = self.current_step 
+        end_of_data = current_data_idx_for_check >= len(self.current_data_df) -1 # Ran out of candles for current token
+        
+        token_died_this_step = False
+        if self.current_token_end_ts and current_data_idx_for_check < len(self.current_data_df):
+            current_candle_timestamp = self.current_data_df.index[current_data_idx_for_check]
+            if current_candle_timestamp >= self.current_token_end_ts:
+                token_died_this_step = True
+        
+        max_steps_reached = (self.current_step + 1) >= self._max_episode_steps # Check against NEXT step
+        
+        truncated = max_steps_reached or end_of_data or token_died_this_step
+        is_token_death_event_for_reward = end_of_data or token_died_this_step # For death penalty
+
+        reward = self._calculate_reward(realized_pnl, bonus_penalty, is_token_death_event_for_reward)
+        
+        self.current_step += 1 # Increment step *before* getting observation for the *next* state
+
+        # Get observation for the *next* state (S_t+1)
+        # If truncated/terminated, the next observation might not be valid or used,
+        # but SB3 expects it. _get_observation handles boundary conditions.
+        if not (terminated or truncated):
+             self._last_step_processed_index = self.current_step # Update for next obs
+        else: # If episode ends, obs might be from last valid point or zeros
+             self._last_step_processed_index = min(self.current_step, len(self.current_data_df) -1) if len(self.current_data_df) > 0 else -1
+
+
+        observation = self._get_observation()
+
+        info = {
+            'mint': self.current_mint, 'step': self.current_step -1, # Step that just finished
+            'sol_balance': self.current_sol, 'realized_pnl_step': realized_pnl,
+            'is_holding': 1 if self.active_position else 0, 'raw_reward': reward
+        }
+        if terminated or truncated:
+            final_val = self.current_sol
+            if self.active_position and self._price_history:
+                final_val += self.active_position['remaining_tokens'] * self._price_history[-1]
+            info['final_portfolio_value'] = final_val
+            info['total_steps_taken'] = self.current_step # Current_step is already next step number
+            if terminated: info['episode_end_reason'] = "terminated (bankrupt)"
+            elif token_died_this_step: info['episode_end_reason'] = "truncated (token_death)"
+            elif end_of_data: info['episode_end_reason'] = "truncated (end_of_data)"
+            elif max_steps_reached: info['episode_end_reason'] = "truncated (max_steps)"
+            else: info['episode_end_reason'] = "truncated (unknown)"
+            
+        return observation, reward, terminated, truncated, info
+
+    def _calculate_reward(self, realized_pnl: float, bonus_penalty: float, is_token_death_event: bool) -> float:
         reward = realized_pnl * rl_config.REWARD_PNL_MULTIPLIER
         reward += bonus_penalty
         if self.active_position and rl_config.REWARD_HOLDING_PENALTY != 0:
             reward += rl_config.REWARD_HOLDING_PENALTY
-        if is_token_death and self.active_position:
+        if is_token_death_event and self.active_position: # Apply penalty if holding when token dies/data ends
             reward += rl_config.REWARD_DEATH_PENALTY
-            # logger.debug(f"Applied death penalty ({rl_config.REWARD_DEATH_PENALTY}) for holding {self.current_mint} at end.")
         return reward
 
-    def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict]:
-        """Executes one time step (Same logic as before, relies on updated internal methods)."""
-        if self.current_data_df is None:
-            logger.error("Environment not reset properly, cannot step.")
-            obs = np.zeros(self.observation_space.shape, dtype=np.float32)
-            return obs, 0.0, True, False, {"error": "Environment not reset"}
-
-        self._apply_action(action)
-        realized_pnl, bonus_penalty = self._run_trading_logic_step()
-        self.current_step += 1
-
-        terminated = self.current_sol <= 0
-        end_of_data = self._last_step_processed_index >= len(self.current_data_df) - 1
-        token_died = False
-        if self.current_token_end_ts and self._last_step_processed_index >=0 :
-             current_timestamp = self.current_data_df.index[self._last_step_processed_index]
-             token_died = current_timestamp >= self.current_token_end_ts
-
-        max_steps_reached = self.current_step >= self._max_episode_steps
-        truncated = max_steps_reached or end_of_data or token_died
-        is_token_death_event = end_of_data or token_died
-
-        reward = self._calculate_reward(realized_pnl, bonus_penalty, is_token_death_event)
-        observation = self._get_observation()
-
-        info = {
-            'mint': self.current_mint, 'step': self.current_step,
-            'last_processed_index': self._last_step_processed_index,
-            'sol_balance': self.current_sol, 'realized_pnl_step': realized_pnl,
-            'reward_shaping_step': bonus_penalty,
-            'is_holding': 1 if self.active_position else 0, 'raw_reward': reward
-        }
-        if self.active_position:
-             info['position_entry_price'] = self.active_position['buy_price']
-             info['position_remaining_tokens'] = self.active_position['remaining_tokens']
-
-        if terminated or truncated:
-             final_portfolio_value = self.current_sol
-             if self.active_position:
-                  # Use last Close price for final valuation
-                  last_price = self._price_history[-1] if self._price_history else self.active_position['buy_price']
-                  final_portfolio_value += self.active_position['remaining_tokens'] * last_price
-             info['final_portfolio_value'] = final_portfolio_value
-             info['total_steps_taken'] = self.current_step
-             if terminated: info['episode_end_reason'] = "terminated (bankrupt)"
-             elif max_steps_reached: info['episode_end_reason'] = "truncated (max_steps)"
-             elif is_token_death_event: info['episode_end_reason'] = "truncated (token_death)"
-             else: info['episode_end_reason'] = "truncated (unknown)"
-
-        return observation, reward, terminated, truncated, info
-
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None) -> Tuple[np.ndarray, Dict]:
-        """Resets the environment (Same logic, but uses OHLCV data)."""
         super().reset(seed=seed)
 
         self.current_mint = random.choice(self.available_mints)
@@ -3322,41 +1491,30 @@ class TradingEnv(gym.Env):
              raise RuntimeError(f"Lifespan info missing for selected mint {self.current_mint} during reset.")
         self.current_token_end_ts = lifespan['end_ts']
 
-        # --- Pre-calculate Volatility if missing (use Close price) ---
+        # Set initial_creation_market_cap_sol for the episode
+        self.initial_creation_market_cap_sol = None 
+        if not self.current_data_df.empty and 'creation_init_market_cap_sol' in self.current_data_df.columns:
+            val_series = pd.to_numeric(self.current_data_df['creation_init_market_cap_sol'], errors='coerce')
+            first_valid_val = val_series.dropna().iloc[0] if not val_series.dropna().empty else np.nan
+            
+            if pd.notna(first_valid_val) and first_valid_val > 0:
+                self.initial_creation_market_cap_sol = float(first_valid_val)
+                # logger.debug(f"Episode for {self.current_mint}: Initial CREATION marketCapSol set to {self.initial_creation_market_cap_sol}")
+            else:
+                logger.warning(f"Episode for {self.current_mint}: Invalid or non-positive initial creation_init_market_cap_sol. Value: {first_valid_val if pd.notna(first_valid_val) else 'NaN/Empty'}")
+        else:
+            logger.warning(f"Episode for {self.current_mint}: 'creation_init_market_cap_sol' column missing or DF empty. Cannot set initial creation MC.")
+
         if 'volatility' not in self.current_data_df.columns or self.current_data_df['volatility'].isnull().all():
-            logger.debug(f"Calculating volatility for {self.current_mint} during reset (using Close price)...")
             if 'Close' in self.current_data_df.columns and not self.current_data_df['Close'].isnull().all():
                 prices = pd.to_numeric(self.current_data_df['Close'], errors='coerce').ffill().bfill().fillna(0.0)
                 if len(prices) > 1:
-                    # Pass the Series with its DatetimeIndex
-                    volatility_series = calculate_volatility(prices, window=rl_config.VOLATILITY_WINDOW)
-                    self.current_data_df['volatility'] = volatility_series.fillna(0.0)
-                else:
-                    self.current_data_df['volatility'] = 0.0
-            else:
-                self.current_data_df['volatility'] = 0.0
-        # Ensure volatility column exists even if calculation failed
-        if 'volatility' not in self.current_data_df.columns:
-            self.current_data_df['volatility'] = 0.0
-        else:
-            # Fill any remaining NaNs just in case
-            self.current_data_df['volatility'] = self.current_data_df['volatility'].fillna(0.0)
-
-        if not self.current_data_df.empty and 'marketCapSol' in self.current_data_df.columns:
-            first_mc_sol_series = pd.to_numeric(self.current_data_df['marketCapSol'], errors='coerce')
-            valid_initial_mc_sol = first_mc_sol_series.dropna()
-            if not valid_initial_mc_sol.empty and valid_initial_mc_sol.iloc[0] > 0:
-                self.initial_market_cap_sol = float(valid_initial_mc_sol.iloc[0])
-                logger.debug(f"Initial marketCapSol for {self.current_mint} set to: {self.initial_market_cap_sol}")
-            else:
-                logger.warning(f"Could not determine a valid positive initial marketCapSol for {self.current_mint} from data. Value(s): {first_mc_sol_series.iloc[0] if not first_mc_sol_series.empty else 'N/A'}. Setting to None.")
-                self.initial_market_cap_sol = None
-        else:
-            logger.warning(f"marketCapSol column missing or DataFrame empty for {self.current_mint} at reset. Initial market cap SOL set to None.")
-            self.initial_market_cap_sol = None
-
-
-        # --- Reset State Variables (Same as before) ---
+                    self.current_data_df['volatility'] = calculate_volatility(prices, window=rl_config.VOLATILITY_WINDOW).fillna(0.0)
+                else: self.current_data_df['volatility'] = 0.0
+            else: self.current_data_df['volatility'] = 0.0
+        if 'volatility' not in self.current_data_df.columns: self.current_data_df['volatility'] = 0.0
+        else: self.current_data_df['volatility'] = self.current_data_df['volatility'].fillna(0.0)
+        
         self.current_step = 0
         self._last_step_processed_index = -1
         self.current_sol = self.initial_capital
@@ -3367,45 +1525,46 @@ class TradingEnv(gym.Env):
         self._previous_unrealized_pnl = 0.0
         self.last_observation = np.zeros(self.observation_space.shape, dtype=np.float32)
 
-        # Pre-fill initial price history using Close prices
         initial_steps_to_fill = min(len(self.current_data_df), self._price_history.maxlen)
         for i in range(initial_steps_to_fill):
             try:
-                price = float(self.current_data_df.iloc[i].get('Close', 0.0)) # Use Close
+                price = float(self.current_data_df.iloc[i].get('Close', 0.0))
                 self._price_history.append(price if pd.notna(price) else 0.0)
-            except (IndexError, ValueError, TypeError):
-                 self._price_history.append(0.0)
+            except (IndexError, ValueError, TypeError): self._price_history.append(0.0)
 
-        # Get initial observation
         if len(self.current_data_df) > 0:
             self._last_step_processed_index = 0
             observation = self._get_observation()
-            self._last_step_processed_index = -1
+            self._last_step_processed_index = -1 
         else:
-            logger.error(f"DataFrame for mint {self.current_mint} is empty after reset. Cannot generate initial observation.")
+            logger.error(f"DataFrame for mint {self.current_mint} is empty after reset. Cannot get obs.")
             observation = np.zeros(self.observation_space.shape, dtype=np.float32)
-
-        info = {}
-        return observation, info
+        return observation, {}
 
     def render(self, mode='human'):
-        """Renders the environment state (Same as before)."""
+        # ... (render method can remain largely the same, ensure it accesses correct variables) ...
+        # Example:
         if mode == 'ansi':
-            output = f"--- Step: {self.current_step}/{self._max_episode_steps} (Index: {self._last_step_processed_index}) ---\n"
+            output = f"--- Step: {self.current_step}/{self._max_episode_steps} (Data Index: {self._last_step_processed_index}) ---\n"
             output += f"Mint: {self.current_mint}\n"
             output += f"SOL Balance: {self.current_sol:.4f}\n"
+            output += f"Initial Creation SOL MC: {self.initial_creation_market_cap_sol}\n"
             if self.active_position:
                 pos = self.active_position
-                pnl_norm = self.last_observation[rl_config.OBSERVATION_FEATURES.index('position_pnl_norm')]
                 output += f"Holding: {pos['remaining_tokens']:.4f} tokens (Bought @ {pos['buy_price']:.9f})\n"
-                output += f"  Norm PnL: {pnl_norm:.3f}, Highest Price: {pos['highest_price']:.9f}\n"
-                output += f"  SL: {pos['stop_loss_price']:.9f}, TP1: {pos['initial_tp_price']:.9f}, TP2: {pos['second_tp_price']:.9f}\n"
+                # ... more details ...
             else:
                 output += "Holding: None\n"
             output += f"Agent Params: {self.current_parameters}\n"
-            # Add last Close price
             last_close = self._price_history[-1] if self._price_history else 'N/A'
             output += f"Last Close Price: {last_close}\n"
+            if self.last_observation is not None and len(self.last_observation) > 0:
+                 try:
+                    live_sol_mc_norm_idx = rl_config.OBSERVATION_FEATURES.index('live_market_cap_sol_norm')
+                    live_usd_mc_norm_idx = rl_config.OBSERVATION_FEATURES.index('live_market_cap_usd_norm')
+                    output += f"  Norm Live SOL MC: {self.last_observation[live_sol_mc_norm_idx]:.3f}\n"
+                    output += f"  Norm Live USD MC: {self.last_observation[live_usd_mc_norm_idx]:.3f}\n"
+                 except (ValueError, IndexError): pass # In case features are not found or obs is not ready
             return output
         elif mode == 'human':
             print(self.render(mode='ansi'))
@@ -3413,6 +1572,10 @@ class TradingEnv(gym.Env):
     def close(self):
         """Cleans up environment resources."""
         pass
+
+    def set_render_mode(self, render_mode: Optional[str]):
+        """Sets the render mode for the environment."""
+        self.render_mode = render_mode
 
 ```
 
@@ -3426,11 +1589,17 @@ class TradingEnv(gym.Env):
 """
 Reinforcement Learning Agent Training Script.
 
-Orchestrates the training process for an RL agent using Stable Baselines3
-to learn optimal trading parameters for the custom TradingEnv environment.
+This module orchestrates the training process for a Reinforcement Learning (RL) agent 
+using Stable Baselines3 to learn optimal trading parameters within a custom TradingEnv environment.
 
-to see training details use:
-tensorboard --logdir ./rl_tensorboard_logs/ --port 6006      
+Key Features:
+- Trains an RL agent for trading strategy optimization
+- Supports visualization of training progress via TensorBoard
+- Configurable environment and agent parameters
+
+TensorBoard Visualization:
+To monitor training details, run:
+    tensorboard --logdir ./rl_tensorboard_logs/ --port 6006
 """
 
 import os
@@ -3473,7 +1642,7 @@ import matplotlib.pyplot as plt
 
 # --- Project Modules ---
 import rl_config
-from logger import logger, setup_logging
+from bot_logger import logger, setup_logging
 from database_handler import DatabaseClient
 from rl_environment import TradingEnv # Ensure TradingEnv takes lifespan info
 from utils import load_and_split_data, calculate_volatility, export_to_csv, NpEncoder # Import NpEncoder for saving
@@ -3597,7 +1766,8 @@ def make_env_func(
     initial_capital: float,
     max_steps: int,
     rank: int = 0,
-    seed: int = 0
+    seed: int = 0,
+    render_mode: Optional[str] = None # Added render_mode parameter
 ):
     """
     Utility function for creating and wrapping the environment for VecEnv.
@@ -3629,7 +1799,8 @@ def make_env_func(
             historical_data_dict=valid_data,
             token_lifespans=valid_lifespans, # Pass lifespans
             initial_capital=initial_capital,
-            max_steps=max_steps
+            max_steps=max_steps,
+            render_mode=render_mode # Pass render_mode to TradingEnv
         )
         env.reset(seed=seed + rank) # Seed the environment
         log_dir_monitor = os.path.join(rl_config.MODEL_SAVE_DIR, f"monitor_logs_{rank}")
@@ -3639,8 +1810,14 @@ def make_env_func(
     return _init
 
 # --- Main Training Function ---
-async def train_rl_agent():
-    """Sets up the RL environment, agent, callbacks, and starts training."""
+async def train_rl_agent(render_mode: Optional[str] = None):
+    """
+    Sets up the RL environment, agent, callbacks, and starts training.
+
+    Args:
+        render_mode: The render mode for the training environment (e.g., 'human', 'ansi').
+                     Set to None to disable rendering.
+    """
     global db_client_global
     setup_logging(logger_name="rl_trainer") # Initialize logger for this module
     logger.info("--- Starting RL Agent Training ---")
@@ -3705,9 +1882,12 @@ async def train_rl_agent():
         VecEnvClass = SubprocVecEnv if rl_config.N_ENVS > 1 else DummyVecEnv
 
         # Create training environments, passing lifespans
-        env_fns = [make_env_func(training_data, train_lifespans, rl_config.RL_INITIAL_CAPITAL, rl_config.MAX_STEPS_PER_EPISODE, rank=i)
+        env_fns = [make_env_func(training_data, train_lifespans, rl_config.RL_INITIAL_CAPITAL, rl_config.MAX_STEPS_PER_EPISODE, rank=i, render_mode=render_mode)
                    for i in range(rl_config.N_ENVS)]
-        train_env_raw = VecEnvClass(env_fns)
+        train_env_raw = VecEnvClass(env_fns) # Revert passing render_mode to SubprocVecEnv constructor
+        # Explicitly set render_mode on the VecEnv instance after creation
+        if render_mode is not None:
+             train_env_raw.render_mode = render_mode
         logger.info(f"Created Training VecEnv ({VecEnvClass.__name__}) with {rl_config.N_ENVS} environments.")
 
         # --- Environment Checker ---
@@ -3724,7 +1904,10 @@ async def train_rl_agent():
         # Create evaluation environment
         if eval_data and eval_lifespans:
             eval_env_fn = make_env_func(eval_data, eval_lifespans, rl_config.RL_INITIAL_CAPITAL, rl_config.MAX_STEPS_PER_EPISODE, rank=100)
-            eval_env_raw = DummyVecEnv([eval_env_fn])
+            eval_env_raw = DummyVecEnv([eval_env_fn]) # Revert passing render_mode to DummyVecEnv constructor
+            # Explicitly set render_mode on the VecEnv instance after creation
+            if render_mode is not None:
+                 eval_env_raw.render_mode = render_mode
             logger.info("Created Evaluation VecEnv (DummyVecEnv).")
         else:
              eval_env_raw = None
@@ -3732,9 +1915,11 @@ async def train_rl_agent():
         # --- Apply VecNormalize ---
         normalize_kwargs = {'norm_obs': True, 'norm_reward': False, 'gamma': 0.99}
         train_env = VecNormalize(train_env_raw, **normalize_kwargs)
+        # Remove explicit render_mode setting on VecNormalize
         logger.info("Applied VecNormalize to training environment.")
         if eval_env_raw:
             eval_env = VecNormalize(eval_env_raw, training=False, **normalize_kwargs)
+            # Remove explicit render_mode setting on VecNormalize
             # Load the SAME stats as the training env for consistent evaluation
             eval_env.obs_rms = train_env.obs_rms
             eval_env.ret_rms = train_env.ret_rms # If normalizing rewards (norm_reward=True)
@@ -3843,7 +2028,7 @@ async def train_rl_agent():
             eval_freq=max(rl_config.EVAL_FREQ // rl_config.N_ENVS, 1),
             n_eval_episodes=rl_config.N_EVAL_EPISODES,
             deterministic=True,
-            render=False,
+            render=True,
             verbose=1,
             callback_on_new_best=save_vec_normalize_callback  # Use the new callback class
         )
@@ -3923,361 +2108,11 @@ if __name__ == "__main__":
          freeze_support()
 
     try:
-        asyncio.run(train_rl_agent())
+        # To enable rendering during debugging, change render_mode to 'human' or 'ansi'
+        # Be aware that rendering can significantly slow down training, especially with N_ENVS > 1.
+        asyncio.run(train_rl_agent(render_mode=None)) # Set render_mode here for training envs
     except Exception as main_err:
          logger.critical(f"Critical error in RL trainer entry point: {main_err}", exc_info=True)
-```
-
----
-
-## 📂 sql
-
----
-
-### 📄 01_create_tokens.sql
-
-```sql
--- Create the tokens table
-CREATE TABLE IF NOT EXISTS tokens (
-    mint TEXT PRIMARY KEY,          -- token mint
-    traderPublicKey TEXT,           -- token creator's wallet address
-    initialBuy NUMERIC,             -- initially buyed tokens
-    solAmount NUMERIC,              -- initially spent amount of SOL
-    bondingCurveKey TEXT,           -- bondingCurve key
-    vTokensInBondingCurve NUMERIC,  -- tokens in BondingCurve
-    vSolInBondingCurve NUMERIC,     -- SOL in BondingCurve
-    marketCapSol NUMERIC,           -- market cap in SOL
-    name TEXT,                      -- token name
-    symbol TEXT,                    -- token symbol
-    uri TEXT,                       -- META URL
-    website TEXT,                   -- website link, fetched from META URL
-    telegram TEXT,                  -- telegram link, fetched from META URL
-    twitter TEXT,                   -- twitter link, fetched from META URL
-    socials_score INTEGER,          -- calculated social score
-    socials_last_checked TIMESTAMP WITH TIME ZONE,  -- last try to fetch META URL
-    sol_price_usd NUMERIC,                          -- SOL price at token creation
-    is_active BOOLEAN DEFAULT TRUE,                 -- TRUE or FALLS for considering in check_buy_opportunities
-    last_trade TIMESTAMP WITH TIME ZONE,            -- TIMESTAMP of the last Trade event, updated when a new TRADE is fetched
-    timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP    -- creation TIMESTAMP
-);
-
--- Backup table creation
-CREATE TABLE IF NOT EXISTS tokens_backup (
-    LIKE tokens INCLUDING ALL
-);
-
--- Add the `backed_up` column to the backup table
-ALTER TABLE tokens_backup ADD COLUMN IF NOT EXISTS backup_reason TEXT;
-ALTER TABLE tokens_backup ADD COLUMN IF NOT EXISTS backup_timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
--- Remove the default value for the `timestamp` column in the backup table
-ALTER TABLE tokens_backup ALTER COLUMN timestamp DROP DEFAULT;
-```
-
----
-
-### 📄 02_create_trades.sql
-
-```sql
--- Create the trades table
-CREATE TABLE IF NOT EXISTS trades (
-    signature TEXT PRIMARY KEY,         -- signature of the token event
-    mint TEXT,                          -- tokens mint address
-    tx_type TEXT,                       -- event type 'buy' or 'sell'
-    token_amount NUMERIC,               -- amount of tokens traded
-    sol_amount NUMERIC,                 -- amount of SOL traded
-    price NUMERIC,                      -- token price in SOL
-    bondingCurveKey TEXT,               -- BondingCurve key
-    vTokensInBondingCurve NUMERIC,      -- tokens in BondingCurve
-    vSolInBondingCurve NUMERIC,         -- amount of SOL in BondingCurve
-    marketCapSol NUMERIC,               -- market cap in SOL
-    sol_price_usd NUMERIC,              -- actual SOL price in USD at the time of the trade event
-    market_cap_calculated NUMERIC,      -- calculated market cap in USD
-    timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP    -- TIMESTAMP of the trade event
-);
-
--- Backup table creation
-CREATE TABLE IF NOT EXISTS trades_backup (
-    LIKE trades INCLUDING ALL
-);
-
--- Add the `backed_up` column to the backup table
-ALTER TABLE trades_backup ADD COLUMN IF NOT EXISTS backup_timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
--- Remove the default value for the `timestamp` column in the backup table
-ALTER TABLE trades_backup ALTER COLUMN timestamp DROP DEFAULT;
-```
-
----
-
-### 📄 03_create_rugcheck.sql
-
-```sql
-CREATE TABLE IF NOT EXISTS rugcheck (
-    mint TEXT PRIMARY KEY REFERENCES tokens(mint) ON DELETE CASCADE,
-    tokenProgram TEXT,
-    creator TEXT,
-    token_mintAuthority TEXT,
-    token_supply NUMERIC,
-    token_decimals INTEGER,
-    token_isInitialized BOOLEAN,
-    token_freezeAuthority TEXT,
-    tokenMeta_name TEXT,
-    tokenMeta_symbol TEXT,
-    tokenMeta_uri TEXT,
-    tokenMeta_mutable BOOLEAN,
-    tokenMeta_updateAuthority TEXT,
-    freezeAuthority TEXT,
-    mintAuthority TEXT,
-    risks TEXT,
-    score INTEGER,
-    fileMeta_description TEXT,
-    fileMeta_name TEXT,
-    fileMeta_symbol TEXT,
-    fileMeta_image TEXT,
-    totalMarketLiquidity NUMERIC,
-    totalLPProviders INTEGER,
-    rugged BOOLEAN,
-    tokenType TEXT,
-    transferFee_pct NUMERIC,
-    transferFee_maxAmount NUMERIC,
-    transferFee_authority TEXT,
-    graphInsidersDetected INTEGER,
-    detectedAt TIMESTAMP WITH TIME ZONE,
-    full_data TEXT,
-    last_checked TIMESTAMP WITH TIME ZONE,
-    timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
--- Backup table creation
-CREATE TABLE IF NOT EXISTS rugcheck_backup (
-    LIKE rugcheck INCLUDING ALL
-);
-
--- Add the `backed_up` column to the backup table
-ALTER TABLE rugcheck_backup ADD COLUMN IF NOT EXISTS backup_timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
--- Remove the default value for the `timestamp` column in the backup table
-ALTER TABLE rugcheck_backup ALTER COLUMN timestamp DROP DEFAULT;
-```
-
----
-
-### 📄 04_create_portfolio.sql
-
-```sql
--- Original portfolio table creation
-CREATE TABLE IF NOT EXISTS portfolio (
-    id SERIAL PRIMARY KEY,
-    mint TEXT,
-    tx_type TEXT,                     -- 'buy' or 'sell'
-    price NUMERIC,                    -- Price per token at the time of tx
-    market_cap NUMERIC,               -- Market cap at the time of tx
-    sol_amount NUMERIC,               -- Gross SOL spent (buy) or received (sell, before fees)
-    sol_price_usd NUMERIC,            -- SOL price in USD at the time of tx
-    tokens NUMERIC,                   -- Number of tokens bought or sold in this tx
-    fee NUMERIC,                      -- Fee associated with this tx
-    tip NUMERIC,                      -- Tip associated with this tx
-    profit NUMERIC,                   -- Profit/Loss for sell tx (net_sol_received - cost_basis)
-    status TEXT,                      -- Status of the original buy position ('active', 'closed')
-    reason TEXT,                      -- Reason for sell ('Stop Loss', 'First TP', 'Second TP', 'Trailing SL', 'Breakeven SL', etc.)
-
-    -- Fields primarily relevant for the original 'buy' entry
-    total_investment_sol NUMERIC,     -- Total SOL invested in this position (including fees)
-    initial_tokens NUMERIC,           -- Total tokens acquired in the initial buy tx
-    remaining_tokens NUMERIC,         -- Tokens currently held from the initial buy tx (updated on sells)
-    highest_price NUMERIC NOT NULL DEFAULT 0.0, -- Highest price observed since the buy
-    stop_loss_price NUMERIC,          -- Current active stop loss price level
-    initial_tp_price NUMERIC,         -- Calculated price for the first take profit
-    second_tp_price NUMERIC,          -- Calculated price for the second take profit
-    first_tp_hit BOOLEAN NOT NULL DEFAULT FALSE, -- Flag indicating if the first TP has been triggered
-
-    settings JSONB,                   -- Settings for this position (e.g. stop loss price)
-
-    timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
--- Backup table creation
-CREATE TABLE IF NOT EXISTS portfolio_backup (
-    LIKE portfolio INCLUDING ALL
-);
-
--- Add the `backed_up` column to the backup table
-ALTER TABLE portfolio_backup ADD COLUMN IF NOT EXISTS backed_up TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
-
--- Remove the default value for the `timestamp` column in the backup table
-ALTER TABLE portfolio_backup ALTER COLUMN timestamp DROP DEFAULT;
-
-```
-
----
-
-### 📄 05_create_migrations.sql
-
-```sql
-CREATE TABLE IF NOT EXISTS migrations (
-    signature TEXT PRIMARY KEY, -- signature of the token event
-    mint TEXT,                  -- tokens mint address
-    txType TEXT,                -- event type 'migrate'
-    pool TEXT,                  -- migration pool
-    timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP    -- TIMESTAMP of migration event
-);
-
--- Backup table creation
-CREATE TABLE IF NOT EXISTS migrations_backup (
-    LIKE migrations INCLUDING ALL
-);
-
--- Add the `backed_up` column to the backup table
-ALTER TABLE migrations_backup ADD COLUMN IF NOT EXISTS backup_timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
--- Remove the default value for the `timestamp` column in the backup table
-ALTER TABLE migrations_backup ALTER COLUMN timestamp DROP DEFAULT;
-```
-
----
-
-### 📄 06_create_creator_wallets.sql
-
-```sql
-CREATE TABLE IF NOT EXISTS creator_wallets (
-    wallet_address TEXT PRIMARY KEY,
-    token_count INTEGER DEFAULT 0,
-    last_token_time TIMESTAMP WITH TIME ZONE
-);
-```
-
----
-
-### 📄 07_create_sol_price_usd.sql
-
-```sql
-CREATE TABLE IF NOT EXISTS sol_price_usd (
-    id SERIAL PRIMARY KEY,
-    price  NUMERIC(15, 6) NOT NULL,
-    timestamp TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-);
-```
-
----
-
-### 📄 08_create_indexes.sql
-
-```sql
--- *********************************************
--- INDEXES FOR BASE TABLES
--- *********************************************
-
--- Tokens Table
-CREATE INDEX IF NOT EXISTS idx_tokens_mint ON tokens(mint);
-CREATE INDEX IF NOT EXISTS idx_tokens_traderPublicKey ON tokens(traderPublicKey);
-CREATE INDEX IF NOT EXISTS idx_tokens_socials_score ON tokens(socials_score);
-CREATE INDEX IF NOT EXISTS idx_tokens_name ON tokens(name);
-CREATE INDEX IF NOT EXISTS idx_tokens_is_active_timestamp ON tokens(is_active, timestamp DESC);
-
--- Trades Table
-CREATE INDEX IF NOT EXISTS idx_trades_signature ON trades(signature);
-CREATE INDEX IF NOT EXISTS idx_trades_mint_timestamp ON trades(mint, timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_trades_mint_sol_amount ON trades(mint, sol_amount);
-CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp);
-
--- Portfolio Table
-CREATE INDEX IF NOT EXISTS idx_portfolio_mint ON portfolio(mint);
-CREATE INDEX IF NOT EXISTS idx_portfolio_active_buy 
-ON portfolio(mint, tx_type, status)
-WHERE status = 'active' AND tx_type = 'buy';
-
--- Rugcheck Table
-CREATE INDEX IF NOT EXISTS idx_rugcheck_mint_last_checked ON rugcheck(mint, last_checked DESC);
-CREATE INDEX IF NOT EXISTS idx_rugcheck_score ON rugcheck(score);
-
--- *********************************************
--- INDEXES FOR BACKUP TABLES (if actively queried)
--- *********************************************
-
--- Tokens Backup
-CREATE INDEX IF NOT EXISTS idx_tokens_backup_mint ON tokens_backup(mint);
-CREATE INDEX IF NOT EXISTS idx_tokens_backup_socials_score ON tokens_backup(socials_score);
-CREATE INDEX IF NOT EXISTS idx_tokens_backup_name ON tokens_backup(name);
-
--- Trades Backup
-CREATE INDEX IF NOT EXISTS idx_trades_backup_mint_timestamp ON trades_backup(mint, timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_trades_backup_signature ON trades_backup(signature);
-
--- Rugcheck Backup
-CREATE INDEX IF NOT EXISTS idx_rugcheck_backup_mint_last_checked ON rugcheck_backup(mint, last_checked DESC);
-
--- *********************************************
--- SPECIALIZED INDEXES FOR VIEW QUERIES
--- *********************************************
-
--- For get_filtered_tokens (RecentVolume CTE)
-CREATE INDEX IF NOT EXISTS idx_trades_mint_timestamp_sol 
-ON trades(mint, timestamp DESC, sol_amount);
-
--- For LatestRugcheck CTE in views
-CREATE INDEX IF NOT EXISTS idx_rugcheck_mint_last_checked_desc 
-ON rugcheck(mint, last_checked DESC);
-
--- For portfolio-related view joins
-CREATE INDEX IF NOT EXISTS idx_portfolio_mint_status 
-ON portfolio(mint, status);
-```
-
----
-
-### 📄 09_create_views.sql
-
-```sql
--- sql/12_create_views.sql
-
--- View for combined tokens and tokens_backup
--- Prioritizes data from 'tokens' if a mint exists in both.
-CREATE OR REPLACE VIEW v_tokens AS
-SELECT
-    mint, traderPublicKey, initialBuy, solAmount, bondingCurveKey, vTokensInBondingCurve,
-    vSolInBondingCurve, marketCapSol, name, symbol, uri, website, telegram, twitter,
-    socials_score, socials_last_checked, sol_price_usd, is_active, last_trade, '' as backup_reason, timestamp
-FROM tokens
-UNION ALL
-SELECT
-    mint, traderPublicKey, initialBuy, solAmount, bondingCurveKey, vTokensInBondingCurve,
-    vSolInBondingCurve, marketCapSol, name, symbol, uri, website, telegram, twitter,
-    socials_score, socials_last_checked, sol_price_usd, FALSE AS is_active, last_trade, backup_reason, timestamp -- Treat backed up as inactive
-FROM tokens_backup tb
-WHERE NOT EXISTS (SELECT 1 FROM tokens t WHERE t.mint = tb.mint);
-
--- View for combined trades and trades_backup
-CREATE OR REPLACE VIEW v_trades AS
-SELECT
-    signature, mint, tx_type, token_amount, sol_amount, price, bondingCurveKey,
-    vTokensInBondingCurve, vSolInBondingCurve, marketCapSol, sol_price_usd, market_cap_calculated, timestamp
-FROM trades
-UNION ALL
-SELECT
-    signature, mint, tx_type, token_amount, sol_amount, price, bondingCurveKey,
-    vTokensInBondingCurve, vSolInBondingCurve, marketCapSol, sol_price_usd, market_cap_calculated, timestamp
-FROM trades_backup;
-
--- View for combined rugcheck and rugcheck_backup
--- Note: Getting the *latest* score per mint will be handled in the query using this view.
-CREATE OR REPLACE VIEW v_rugcheck AS
-SELECT mint, score, token_supply, last_checked FROM rugcheck
-UNION ALL
-SELECT mint, score, token_supply, last_checked FROM rugcheck_backup;
-```
-
----
-
-### 📄 10_create_bot_heartbeat.sql
-
-```sql
--- sql/10_create_bot_heartbeat.sql
-CREATE TABLE IF NOT EXISTS bot_heartbeat (
-    id SERIAL PRIMARY KEY,
-    timestamp TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-    event_type TEXT DEFAULT 'heartbeat', -- e.g., 'heartbeat', 'config_update', 'shutdown_signal'
-    details JSONB -- Optional: for storing details about the event, like which config was updated
-);
-
-CREATE INDEX IF NOT EXISTS idx_bot_heartbeat_timestamp ON bot_heartbeat(timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_bot_heartbeat_event_type ON bot_heartbeat(event_type);
 ```
 
 ---

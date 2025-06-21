@@ -25,6 +25,7 @@ from rugcheck_handler import Rugcheck
 from socials_processor import SocialsProcessor
 from utils import calculate_volatility # Assuming this is your utility
 from transaction_enricher import transaction_enricher_worker
+from dexscreener_api import DexscreenerFetcher
 
 from telegram_interface import send_telegram_message
 
@@ -84,6 +85,7 @@ class TradingBot:
         self.trading_manager = None
         self._last_dynamic_config_mtime = 0
         self.bot_start_time = datetime.now(timezone.utc) # For uptime calculation
+        self.dexscreener_fetcher = None
 
         # Ensure data directory exists
         os.makedirs(DATA_DIR_BOT, exist_ok=True)
@@ -1085,6 +1087,7 @@ class TradingBot:
         socials_proc = SocialsProcessor(state=self.state, db_client=self.db_client, config_dict=self.config)
         rugchecker = Rugcheck(state=self.state, db_client=self.db_client, websocket_handler=self.ws_handler, socials_processor=socials_proc, config_dict=self.config)
         self.trading_manager = TradingManager(db_client=self.db_client, config_dict=self.config, state=self.state)
+        self.dexscreener_fetcher = DexscreenerFetcher(state=self.state, db_client=self.db_client)
 
 
         # --- Start Background Tasks ---
@@ -1095,6 +1098,7 @@ class TradingBot:
             asyncio.create_task(self.monitor_tasks(), name="task_monitor"),
             asyncio.create_task(update_sol_price(self.state, self.db_client), name="sol_price_updater"),
             asyncio.create_task(trade_worker(), name="trade_worker"),
+            asyncio.create_task(self.dexscreener_fetcher.run(), name="dexscreener_fetcher"),
             #asyncio.create_task(transaction_enricher_worker(self.state, self.db_client), name="transaction_enricher"), #
             rugchecker.start(), # Ensure this returns a task
             socials_proc.start(), # Ensure this returns a task

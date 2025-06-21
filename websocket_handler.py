@@ -66,6 +66,7 @@ class WebSocketHandler:
 
                 # --- Subscription Phase ---
                 await self.subscribe_new_token_stream()
+                await self.subscribe_to_migrations()
                 await self.resume_subscriptions()
 
                 # --- Task Running Phase ---
@@ -142,7 +143,22 @@ class WebSocketHandler:
                         logger.debug(f"✅ Subscribed to {data['mint']} --> {active_subs_count} active subscriptions")
 
                     elif data.get("txType") == "migrate":
-                        await self.db_client.insert_migration(data)
+                        mint_to_flag = data.get('mint')
+                        if not mint_to_flag:
+                            logger.warning("Migration event received with no mint address. Discarding.")
+                            continue
+
+                        # Check if the token is one we are actively tracking
+                        is_tracked = await self.db_client.is_token_active_in_db(mint_to_flag)
+
+                        if is_tracked:
+                            logger.info(f"✅ Migration event for tracked token {mint_to_flag}. Processing...")
+                            # Set the data_source to 'DEXSCREENER' to switch to API polling
+                            await self.db_client.mark_token_as_migrated(mint_to_flag)
+                            # Store the migration event for historical reference
+                            await self.db_client.insert_migration(data)
+                        else:
+                            logger.debug(f"ℹ️ Migration event for untracked or backed-up token {mint_to_flag}. Ignoring.")
                     elif data.get("txType") in ["buy", "sell"]:
                         await self.trade_queue.put(data)
                     else:
@@ -220,6 +236,22 @@ class WebSocketHandler:
             await self.state.set_new_token_subscription(True)
         else:
             logger.error("Cannot subscribe to new tokens: WebSocket not connected.")
+        
+    async def subscribe_to_migrations(self):
+        """Sends a request to subscribe to the migration event stream."""
+        if self.websocket and self.websocket.open:
+            logger.info("Subscribing to migration event stream...")
+            try:
+                payload = {
+                    "method": "subscribeMigration",
+                }
+                await self.websocket.send(json.dumps(payload))
+                logger.debug("Successfully sent migration subscription request.")
+            except Exception as e:
+                logger.error(f"Failed to send migration subscription request: {e}", exc_info=True)
+        else:
+            logger.error("Cannot subscribe to migrations: WebSocket not connected.")
+
 
     async def resume_subscriptions(self):
         """Resubscribes to all active tokens from the database."""

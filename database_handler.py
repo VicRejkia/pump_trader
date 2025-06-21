@@ -392,26 +392,16 @@ class DatabaseClient:
         """
         
         query = """
-            WITH LatestTradeData AS (
+            WITH LatestTickData AS (
                 SELECT
-                    mint,
-                    price,
-                    marketCapSol,
-                    vTokensInBondingCurve,
-                    vSolInBondingCurve,
-                    timestamp,
+                    mint, price_sol, market_cap_sol, timestamp,
                     ROW_NUMBER() OVER (PARTITION BY mint ORDER BY timestamp DESC) AS rn
-                FROM v_trades -- Changed to v_trades
-                WHERE timestamp >= NOW() - ($6::text || ' minutes')::interval -- Ensure $6 is text for concatenation
+                FROM v_unified_market_ticks_live -- CORRECT: Uses LIVE view for speed
+                WHERE timestamp >= NOW() - ($6::text || ' minutes')::interval
             ),
-            RecentTrades AS (
-                SELECT
-                    mint,
-                    SUM(CASE WHEN tx_type = 'buy' THEN sol_amount ELSE 0 END) AS total_buys_recent,
-                    SUM(CASE WHEN tx_type = 'sell' THEN sol_amount ELSE 0 END) AS total_sells_recent,
-                    SUM(sol_amount) AS volume_recent,
-                    COUNT(*) as trade_count
-                FROM v_trades -- Changed to v_trades
+            RecentMetrics AS (
+                SELECT mint, SUM(sol_amount) AS volume_recent_sol
+                FROM v_unified_market_ticks_live -- CORRECT: Uses LIVE view for speed
                 WHERE timestamp >= NOW() - ($6::text || ' minutes')::interval
                 GROUP BY mint
             ),
@@ -422,67 +412,52 @@ class DatabaseClient:
                 FROM (
                     SELECT
                         mint,
-                        price,
-                        LAG(price) OVER (PARTITION BY mint ORDER BY timestamp) AS prev_price,
-                        CASE
-                            WHEN price > 0 AND LAG(price) OVER (PARTITION BY mint ORDER BY timestamp) > 0
-                            THEN LN(price / LAG(price) OVER (PARTITION BY mint ORDER BY timestamp))
-                            ELSE NULL
-                        END AS log_return
-                    FROM v_trades -- Changed to v_trades
+                        LN(price_sol / LAG(price_sol) OVER (PARTITION BY mint ORDER BY timestamp)) AS log_return
+                    FROM v_unified_market_ticks_live
                     WHERE timestamp >= NOW() - ($6::text || ' minutes')::interval
+                      AND price_sol > 0
                 ) sub
                 WHERE log_return IS NOT NULL
+                    AND log_return > '-Infinity'::double precision
+                    AND log_return < 'Infinity'::double precision
                 GROUP BY mint
-                HAVING COUNT(*) > 5 -- Original condition was COUNT(*)>5
+                HAVING COUNT(*) > 5
             )
             SELECT
-                t.mint,
-                t.marketCapSol AS initial_market_cap_sol, -- from tokens table
-                t.vTokensInBondingCurve AS initial_v_tokens, -- from tokens table
-                t.vSolInBondingCurve AS initial_v_sol, -- from tokens table
-                COALESCE(ltd.marketCapSol, t.marketCapSol) AS latest_market_cap_sol,
-                COALESCE(ltd.vTokensInBondingCurve, t.vTokensInBondingCurve) AS latest_v_tokens,
-                COALESCE(ltd.vSolInBondingCurve, t.vSolInBondingCurve) AS latest_v_sol,
-                COALESCE(ltd.price, 0) AS latest_price,
-                COALESCE(rt.volume_recent, 0) AS volume_in_interval,
+                t.mint, ltd.price_sol AS latest_price, ltd.market_cap_sol AS latest_market_cap_sol,
+                COALESCE(rm.volume_recent_sol, 0) AS volume_in_interval,
                 COALESCE(vd.volatility, 0) AS volatility_in_interval,
-                rc.tokenMeta_name AS name,       -- from rugcheck table
-                rc.tokenMeta_symbol AS symbol,   -- from rugcheck table
-                rc.score AS rugcheck_score,
-                t.socials_score
+                rc.tokenMeta_name AS name, rc.tokenMeta_symbol AS symbol,
+                rc.score AS rugcheck_score, t.socials_score
             FROM tokens AS t
-            INNER JOIN rugcheck AS rc ON t.mint = rc.mint -- Changed alias from r to rc for clarity
-            INNER JOIN LatestTradeData AS ltd ON t.mint = ltd.mint AND ltd.rn = 1 -- Ensure join is on INNER
-            LEFT JOIN RecentTrades AS rt ON t.mint = rt.mint
+            INNER JOIN rugcheck AS rc ON t.mint = rc.mint
+            INNER JOIN LatestTickData AS ltd ON t.mint = ltd.mint AND ltd.rn = 1
+            LEFT JOIN RecentMetrics AS rm ON t.mint = rm.mint
             LEFT JOIN VolatilityData AS vd ON t.mint = vd.mint
             WHERE
                 t.is_active = TRUE AND
-                rc.score IS NOT NULL AND
-                t.socials_score IS NOT NULL AND
-                rc.score < $4 AND
-                t.socials_score < $5 AND
-                (COALESCE(rt.volume_recent, 0) * $1) >= $2 AND
-                (COALESCE(ltd.marketCapSol, t.marketCapSol, 0) * $1) >= $3 AND -- Use latest_market_cap_sol
+                rc.score IS NOT NULL AND rc.score < $4 AND
+                t.socials_score IS NOT NULL AND t.socials_score < $5 AND
+                (COALESCE(rm.volume_recent_sol, 0) * $1) >= $2 AND
+                (ltd.market_cap_sol * $1) >= $3 AND
                 COALESCE(vd.volatility, 0) >= $7 AND
                 t.mint NOT IN (SELECT mint FROM portfolio WHERE status = 'active') AND
                 (t.cooldown_until IS NULL OR t.cooldown_until < NOW())
-            ORDER BY rt.volume_recent DESC;
-        """ #
-        async with self.pool.acquire() as conn: #
+            ORDER BY rm.volume_recent_sol DESC;
+        """
+        async with self.pool.acquire() as conn:
             try:
-                # Ensure time_interval_minutes is passed as string to query
-                return await conn.fetch(query, sol_price, volume_threshold, marketcap_threshold, rugcheck_threshold, social_score_threshold, str(time_interval_minutes), min_volatility) #
+                return await conn.fetch(query, sol_price, volume_threshold, marketcap_threshold, rugcheck_threshold, social_score_threshold, str(time_interval_minutes), min_volatility)
             except Exception as e:
-                logger.error(f"Error finding trading opportunities: {e}", exc_info=True) #
-                return [] #
+                logger.error(f"Error finding trading opportunities: {e}", exc_info=True)
+                return []
 
     async def get_active_buy_positions(self, conn=None):
         """Fetches active buy positions from the portfolio."""
         query = '''
             SELECT p.id, p.mint, p.price AS buy_price, p.initial_tokens, p.remaining_tokens, p.total_investment_sol,
                 p.stop_loss_price, p.highest_price, p.initial_tp_price, p.second_tp_price, p.first_tp_hit,
-                t.marketCapSol as initial_market_cap_sol
+                t.marketCapSol as initial_market_cap_sol, t.data_source
             FROM portfolio p
             JOIN tokens t ON p.mint = t.mint
             WHERE p.status = 'active' AND p.tx_type = 'buy'
@@ -661,8 +636,8 @@ class DatabaseClient:
         # from logger import logger # Uncomment if logger is needed and not globally accessible
         # Use the v_trades view which combines trades and trades_backup
         query = """
-            SELECT mint, price, timestamp
-            FROM v_trades -- Use the view
+            SELECT mint, price_sol as price, timestamp
+            FROM v_unified_market_ticks_historical -- CORRECT: Uses HISTORICAL view
             WHERE mint = ANY($1::text[])
             ORDER BY mint, timestamp;
         """
@@ -898,11 +873,16 @@ class DatabaseClient:
                             INSERT INTO migrations_backup SELECT *, NOW() FROM migrations WHERE mint = $1
                             ON CONFLICT (signature) DO NOTHING -- Conflict check on signature
                         ''', mint)
+
+                        await conn.execute('''
+                            INSERT INTO dexscreener_data_backup SELECT *, NOW() FROM dexscreener_data WHERE mint_address = $1
+                        ''', mint)
  
                         await conn.execute("DELETE FROM tokens WHERE mint = $1", mint)
                         await conn.execute("DELETE FROM trades WHERE mint = $1", mint)
                         await conn.execute("DELETE FROM rugcheck WHERE mint = $1", mint)
                         await conn.execute("DELETE FROM migrations WHERE mint = $1", mint)
+                        await conn.execute("DELETE FROM dexscreener_data WHERE mint_address = $1", mint)
  
                         logger.debug(f"🧹 Backup & deletion completed for {mint}")
  
@@ -1051,12 +1031,12 @@ class DatabaseClient:
         window_type = config_params.get("PRICE_WINDOW_TYPE", "time")
         
         # Common base of the query selecting necessary columns and initial filters
-        query_select_cols = "SELECT timestamp, sol_amount, token_amount"
+        query_select_cols = "SELECT timestamp, sol_amount, token_amount, price_sol"
         query_from_where = """
-            FROM v_trades -- Use v_trades to include backup
+            FROM v_unified_market_ticks_live -- <<< CHANGE TO LIVE VIEW
             WHERE mint = $1
-            AND token_amount IS NOT NULL AND token_amount > 0 
-            AND sol_amount IS NOT NULL AND sol_amount > 0
+            AND sol_amount IS NOT NULL AND sol_amount > 0 
+            AND token_amount IS NOT NULL AND token_amount > 0
         """
         params = [mint]
         final_query: str
@@ -1096,11 +1076,11 @@ class DatabaseClient:
         """
         window_type = config_params.get("PRICE_WINDOW_TYPE", "time")
         
-        query_select_cols = """SELECT timestamp, marketCapSol """ # Use quotes for marketCapSol if needed
+        query_select_cols = "SELECT timestamp, market_cap_sol"
         query_from_where = """
-            FROM v_trades -- Use v_trades
+            FROM v_unified_market_ticks_live -- <<< CHANGE TO LIVE VIEW
             WHERE mint = $1
-            AND marketCapSol IS NOT NULL AND marketCapSol > 0
+            AND market_cap_sol IS NOT NULL AND market_cap_sol > 0
         """
         params = [mint]
         final_query: str
@@ -1112,7 +1092,7 @@ class DatabaseClient:
         elif window_type == "count":
             trade_count = config_params.get("PRICE_AVG_TRADE_COUNT", 20)
             final_query = f"""
-                SELECT timestamp, marketCapSol
+                SELECT *
                 FROM (
                     {query_select_cols}
                     {query_from_where}
@@ -1260,7 +1240,7 @@ class DatabaseClient:
             logger.debug(f"No market cap records found for {mint}. Cannot calculate median market cap.")
             return None
 
-        market_caps = [float(r['marketcapsol']) for r in trade_records_for_mc if r.get('marketcapsol') is not None] #
+        market_caps = [float(r['market_cap_sol']) for r in trade_records_for_mc if r.get('market_cap_sol') is not None] #
         if not market_caps:
             logger.debug(f"No valid market caps found for {mint}. Cannot calculate median market cap.")
             return None #
@@ -1277,9 +1257,8 @@ class DatabaseClient:
         """
         Centralized function to get the decision price and market cap for a token,
         based on configured strategies (PRICE_SOURCE_METHOD, PRICE_WINDOW_TYPE, etc.).
+        This function now uses the unified LIVE view for all its data.
         """
-        # Use self.config which should be the bot's current active config (potentially updated dynamically)
-        # config_from_caller is passed for context but primary config source is self.config
         active_config = self.config 
 
         decision_price: Optional[float] = None
@@ -1288,10 +1267,10 @@ class DatabaseClient:
         raw_latest_price_from_tick: Optional[float] = None
         raw_latest_mc_from_tick: Optional[float] = None
 
-        # 1. Fetch the absolute latest trade for raw values (used for LATEST method and ultimate fallback)
+        # 1. Fetch the absolute latest tick for raw values (from the LIVE view)
         latest_trade_query = """
-            SELECT price, marketCapSol
-            FROM v_trades -- Use v_trades to include backup
+            SELECT price_sol, market_cap_sol
+            FROM v_unified_market_ticks_live
             WHERE mint = $1
             ORDER BY timestamp DESC
             LIMIT 1;
@@ -1299,30 +1278,31 @@ class DatabaseClient:
         latest_trade_record = await conn.fetchrow(latest_trade_query, mint)
 
         if latest_trade_record:
-            if latest_trade_record['price'] is not None:
-                price_val = float(latest_trade_record['price'])
+            # --- THIS IS THE FIX ---
+            if latest_trade_record['price_sol'] is not None:
+                price_val = float(latest_trade_record['price_sol'])
                 raw_latest_price_from_tick = price_val if price_val > 0 else None
-            if latest_trade_record['marketcapsol'] is not None:
-                mc_val = float(latest_trade_record['marketcapsol'])
+            if latest_trade_record['market_cap_sol'] is not None:
+                mc_val = float(latest_trade_record['market_cap_sol'])
                 raw_latest_mc_from_tick = mc_val if mc_val > 0 else None
+            # --- END OF FIX ---
         
         if raw_latest_price_from_tick is None and raw_latest_mc_from_tick is None:
             logger.warning(f"No valid latest trade data found for {mint}. Cannot determine price or MC.")
             return {'price': None, 'market_cap': None}
 
         # 2. Determine window parameters from active_config
-        # These will be passed to helper functions.
         window_params = {
             "PRICE_WINDOW_TYPE": active_config.get("PRICE_WINDOW_TYPE", "time"),
-            "PRICE_AVG_WINDOW_MINUTES": active_config.get("PRICE_AVG_WINDOW_MINUTES", 1.0), # Default if missing
-            "PRICE_AVG_TRADE_COUNT": active_config.get("PRICE_AVG_TRADE_COUNT", 20)    # Default if missing
+            "PRICE_AVG_WINDOW_MINUTES": active_config.get("PRICE_AVG_WINDOW_MINUTES", 1.0),
+            "PRICE_AVG_TRADE_COUNT": active_config.get("PRICE_AVG_TRADE_COUNT", 20)
         }
 
         price_source_method = active_config.get("PRICE_SOURCE_METHOD", "direct_price")
-        agg_method = active_config.get("PRICE_DETERMINATION_METHOD", "MEDIAN") # For price or MC aggregation
+        agg_method = active_config.get("PRICE_DETERMINATION_METHOD", "MEDIAN")
 
-        # 3. Fetch token supply and decimals (needed for conversions regardless of source method)
-        token_info = await self._get_latest_token_info(mint, conn) # Safely returns defaults if not found
+        # 3. Fetch token supply and decimals
+        token_info = await self._get_latest_token_info(mint, conn)
         raw_supply = token_info['token_supply']
         decimals = token_info['token_decimals']
         
@@ -1334,100 +1314,64 @@ class DatabaseClient:
             except Exception as e_supply:
                 logger.error(f"Error calculating total_supply_whole_tokens for {mint}: {e_supply}")
                 total_supply_whole_tokens = None
-
-        # logger.debug(f"Token {mint} - Raw Supply: {raw_supply}, Decimals: {decimals}, Total Supply (whole tokens): {total_supply_whole_tokens}")
         
         # --- Main Calculation Paths ---
         primary_calculation_done = False
 
         if price_source_method == "market_cap":
             logger.debug(f"Using 'market_cap' source method for {mint}. Aggregation: {agg_method}.")
-            # Calculate robust market_cap first
-            if agg_method == "MEDIAN":
-                robust_mc = await self._calculate_median_marketcap_with_iqr(mint, window_params, conn)
-            # elif agg_method == "VWAP": # Placeholder for _calculate_vwap_marketcap_with_iqr
-            #     # robust_mc = await self._calculate_vwap_marketcap_with_iqr(mint, window_params, conn)
-            #     logger.warning("VWAP for market_cap not yet implemented, using LATEST MC as part of MC source path.")
-            #     robust_mc = raw_latest_mc_from_tick # Fallback if VWAP of MC isn't ready
-            # elif agg_method == "TWAP": # Placeholder
-            #     logger.warning("TWAP for market_cap not yet implemented, using LATEST MC as part of MC source path.")
-            #     robust_mc = raw_latest_mc_from_tick
-            elif agg_method == "LATEST":
-                 robust_mc = raw_latest_mc_from_tick
-            else:
-                logger.warning(f"Unknown PRICE_DETERMINATION_METHOD '{agg_method}' for market_cap source. Using LATEST MC.")
-                robust_mc = raw_latest_mc_from_tick
+            robust_mc = await self._calculate_median_marketcap_with_iqr(mint, window_params, conn) if agg_method == "MEDIAN" else raw_latest_mc_from_tick
 
             if robust_mc is not None and robust_mc > 0:
                 decision_market_cap = robust_mc
                 if total_supply_whole_tokens is not None:
                     decision_price = decision_market_cap / total_supply_whole_tokens
-                    if decision_price <= 0: decision_price = None # Invalidate non-positive price
-                else:
-                    logger.warning(f"Cannot derive price from robust MC for {mint} due to invalid total_supply_whole_tokens.")
+                    if decision_price <= 0: decision_price = None
                 primary_calculation_done = True if decision_price is not None else False
             else:
                 logger.warning(f"Robust MC calculation for {mint} (method: {agg_method}) yielded invalid result: {robust_mc}.")
 
-        # Fallback to "direct_price" if "market_cap" method failed or is not selected
-        if not primary_calculation_done: # This implies price_source_method was "direct_price" OR "market_cap" path failed
-            if price_source_method != "direct_price": # Log if we are falling back from "market_cap" method
-                logger.warning(f"Primary method 'market_cap' failed for {mint}. Falling back to 'direct_price' method with agg: {agg_method}.")
+        if not primary_calculation_done:
+            if price_source_method != "direct_price":
+                logger.warning(f"Primary method 'market_cap' failed for {mint}. Falling back to 'direct_price' method.")
+            
             logger.debug(f"Using 'direct_price' source method for {mint}. Aggregation: {agg_method}.")
-
-            # Calculate robust price directly
             calculated_direct_price: Optional[float] = None
             if agg_method == "MEDIAN":
                 calculated_direct_price = await self._calculate_median_price_with_iqr(mint, window_params, conn)
             elif agg_method == "VWAP":
                 calculated_direct_price = await self._calculate_vwap_price_with_iqr(mint, window_params, conn)
             elif agg_method == "TWAP":
-                interval_seconds = active_config.get("TWAP_SUB_INTERVAL_SECONDS", 60) # Default if missing
+                interval_seconds = active_config.get("TWAP_SUB_INTERVAL_SECONDS", 60)
                 calculated_direct_price = await self._calculate_twap_price_with_iqr(mint, window_params, interval_seconds, conn)
-            elif agg_method == "LATEST":
-                calculated_direct_price = raw_latest_price_from_tick
-            else:
-                logger.warning(f"Unknown PRICE_DETERMINATION_METHOD: {agg_method} for direct_price. Using LATEST raw price.")
+            else: # LATEST or fallback
                 calculated_direct_price = raw_latest_price_from_tick
             
             if calculated_direct_price is not None and calculated_direct_price > 0:
                 decision_price = calculated_direct_price
-                # Derive MC from this price for alignment
                 if total_supply_whole_tokens is not None:
                     decision_market_cap = decision_price * total_supply_whole_tokens
-                    if decision_market_cap <=0: decision_market_cap = None # Invalidate
+                    if decision_market_cap <= 0: decision_market_cap = None
                 else:
-                    logger.warning(f"Cannot derive market cap from direct price for {mint} due to invalid total_supply_whole_tokens. Using raw latest MC if available.")
-                    decision_market_cap = raw_latest_mc_from_tick # Fallback to latest tick MC
+                    decision_market_cap = raw_latest_mc_from_tick
             else:
-                logger.warning(f"Direct price calculation for {mint} (method: {agg_method}) yielded invalid result: {calculated_direct_price}.")
+                 logger.warning(f"Direct price calculation for {mint} (method: {agg_method}) yielded invalid result.")
 
-
-        # --- Final Fallback to Raw Latest Tick if all methods failed ---
         if decision_price is None:
             logger.warning(f"All price determination methods failed for {mint}. Using raw latest tick as last resort.")
             decision_price = raw_latest_price_from_tick
-            decision_market_cap = raw_latest_mc_from_tick # MC should correspond to this price source
+            decision_market_cap = raw_latest_mc_from_tick
 
-        # Final safety: if price is None, MC must be None (or vice-versa if MC was primary and price derivation failed)
         if decision_price is None or decision_price <= 0:
-            decision_price = None
-            decision_market_cap = None # Can't have MC without price
-        elif decision_market_cap is None or decision_market_cap <= 0: # If MC somehow became None but price is valid
-            if total_supply_whole_tokens is not None and decision_price is not None: # Try to recalculate MC
+            decision_price = None; decision_market_cap = None
+        elif decision_market_cap is None or decision_market_cap <= 0:
+            if total_supply_whole_tokens is not None and decision_price is not None:
                  decision_market_cap = decision_price * total_supply_whole_tokens
                  if decision_market_cap <= 0: decision_market_cap = None
-            else: # If cannot recalculate consistent MC, nullify price too for safety
-                 decision_market_cap = None
-                 decision_price = None
+            else:
+                 decision_market_cap = None; decision_price = None
 
-
-        logger.debug(
-            f"Price decision for {mint}: SourceMethod='{price_source_method}', AggMethod='{agg_method}', "
-            f"WindowType='{window_params['PRICE_WINDOW_TYPE']}', "
-            f"DecidedPrice={decision_price}, DecidedMC={decision_market_cap}, "
-            f"RawLatestTickPrice={raw_latest_price_from_tick}, RawLatestTickMC={raw_latest_mc_from_tick}"
-        )
+        logger.debug(f"Price decision for {mint}: Price={decision_price}, MC={decision_market_cap}")
         return {'price': decision_price, 'market_cap': decision_market_cap}
 
 
@@ -1677,6 +1621,31 @@ class DatabaseClient:
         except Exception as e:
             logger.error(f"Failed to set cooldown for token {mint}: {e}", exc_info=True)
 
+    async def is_token_active_in_db(self, mint: str, conn=None) -> bool:
+        """
+        Checks if a token exists in the primary 'tokens' table (i.e., it has not been backed up).
+        Returns True if the token exists, False otherwise.
+        """
+        query = "SELECT 1 FROM tokens WHERE mint = $1"
+        connection = conn or await self.pool.acquire()
+        try:
+            result = await connection.fetchval(query, mint)
+            return result is not None
+        finally:
+            if not conn and connection:
+                await self.pool.release(connection)
+
+    async def mark_token_as_migrated(self, mint: str, conn=None):
+        """Updates the data_source for a token to 'DEXSCREENER'."""
+        logger.info(f"🚩 Flagging token {mint} as migrated. Switching data source to DEXScreener.")
+        query = "UPDATE tokens SET data_source = 'DEXSCREENER' WHERE mint = $1"
+        connection = conn or await self.pool.acquire()
+        try:
+            await connection.execute(query, mint)
+        finally:
+            if not conn and connection:
+                await self.pool.release(connection)
+
     async def cleanup_db(self, cleanup_flag: bool):
         """Drop all application tables if cleanup_flag is True."""
         if cleanup_flag:
@@ -1858,13 +1827,16 @@ class DatabaseClient:
 
             trade_query = """
                 SELECT
-                    mint, timestamp, price, (sol_amount*sol_price_usd) AS volume,
-                    market_cap_calculated,
-                    marketCapSol AS live_market_cap_sol
-                FROM v_trades
+                    mint,
+                    timestamp,
+                    price_sol AS price,
+                    market_cap_usd AS volume,
+                    market_cap_usd AS market_cap_calculated,
+                    market_cap_sol AS live_market_cap_sol
+                FROM v_unified_market_ticks_historical -- CORRECT: Uses HISTORICAL view
                 WHERE mint = ANY($1::text[])
                 AND timestamp >= $2 AND timestamp < $3
-                AND price > 0 AND sol_amount IS NOT NULL AND price IS NOT NULL
+                AND price_sol > 0
                 ORDER BY mint, timestamp;
             """
 
