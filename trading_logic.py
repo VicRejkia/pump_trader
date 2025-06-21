@@ -394,6 +394,7 @@ class TradingManager:
                 return None
 
             if trading_mode == "simulate":
+                # --- This block remains unchanged ---
                 logger.info(f"[SIMULATE MODE] Executing simulated sell for {tokens_to_sell_on_trigger:.4f} of {mint} at {trigger_price:.9f} (Reason: {reason})")
                 
                 sim_gross_sol_received = tokens_to_sell_on_trigger * trigger_price
@@ -446,12 +447,28 @@ class TradingManager:
                 return sim_profit
 
             elif trading_mode in ["paper_trading", "live"]:
+                # --- START OF MODIFICATION ---
+                api_pool = self.config.get('DEFAULT_SELL_POOL', "auto") # Default value
+                
+                # Check if the token is migrated
+                token_record = await conn.fetchrow("SELECT data_source FROM tokens WHERE mint = $1", mint)
+                if token_record and token_record['data_source'] == 'DEXSCREENER':
+                    logger.debug(f"Token {mint} is migrated. Attempting to find primary DEX ID for selling.")
+                    # Fetch the specific dexId for the migrated token
+                    dex_id = await self.db.get_primary_dex_id_for_migrated_token(mint, conn)
+                    if dex_id:
+                        api_pool = dex_id
+                        logger.info(f"Using dynamically determined pool '{api_pool}' for migrated token {mint}.")
+                    else:
+                        logger.warning(f"Could not determine specific DEX ID for migrated token {mint}. Falling back to default pool '{api_pool}'.")
+                
                 api_amount_tokens_str = f"{tokens_to_sell_on_trigger:.9f}" 
                 api_priority_fee = float(self.config['DEFAULT_SELL_TIP']) 
                 api_slippage = int(self.config.get('DEFAULT_SLIPPAGE_PERCENT', 25))
-                api_pool = self.config.get('DEFAULT_SELL_POOL', "auto") 
+                # The `api_pool` variable is now dynamic
+                # --- END OF MODIFICATION ---
 
-                logger.info(f"[{trading_mode.upper()} MODE] Initiating sell of {api_amount_tokens_str} {mint} (Reason: {reason}, Priority: {api_priority_fee} SOL) via PumpPortal API.")
+                logger.info(f"[{trading_mode.upper()} MODE] Initiating sell of {api_amount_tokens_str} {mint} on pool '{api_pool}' (Reason: {reason}, Priority: {api_priority_fee} SOL)")
 
                 trade_result = await execute_live_pumpportal_trade(
                     trigger_price=trigger_price, action="sell", mint_address=mint,
@@ -481,13 +498,14 @@ class TradingManager:
                             
                             live_sell_settings = {
                                 "mode": trading_mode, "signature": signature, "reason": reason,
+                                "api_pool_used": api_pool, # Store the pool that was used
                                 "api_executed_price": executed_price_live, "api_sol_received": sol_received_from_api,
                                 "api_priority_fee_sent": api_priority_fee, "api_slippage_sent": api_slippage,
                                 **sell_trigger_values,
                                 "sell_percentage_of_initial_request": sell_percentage * 100 if reason == "🥇 First TP" else (sell_percentage * 100.0 if reason in ["🛑 Stop Loss", "🛡️ Breakeven SL", "🎯 Second TP", "↘️ Trailing SL", "🆘 Emergency SL (MCap)", "manual_override"] else 0.0),
                                 "actual_tokens_sold_as_fraction_of_remaining_at_sell_time": (tokens_to_sell_on_trigger / remaining_tokens_portfolio) if remaining_tokens_portfolio > 0 else 0,
-                                "sell_fee_config": self.config['DEFAULT_SELL_FEE'], # For reference
-                                "sell_tip_config": self.config['DEFAULT_SELL_TIP'], # For reference
+                                "sell_fee_config": self.config['DEFAULT_SELL_FEE'],
+                                "sell_tip_config": self.config['DEFAULT_SELL_TIP'],
                                 "price_determination_method_used": self.config.get('PRICE_DETERMINATION_METHOD'),
                                 "trigger_price_at_sell": trigger_price
                             }
@@ -532,7 +550,7 @@ class TradingManager:
         except Exception as e:
             logger.error(f"❌ [{trading_mode.upper()}] Overall error in execute_sell for {mint} (PosID: {position_id_to_update}, Reason: {reason}): {e}", exc_info=True)
             if trading_mode == "simulate": raise 
-            return None 
+            return None
 
     async def check_sell_opportunities(self):
         """

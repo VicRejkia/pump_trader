@@ -1,7 +1,7 @@
 import asyncio
 import httpx
 import json
-import math
+import time
 from datetime import datetime, timezone
 from aiolimiter import AsyncLimiter
 
@@ -11,11 +11,18 @@ from state_manager import GlobalState
 from database_handler import DatabaseClient
 
 # --- API Configuration and Rate Limit Management ---
-DEXSCREENER_API_BASE_URL = "https://api.dexscreener.com/tokens/v1/solana"
+DEXSCREENER_API_BASE_URL = "https://api.dexscreener.com/token-pairs/v1/solana"
 TARGET_RPM = 280
-ADDRESS_BATCH_SIZE = 30
-DEFAULT_WORKER_INTERVAL_SECONDS = 60
-RATE_LIMIT_SAFETY_FACTOR = 1.1 
+RATE_LIMIT_SAFETY_FACTOR = 1.1
+
+# --- Cooldown Logic Constants ---
+CONSECUTIVE_429_THRESHOLD = 5
+COOLDOWN_MINUTES = 3
+
+# --- START OF CHANGE ---
+# The minimum time to wait between the end of one polling cycle and the start of the next.
+MIN_CYCLE_WAIT_SECONDS = 5.0
+# --- END OF CHANGE ---
 
 class DexscreenerFetcher:
     def __init__(self, state: GlobalState, db_client: DatabaseClient):
@@ -24,42 +31,65 @@ class DexscreenerFetcher:
         self.limiter = AsyncLimiter(TARGET_RPM, 60)
         self.client = httpx.AsyncClient(timeout=20.0)
 
+        self._consecutive_429_errors = 0
+        self._cooldown_until_timestamp = 0
+
     async def _get_migrated_tokens(self) -> list[str]:
         query = "SELECT mint FROM tokens WHERE data_source = 'DEXSCREENER' AND is_active = TRUE"
         async with self.db.pool.acquire() as conn:
             rows = await conn.fetch(query)
             return [row['mint'] for row in rows]
 
-    async def _fetch_data_for_batch(self, token_batch: list[str]) -> list:
-        if not token_batch:
-            return []
-        token_addresses = ",".join(token_batch)
-        url = f"{DEXSCREENER_API_BASE_URL}/{token_addresses}"
+    async def _fetch_data_for_token(self, token_address: str) -> list | None:
+        if not token_address:
+            return None
+        
+        url = f"{DEXSCREENER_API_BASE_URL}/{token_address}"
         
         try:
             async with self.limiter:
-                #logger.debug(f"Requesting DEX Screener URL: {url}")
                 response = await self.client.get(url)
+            
+            if response.status_code == 429:
+                logger.warning(f"DEXScreener API returned HTTP 429 (Rate Limited) for {token_address}.")
+                self._consecutive_429_errors += 1
+                return None
+
             response.raise_for_status()
+            
+            self._consecutive_429_errors = 0
+            
             data = response.json()
-            if isinstance(data, list):
-                return data
+            
+            pairs = None
+            if isinstance(data, dict):
+                pairs = data.get("pairs")
+            elif isinstance(data, list):
+                #logger.debug(f"API for {token_address} returned a direct list. Using it as the pairs data.")
+                pairs = data
+
+            if isinstance(pairs, list):
+                return pairs
             else:
-                logger.warning(f"DEX Screener response not in expected format. Response: {str(data)[:500]}")
-                return []
+                logger.warning(f"DEX Screener response for {token_address} not in expected format or no pairs found. Response: {str(data)[:500]}")
+                return None
+                
         except httpx.HTTPStatusError as e:
-            logger.error(f"DEXScreener API HTTP error: {e.response.status_code} - {e.response.text}")
+            logger.error(f"DEXScreener API HTTP error for {token_address}: {e.response.status_code} - {e.response.text}")
         except Exception as e:
-            logger.error(f"DEXScreener API unexpected error: {e}", exc_info=True)
-        return []
+            logger.error(f"DEXScreener API unexpected error for {token_address}: {e}", exc_info=True)
+        
+        return None
 
     def _parse_pair_data(self, pair: dict, sol_price_usd: float) -> tuple | None:
         try:
             base_token = pair.get('baseToken', {})
             mint_address = base_token.get('address')
             if not mint_address: return None
+            
             txns, volume, price_change, liquidity = (pair.get(k, {}) for k in ['txns', 'volume', 'priceChange', 'liquidity'])
             m5, h1, h6, h24 = (txns.get(k, {}) for k in ['m5', 'h1', 'h6', 'h24'])
+            
             return (
                 pair.get('pairAddress'), mint_address, datetime.now(timezone.utc),
                 float(pair.get('priceUsd', 0)), float(pair.get('priceNative', 0)), sol_price_usd,
@@ -89,54 +119,71 @@ class DexscreenerFetcher:
         """
         async with self.db.pool.acquire() as conn:
             await conn.executemany(query, parsed_data)
-        logger.debug(f"Saved {len(parsed_data)} new snapshots from DEX Screener to database.")
+        #logger.debug(f"Saved {len(parsed_data)} new snapshots from DEX Screener to database.")
 
     async def run(self):
-        """The main worker loop with dynamic polling interval."""
-        logger.info("🚀 DEX Screener Fetcher worker started.")
+        """The main worker loop that polls each migrated token individually and handles rate-limiting with a cooldown."""
+        logger.info("🚀 DEX Screener Fetcher worker started (Mode: Continuous Polling with Cooldown).")
+
         while not self.state.shutdown_event.is_set():
-            sleep_interval = DEFAULT_WORKER_INTERVAL_SECONDS
             try:
+                # Cooldown Check
+                if time.time() < self._cooldown_until_timestamp:
+                    cooldown_remaining = self._cooldown_until_timestamp - time.time()
+                    logger.info(f"DEX Screener is in cooldown due to rate-limiting. Resuming in {cooldown_remaining:.0f} seconds.")
+                    await self.state.wait_or_interrupt(timeout=cooldown_remaining)
+                    continue
+
                 migrated_tokens = await self._get_migrated_tokens()
+                
                 if migrated_tokens:
-                    logger.info(f"DEXScreener Fetcher: Found {len(migrated_tokens)} migrated tokens to poll.")
-                    num_batches = math.ceil(len(migrated_tokens) / ADDRESS_BATCH_SIZE)
-                    if num_batches > 0:
-                        cycles_per_minute = math.floor(TARGET_RPM / num_batches)
-                        if cycles_per_minute > 0:
-                            sleep_interval = (60 / cycles_per_minute) * RATE_LIMIT_SAFETY_FACTOR
-                        else:
-                            time_per_batch = 60 / TARGET_RPM
-                            sleep_interval = (time_per_batch * num_batches) * RATE_LIMIT_SAFETY_FACTOR
+                    logger.info(f"DEXScreener Fetcher: Starting new polling cycle for {len(migrated_tokens)} migrated tokens.")
                     
-                    logger.info(f"Dynamic poll interval set to {sleep_interval:.2f} seconds for this cycle.")
                     current_sol_price = await self.state.get_sol_price()
                     if not current_sol_price:
-                        logger.warning("DEXScreener Fetcher: Cannot get SOL price from state. Using 0.0.")
+                        logger.warning("DEXScreener Fetcher: Cannot get SOL price from state. Using 0.0 for this cycle.")
                         current_sol_price = 0.0
 
-                    for i in range(0, len(migrated_tokens), ADDRESS_BATCH_SIZE):
-                        batch = migrated_tokens[i:i + ADDRESS_BATCH_SIZE]
-                        api_pairs_data = await self._fetch_data_for_batch(batch)
-                        if not api_pairs_data: continue
+                    for token_address in migrated_tokens:
+                        if self.state.shutdown_event.is_set():
+                            break
+
+                        # Check for cooldown activation
+                        if self._consecutive_429_errors >= CONSECUTIVE_429_THRESHOLD:
+                            self._cooldown_until_timestamp = time.time() + (COOLDOWN_MINUTES * 60)
+                            logger.error(f"DEXScreener API rate limit threshold reached ({self._consecutive_429_errors} consecutive 429s). Entering cooldown for {COOLDOWN_MINUTES} minutes.")
+                            self._consecutive_429_errors = 0
+                            break
+
+                        all_pairs = await self._fetch_data_for_token(token_address)
                         
-                        pairs_by_token = {}
-                        for pair in api_pairs_data:
-                            mint = pair.get('baseToken', {}).get('address')
-                            if mint:
-                                if mint not in pairs_by_token: pairs_by_token[mint] = []
-                                pairs_by_token[mint].append(pair)
+                        if not all_pairs:
+                            logger.debug(f"No pairs returned from API for {token_address}. Skipping.")
+                            continue
                         
-                        db_records_to_insert = []
-                        for mint, pairs in pairs_by_token.items():
-                            if not pairs: continue
-                            primary_pair = max(pairs, key=lambda p: p.get('liquidity', {}).get('usd', 0))
-                            parsed_record = self._parse_pair_data(primary_pair, current_sol_price)
-                            if parsed_record: db_records_to_insert.append(parsed_record)
+                        valid_pairs_with_liquidity = [p for p in all_pairs if p.get('liquidity', {}).get('usd') is not None]
+
+                        if not valid_pairs_with_liquidity:
+                            logger.warning(f"No pairs with liquidity data found for {token_address} to determine primary pool.")
+                            continue
+
+                        primary_pair = max(valid_pairs_with_liquidity, key=lambda p: p.get('liquidity', {}).get('usd', 0))
                         
-                        await self._insert_data_batch(db_records_to_insert)
+                        logger.debug(f"Selected primary pair {primary_pair.get('pairAddress')} for {token_address} with ${primary_pair.get('liquidity',{}).get('usd',0):,.2f} liquidity.")
+
+                        parsed_record = self._parse_pair_data(primary_pair, current_sol_price)
+                        if parsed_record:
+                             await self._insert_data_batch([parsed_record])
+                else:
+                    logger.debug("DEX Screener: No migrated tokens found to poll in this cycle.")
+
             except Exception as e:
                 logger.error(f"Error in DEX Screener Fetcher worker loop: {e}", exc_info=True)
-            await asyncio.sleep(max(sleep_interval, 2.0))
+            
+            if not (time.time() < self._cooldown_until_timestamp):
+                # --- START OF CHANGE ---
+                logger.debug(f"DEX Screener cycle complete. Waiting {MIN_CYCLE_WAIT_SECONDS}s before starting the next.")
+                await self.state.wait_or_interrupt(timeout=MIN_CYCLE_WAIT_SECONDS)
+                # --- END OF CHANGE ---
             
         logger.info("🛑 DEX Screener Fetcher worker shutting down.")

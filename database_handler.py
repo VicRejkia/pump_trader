@@ -514,6 +514,36 @@ class DatabaseClient:
             if not conn and connection:
                 await self.pool.release(connection)
 
+    async def get_primary_dex_id_for_migrated_token(self, mint: str, conn=None) -> str | None:
+        """
+        Fetches the dexId of the highest-liquidity pair for a migrated token
+        from the most recent dexscreener_data entry.
+        """
+        query = """
+            SELECT full_response
+            FROM dexscreener_data
+            WHERE mint_address = $1
+            ORDER BY timestamp DESC
+            LIMIT 1;
+        """
+        connection = conn or await self.pool.acquire()
+        try:
+            latest_record = await connection.fetchrow(query, mint)
+            if latest_record and latest_record['full_response']:
+                try:
+                    # The full_response is stored as a JSON string, so we load it
+                    pair_data = json.loads(latest_record['full_response'])
+                    dex_id = pair_data.get('dexId')
+                    if dex_id:
+                        logger.debug(f"Found primary dexId '{dex_id}' for migrated token {mint}.")
+                        return dex_id
+                except (json.JSONDecodeError, KeyError) as e:
+                    logger.error(f"Failed to parse dexId from full_response for {mint}: {e}")
+            return None
+        finally:
+            if not conn and connection:
+                await self.pool.release(connection)
+
     async def update_portfolio_highest_price(self, position_id: int, price: float, conn=None):
         """Updates the highest price for a given portfolio position."""
         query = 'UPDATE portfolio SET highest_price = $1 WHERE id = $2'
