@@ -102,11 +102,22 @@ SELECT id, pair_address, mint_address, timestamp, price_usd, price_native, sol_p
 --  PURPOSE: For backtesting, GA/RL training, and full historical analysis.
 -- ===================================================================================
 CREATE OR REPLACE VIEW v_unified_market_ticks_historical AS
-SELECT mint, timestamp, tx_type, token_amount, sol_amount, price AS price_sol, marketCapSol AS market_cap_sol, market_cap_calculated as market_cap_usd, 'PUMP' AS data_source
+SELECT
+    mint, timestamp, tx_type, token_amount, sol_amount,
+    price AS price_sol, marketCapSol AS market_cap_sol, market_cap_calculated as market_cap_usd,
+    (sol_amount * sol_price_usd) AS volume_usd, -- <-- ADDED: Unified USD volume
+    'PUMP' AS data_source
 FROM v_trades -- Querying backup-inclusive view
 WHERE price IS NOT NULL AND price > 0 AND sol_amount > 0 AND token_amount > 0
 UNION ALL
-SELECT mint_address AS mint, timestamp, 'snapshot' AS tx_type, NULL AS token_amount, (market_cap / price_usd) * (price_usd / sol_price_usd) AS sol_amount, (price_usd / sol_price_usd) AS price_sol, (market_cap / sol_price_usd) AS market_cap_sol, market_cap AS market_cap_usd, 'DEXSCREENER' AS data_source
+SELECT
+    mint_address AS mint, timestamp, 'snapshot' AS tx_type, NULL AS token_amount,
+    (volume_m5 / sol_price_usd) AS sol_amount,      -- <-- CORRECTED: This is now SOL volume
+    (price_usd / sol_price_usd) AS price_sol,
+    (market_cap / sol_price_usd) AS market_cap_sol,
+    market_cap AS market_cap_usd,
+    volume_m5 AS volume_usd,                        -- <-- ADDED: Unified USD volume
+    'DEXSCREENER' AS data_source
 FROM v_dexscreener_data; -- Querying backup-inclusive view
 
 -- ===================================================================================
@@ -114,9 +125,20 @@ FROM v_dexscreener_data; -- Querying backup-inclusive view
 --  PURPOSE: For fast, forward-looking queries driving live trade decisions.
 -- ===================================================================================
 CREATE OR REPLACE VIEW v_unified_market_ticks_live AS
-SELECT mint, timestamp, tx_type, token_amount, sol_amount, price AS price_sol, marketCapSol AS market_cap_sol, market_cap_calculated as market_cap_usd, 'PUMP' AS data_source
+SELECT
+    mint, timestamp, tx_type, token_amount, sol_amount,
+    price AS price_sol, marketCapSol AS market_cap_sol, market_cap_calculated as market_cap_usd,
+    (sol_amount * sol_price_usd) AS volume_usd, -- <-- ADDED: Unified USD volume
+    'PUMP' AS data_source
 FROM trades -- Querying LIVE table
 WHERE price IS NOT NULL AND price > 0 AND sol_amount > 0 AND token_amount > 0
 UNION ALL
-SELECT mint_address AS mint, timestamp, 'snapshot' AS tx_type, NULL AS token_amount, (market_cap / price_usd) * (price_usd / sol_price_usd) AS sol_amount, (price_usd / sol_price_usd) AS price_sol, (market_cap / sol_price_usd) AS market_cap_sol, market_cap AS market_cap_usd, 'DEXSCREENER' AS data_source
+SELECT
+    mint_address AS mint, timestamp, 'snapshot' AS tx_type, NULL AS token_amount,
+    (volume_m5 / sol_price_usd) AS sol_amount,      -- <-- CORRECTED: This is now SOL volume
+    (price_usd / sol_price_usd) AS price_sol,
+    (market_cap / sol_price_usd) AS market_cap_sol,
+    market_cap AS market_cap_usd,
+    volume_m5 AS volume_usd,                        -- <-- ADDED: Unified USD volume
+    'DEXSCREENER' AS data_source
 FROM dexscreener_data; -- Querying LIVE table

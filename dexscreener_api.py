@@ -34,6 +34,18 @@ class DexscreenerFetcher:
         self._consecutive_429_errors = 0
         self._cooldown_until_timestamp = 0
 
+    def _sanitize_for_comparison(self, data: dict) -> dict:
+        """
+        Removes volatile, non-market data keys from a response dictionary
+        to allow for a meaningful comparison of market state.
+        """
+        # Make a copy to avoid modifying the original dictionary
+        sanitized_data = data.copy()
+        # The 'info' key contains URLs with changing timestamps, which are not
+        # relevant for detecting a change in market data. We remove it.
+        sanitized_data.pop('info', None)
+        return sanitized_data
+
     async def _get_migrated_tokens(self) -> list[str]:
         query = "SELECT mint FROM tokens WHERE data_source = 'DEXSCREENER' AND is_active = TRUE"
         async with self.db.pool.acquire() as conn:
@@ -137,7 +149,7 @@ class DexscreenerFetcher:
                 migrated_tokens = await self._get_migrated_tokens()
                 
                 if migrated_tokens:
-                    logger.info(f"DEXScreener Fetcher: Starting new polling cycle for {len(migrated_tokens)} migrated tokens.")
+                    logger.debug(f"DEXScreener Fetcher: Starting new polling cycle for {len(migrated_tokens)} migrated tokens.")
                     
                     current_sol_price = await self.state.get_sol_price()
                     if not current_sol_price:
@@ -168,6 +180,32 @@ class DexscreenerFetcher:
                             continue
 
                         primary_pair = max(valid_pairs_with_liquidity, key=lambda p: p.get('liquidity', {}).get('usd', 0))
+
+                        # --- START OF CORRECTED DE-DUPLICATION LOGIC ---
+                        # 1. Fetch the last stored response string from the database.
+                        last_stored_response_str = await self.db.get_latest_dexscreener_response(token_address)
+                        
+                        if last_stored_response_str:
+                            try:
+                                # 2. Load the old and new responses into dictionaries.
+                                last_stored_dict = json.loads(last_stored_response_str)
+                                new_response_dict = primary_pair # This is already a dict
+
+                                # 3. Sanitize both dictionaries by removing volatile keys.
+                                sanitized_last = self._sanitize_for_comparison(last_stored_dict)
+                                sanitized_new = self._sanitize_for_comparison(new_response_dict)
+                                
+                                # 4. Compare the sanitized dictionaries. Python's dict comparison
+                                # is order-independent and compares values correctly.
+                                if sanitized_last == sanitized_new:
+                                    # logger.debug(f"No meaningful data change for {token_address}. Skipping database insert.")
+                                    continue # Data is the same, skip to the next token.
+                            except json.JSONDecodeError as e:
+                                logger.warning(f"Could not parse stored JSON for {token_address} for comparison. Proceeding with insert. Error: {e}")
+                        
+                        logger.debug(f"Data for {token_address} has changed. Proceeding with DB insert.")
+                        
+                        # --- END OF CORRECTED DE-DUPLICATION LOGIC ---
                         
                         logger.debug(f"Selected primary pair {primary_pair.get('pairAddress')} for {token_address} with ${primary_pair.get('liquidity',{}).get('usd',0):,.2f} liquidity.")
 

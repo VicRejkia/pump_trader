@@ -75,6 +75,14 @@ BBANDS_STD_DEV = 2.0
 FAST_EMA_PERIOD = 9
 SLOW_EMA_PERIOD = 21
 
+# --- DexScreener Trend Reversal Configuration ---
+DEX_REVERSAL_LOOKBACK_MINUTES = 15          # How many minutes of snapshot data to analyze.
+DEX_REVERSAL_MIN_SNAPSHOTS = 3              # Minimum number of snapshots required within the lookback window.
+DEX_REVERSAL_MIN_LIQUIDITY_USD = 5000       # Minimum liquidity in USD for the token to be considered viable for a re-buy.
+DEX_REVERSAL_MIN_PRICE_CHANGE_M5 = 2.0      # The m5 price change must be at least +2.0% to be counted as a positive signal.
+DEX_REVERSAL_MIN_BUY_SELL_RATIO = 1.5       # Ratio of buys to sells must be at least 1.5 for a strong buying pressure signal.
+DEX_REVERSAL_MIN_CONFIRMATIONS = 2          # How many snapshots must show strong buying pressure to confirm the trend.
+
 # UNSUBSCRIBING CONDITIONS
 INACTIVITY_PERIOD = 60                      # Inactivity period in minutes before unsubscribing & backup
 MC_DROP_THRESHOLD = 2                       # Market cap drop threshold (in %) - for unsubscription & backup

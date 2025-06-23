@@ -25,103 +25,165 @@ class TradingManager:
 
     async def _is_trend_reversal_confirmed(self, mint: str) -> bool:
         """
-        Checks if a token that was recently stopped out shows signs of trend reversal.
+        Checks if a token that was recently stopped out shows signs of a trend reversal.
+
+        This function is source-aware and applies different logic depending on whether
+        the token's data comes from Pump.fun or DexScreener.
+
+        - For PUMP tokens: It uses traditional time-series technical indicators (RSI,
+        BBands, EMA, VWAP) on high-frequency trade data.
+        - For DEXSCREENER tokens: It analyzes a series of recent API snapshots to
+        confirm liquidity health and sustained buying momentum.
+
+        Args:
+            mint (str): The mint address of the token to check.
+
+        Returns:
+            bool: True if the trend reversal is confirmed or if no check is needed,
+                False if the reversal is not confirmed, blocking a potential re-buy.
         """
+        # Globally disable the check if the feature flag is turned off in the config.
         if not self.config.get('USE_TREND_REVERSAL_CONFIRMATION', False):
-            return True # If disabled, always "confirm"
+            return True
 
         logger.debug(f"Performing trend reversal confirmation for {mint}...")
-        
-        apply_reversal_on_configured_reasons = self.config.get('APPLY_TREND_REVERSAL_ON_SELL_REASONS', [])
-        recency_hours = self.config.get('TREND_REVERSAL_RECENCY_HOURS', 6)
-        rsi_neutral_level_config = self.config.get('TREND_REVERSAL_RSI_NEUTRAL_LEVEL', 45)
 
-        last_sell_reason_for_check = None
-        requires_reversal_check = False
-
+        # --- Step 1: Fetch Token Status and Last Sell Information ---
+        # Get the token's current data_source and details of its last sell event.
         async with self.db.pool.acquire() as conn:
-            last_sell_record = await conn.fetchrow(
-                """SELECT reason, timestamp FROM portfolio
-                   WHERE mint = $1 AND tx_type = 'sell'
-                   ORDER BY timestamp DESC LIMIT 1""",
-                mint
-            )
-        
-        if last_sell_record:
-            reason_from_portfolio = last_sell_record['reason']
-            timestamp_from_portfolio = last_sell_record['timestamp']
-            if timestamp_from_portfolio.tzinfo is None:
-                timestamp_from_portfolio = timestamp_from_portfolio.replace(tzinfo=timezone.utc)
-            
-            is_recent_sell = (datetime.now(timezone.utc) - timestamp_from_portfolio) < timedelta(hours=recency_hours)
+            token_record = await conn.fetchrow("""
+                SELECT t.data_source, p.reason, p.timestamp
+                FROM tokens t
+                LEFT JOIN (
+                    SELECT mint, reason, timestamp, ROW_NUMBER() OVER (PARTITION BY mint ORDER BY timestamp DESC) as rn
+                    FROM portfolio WHERE tx_type = 'sell'
+                ) p ON t.mint = p.mint AND p.rn = 1
+                WHERE t.mint = $1;
+            """, mint)
 
-            if reason_from_portfolio and is_recent_sell:
-                for configured_reason_substring in apply_reversal_on_configured_reasons:
-                    if configured_reason_substring in reason_from_portfolio:
-                        requires_reversal_check = True
-                        last_sell_reason_for_check = reason_from_portfolio
-                        break
-        
+        if not token_record:
+            logger.warning(f"Could not find token record for {mint} during trend reversal check.")
+            return True # Cannot block a buy if the token record is missing.
+
+        data_source = token_record['data_source']
+        last_sell_reason = token_record['reason']
+        last_sell_timestamp = token_record['timestamp']
+
+        # --- Step 2: Determine if a Reversal Check is Required ---
+        # The check is only necessary for tokens sold recently due to specific reasons (e.g., Stop Loss).
+        requires_reversal_check = False
+        if last_sell_reason:
+            apply_reversal_on_reasons = self.config.get('APPLY_TREND_REVERSAL_ON_SELL_REASONS', [])
+            recency_hours = self.config.get('TREND_REVERSAL_RECENCY_HOURS', 6)
+            # Check if the sell reason is in the configured list and if it happened recently.
+            if any(reason_str in last_sell_reason for reason_str in apply_reversal_on_reasons):
+                if (datetime.now(timezone.utc) - last_sell_timestamp.replace(tzinfo=timezone.utc)) < timedelta(hours=recency_hours):
+                    requires_reversal_check = True
+
         if not requires_reversal_check:
-            logger.debug(f"Trend reversal check not required for {mint} based on last sell reason or recency.")
-            return True # No specific sell reason that needs reversal confirmation
+            logger.debug(f"Trend reversal check not required for {mint} (Reason: '{last_sell_reason}', Source: {data_source}).")
+            return True # If no check is needed, do not block the buy.
 
-        logger.info(f"Token {mint} recently sold (within {recency_hours}h) due to '{last_sell_reason_for_check}'. Performing trend reversal confirmation...")
-        
-        start_date_hist = datetime.now(timezone.utc) - timedelta(hours=self.config.get('INDICATOR_LOOKBACK_HOURS', 1))
-        end_date_hist = datetime.now(timezone.utc)
-        historical_data = await self.db.get_historical_data_for_backtesting([mint], start_date_hist, end_date_hist)
+        # --- Step 3: Execute Source-Specific Reversal Logic ---
 
-        if not historical_data or mint not in historical_data:
-            logger.warning(f"Could not fetch historical data for {mint} for trend reversal. Skipping buy for now.")
-            return False
-        
-        df = historical_data[mint]
-        df_with_indicators = calculate_trend_indicators(df, self.config) 
+        # ==============================================================================
+        #  LOGIC FOR MIGRATED TOKENS (DEXSCREENER)
+        # ==============================================================================
+        if data_source == 'DEXSCREENER':
+            logger.info(f"Token {mint} is migrated. Performing DexScreener snapshot-based trend reversal check...")
+            async with self.db.pool.acquire() as conn:
+                snapshots = await self.db.analyze_dexscreener_trend(
+                    mint,
+                    self.config['DEX_REVERSAL_LOOKBACK_MINUTES'],
+                    conn
+                )
 
-        if df_with_indicators.empty or len(df_with_indicators) < self.config.get('MIN_CANDLE_DATA_FOR_INDICATORS', 30): 
-            logger.warning(f"Indicator calculation failed or returned insufficient data for {mint} (rows: {len(df_with_indicators)}). Cannot confirm trend.")
-            return False
-        
-        latest = df_with_indicators.iloc[-1]
-        previous = df_with_indicators.iloc[-2] if len(df_with_indicators) >= 2 else latest 
+            # Ensure we have enough data points to make a reliable decision.
+            if len(snapshots) < self.config['DEX_REVERSAL_MIN_SNAPSHOTS']:
+                logger.info(f"DEX Reversal FAILED for {mint}: Not enough recent data points (have {len(snapshots)}, need {self.config['DEX_REVERSAL_MIN_SNAPSHOTS']}).")
+                return False
 
-        # STAGE 1: Potential Bottoming/Recovery Signals
-        stage1_passed = False
-        rsi_latest_val = latest.get('RSI', float('nan'))
-        rsi_previous_val = previous.get('RSI', float('nan'))
-        close_latest_val = latest.get('Close', float('nan'))
-        close_previous_val = previous.get('Close', float('nan'))
-        bb_lower_band_col = f"BBL_{self.config.get('BBANDS_PERIOD', 20)}_{self.config.get('BBANDS_STD_DEV', 2.0)}"
-        bb_lower_latest_val = latest.get(bb_lower_band_col, float('inf'))
-        bb_lower_previous_val = previous.get(bb_lower_band_col, float('inf'))
+            latest_snapshot = snapshots[0]
 
-        rsi_just_crossed_up = rsi_latest_val > 30 and rsi_previous_val <= 30
-        bb_price_reentered = close_latest_val > bb_lower_latest_val and close_previous_val <= bb_lower_previous_val
-        
-        if rsi_just_crossed_up or bb_price_reentered:
-            stage1_passed = True
-            logger.info(f"Stage 1 for {mint} PASSED (Crossover): RSI_Cross={rsi_just_crossed_up}, BB_Reentry={bb_price_reentered}")
-        else:
-            if rsi_latest_val > rsi_neutral_level_config:
-                stage1_passed = True
-                logger.info(f"Stage 1 for {mint} PASSED (Alternative): RSI ({rsi_latest_val:.2f}) > Neutral Level ({rsi_neutral_level_config}).")
+            # Stage 1: Health Check - Ensure the token has sufficient liquidity.
+            min_liquidity_usd = self.config['DEX_REVERSAL_MIN_LIQUIDITY_USD']
+            if float(latest_snapshot['liquidity_usd']) < min_liquidity_usd:
+                logger.info(f"DEX Reversal FAILED for {mint}: Liquidity (${latest_snapshot['liquidity_usd']:.2f}) is below threshold (${min_liquidity_usd:.2f}).")
+                return False
+
+            # Stage 2: Momentum Confirmation - Analyze recent snapshots for buying pressure.
+            strong_buy_pressure_count = 0
+            for snap in snapshots:
+                # Check for strong buy/sell ratio in the last 5 minutes.
+                buys = snap['buys_m5']
+                sells = snap['sells_m5']
+                # A strong signal is very high buy pressure (many buys to few/no sells).
+                if buys > 0 and (sells == 0 or (buys / sells) >= self.config['DEX_REVERSAL_MIN_BUY_SELL_RATIO']):
+                    strong_buy_pressure_count += 1
+
+            logger.debug(f"DEX Reversal analysis for {mint}: Strong Buy Pressure Signals={strong_buy_pressure_count} found in the last {len(snapshots)} snapshots.")
+
+            # Final Decision: The trend is confirmed only if we see enough signals of buying pressure.
+            min_confirmations = self.config['DEX_REVERSAL_MIN_CONFIRMATIONS']
+            if strong_buy_pressure_count >= min_confirmations:
+                logger.info(f"🚀 DEXScreener Trend Reversal CONFIRMED for {mint}. Strong buy pressure found in {strong_buy_pressure_count}/{len(snapshots)} recent snapshots.")
+                return True
             else:
-                logger.info(f"Stage 1 for {mint} FAILED: No crossover and RSI ({rsi_latest_val:.2f}) not above neutral level ({rsi_neutral_level_config}).")
+                logger.info(f"DEX Reversal FAILED for {mint}: Not enough confirmations of strong buying pressure (have {strong_buy_pressure_count}, need {min_confirmations}).")
+                return False
 
-        if not stage1_passed:
-            return False
-        
-        # STAGE 2: Confirmation Filters (VWAP & EMA)
-        trend_confirmed_vwap = close_latest_val > latest.get('VWAP', float('-inf'))
-        momentum_confirmed_ema = latest.get('EMA_fast', float('-inf')) > latest.get('EMA_slow', float('inf'))
+        # ==============================================================================
+        #  LOGIC FOR NON-MIGRATED TOKENS (PUMP.FUN)
+        # ==============================================================================
+        elif data_source == 'PUMP':
+            logger.info(f"Token {mint} is on Pump.fun. Performing indicator-based trend reversal check...")
+            # This is the original logic using TA on high-frequency trade data.
+            start_date_hist = datetime.now(timezone.utc) - timedelta(hours=self.config.get('INDICATOR_LOOKBACK_HOURS', 1))
+            end_date_hist = datetime.now(timezone.utc)
+            historical_data = await self.db.get_historical_data_for_backtesting([mint], start_date_hist, end_date_hist)
 
-        if not (trend_confirmed_vwap and momentum_confirmed_ema):
-            logger.info(f"Re-buy for {mint} skipped: Stage 2 (Confirmation) FAILED. VWAP: {trend_confirmed_vwap}, EMA: {momentum_confirmed_ema}.")
+            if not historical_data or mint not in historical_data:
+                return False
+
+            df = historical_data[mint]
+            df_with_indicators = calculate_trend_indicators(df, self.config)
+
+            if df_with_indicators.empty or len(df_with_indicators) < self.config.get('MIN_CANDLE_DATA_FOR_INDICATORS', 30):
+                return False
+
+            # Perform the indicator checks (RSI, BBands, VWAP, EMA crossover).
+            latest = df_with_indicators.iloc[-1]
+            previous = df_with_indicators.iloc[-2] if len(df_with_indicators) >= 2 else latest
+
+            # Stage 1: Check for bottoming signals like RSI or Bollinger Band crossover.
+            stage1_passed = False
+            rsi_neutral_level = self.config.get('TREND_REVERSAL_RSI_NEUTRAL_LEVEL', 45)
+            rsi_val = latest.get('RSI', float('nan'))
+            bb_lower_band = latest.get(f"BBL_{self.config['BBANDS_PERIOD']}_{self.config['BBANDS_STD_DEV']}", float('inf'))
+
+            if (rsi_val > 30 and previous.get('RSI', float('nan')) <= 30) or \
+            (latest.get('Close', 0) > bb_lower_band and previous.get('Close', 0) <= previous.get(f"BBL_{self.config['BBANDS_PERIOD']}_{self.config['BBANDS_STD_DEV']}", float('inf'))):
+                stage1_passed = True
+            elif rsi_val > rsi_neutral_level:
+                stage1_passed = True
+
+            if not stage1_passed:
+                return False
+
+            # Stage 2: Confirm the new trend with VWAP and EMA crossover.
+            is_above_vwap = latest.get('Close', 0) > latest.get('VWAP', float('-inf'))
+            is_ema_bullish = latest.get('EMA_fast', float('-inf')) > latest.get('EMA_slow', float('inf'))
+
+            if is_above_vwap and is_ema_bullish:
+                logger.info(f"🚀 Pump.fun Trend Reversal Fully Confirmed for {mint}!")
+                return True
+            else:
+                return False
+                
+        # Fallback for any other unknown data source.
+        else:
+            logger.warning(f"Unknown data_source '{data_source}' for {mint} in trend reversal check.")
             return False
-        
-        logger.info(f"🚀 Trend Reversal Fully Confirmed for {mint} (Stage 2 Passed)! VWAP: {trend_confirmed_vwap}, EMA: {momentum_confirmed_ema}.")
-        return True
 
     async def check_trading_opportunities(self):
         """✅ Check for new trading opportunities based on configured criteria."""

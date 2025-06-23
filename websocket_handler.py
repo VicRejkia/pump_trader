@@ -212,7 +212,6 @@ class WebSocketHandler:
                     logger.warning("Unsubscribe checker: WebSocket not open. Skipping cycle.")
                     continue
                 
-                # ... (The rest of your existing logic for unsubscribing)
                 rows = await self.db_client.get_tokens_to_unsubscribe(
                     self.config['MC_DROP_THRESHOLD'], self.config['INACTIVITY_PERIOD'], self.config['MIN_TOKEN_AGE']
                 )
@@ -281,13 +280,13 @@ class WebSocketHandler:
         Unsubscribes from all tokens associated with a given creator wallet,
         if they are not part of an active portfolio position.
         """
-        logger.info(f"Processing unsubscription for all tokens from suspicious creator: {creator}")
+        #logger.debug(f"Processing unsubscription for all tokens from suspicious creator: {creator}")
         try:
             # Get all tokens by this creator that are NOT in an active portfolio
             tokens_to_process = await self.db_client.fetch_tokens_by_creator(creator, respect_portfolio=True)
             
             if not tokens_to_process:
-                logger.info(f"No non-portfolio tokens found for suspicious creator {creator} to unsubscribe.")
+                logger.debug(f"No non-portfolio tokens found for suspicious creator {creator} to unsubscribe.")
                 return
 
             mints_to_unsubscribe = [row['mint'] for row in tokens_to_process]
