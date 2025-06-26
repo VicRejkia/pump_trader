@@ -335,6 +335,20 @@ class Rugcheck:
 
                     async with self.db_client.pool.acquire() as conn:
                         async with conn.transaction():
+                            # --- START OF FIX ---
+                            # This check runs *after* the API call and immediately before the insert,
+                            # guaranteeing the token exists at the moment of the transaction.
+                            token_exists = await conn.fetchval(
+                                "SELECT 1 FROM tokens WHERE mint = $1", mint
+                            )
+
+                            if not token_exists:
+                                logger.info(
+                                    f"Token {mint} was deleted from DB while its RugCheck data was being fetched. Aborting DB storage."
+                                )
+                                return 'TOKEN_DELETED_MID_FETCH' # Return a specific status
+                            # --- END OF FIX ---
+                            # 
                             await conn.execute('''
                                 INSERT INTO rugcheck
                                 (mint, tokenProgram, creator, token_mintAuthority, token_supply,
