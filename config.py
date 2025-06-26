@@ -119,6 +119,9 @@ _LOG_LEVEL_CONSOLE: str = "DEBUG"
 _LOG_LEVEL_FILE: str = "DEBUG"
 _LOG_STORAGE_PATH: str = "log"
 
+# Backup
+_BACKUP_STORAGE_PATH: str = "backups"  # Directory for backups
+
 # Telegram
 TELEGRAM_INTERACTION = True
 

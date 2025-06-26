@@ -910,7 +910,7 @@ class DatabaseClient:
 
     async def backup_creator_wallets(self):
         """Dumps the creator_wallets table to a JSON file."""
-        backup_file_path = os.path.join(os.path.dirname(__file__), "data", "creator_wallets_backup.json")
+        backup_file_path = os.path.join(os.path.dirname(__file__), self.config.get("_BACKUP_STORAGE_PATH", "backups"), "creator_wallets_backup.json")
         os.makedirs(os.path.dirname(backup_file_path), exist_ok=True)  # Ensure data directory exists
 
         logger.info("Backing up creator_wallets table...")
@@ -941,7 +941,7 @@ class DatabaseClient:
     async def restore_creator_wallets(self):
         backup_path = os.path.abspath(os.path.join(
             os.path.dirname(__file__), 
-            "data", 
+            self.config.get("_BACKUP_STORAGE_PATH", "backups"), 
             "creator_wallets_backup.json"
         ))
 
