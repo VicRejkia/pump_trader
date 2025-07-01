@@ -193,7 +193,11 @@ class WebSocketHandler:
                         logger.error(f"Monitor: No messages for {time_since_last_msg:.0f}s. Connection is stale. Exiting monitor task.")
                         break # Exit the loop, causing the main connect_and_run loop to restart everything
                 else:
-                    logger.debug("Monitor: Connection open, no messages received yet.")
+                    # This case can happen if the connection is open but no message (even a confirmation) has arrived.
+                    # It might be useful to have a timeout for this initial state.
+                    if asyncio.get_event_loop().time() - self.websocket.open_timestamp > 60: # Example: 60s timeout after opening
+                         logger.error("Monitor: Connection open for over 60s with no initial messages. Forcing reconnect.")
+                         break
             except asyncio.CancelledError:
                 logger.info("📡 Monitor task cancelled.")
                 break
@@ -239,17 +243,16 @@ class WebSocketHandler:
     async def subscribe_to_migrations(self):
         """Sends a request to subscribe to the migration event stream."""
         if self.websocket and self.websocket.open:
-            logger.info("Subscribing to migration event stream...")
             try:
-                payload = {
-                    "method": "subscribeMigration",
-                }
-                await self.websocket.send(json.dumps(payload))
+                await self.websocket.send(json.dumps({"method": "subscribeMigration"}))
+                # <<< CHANGE: Update the state manager on successful subscription >>>
+                await self.state.set_migration_subscription(True)
                 logger.debug("Successfully sent migration subscription request.")
             except Exception as e:
                 logger.error(f"Failed to send migration subscription request: {e}", exc_info=True)
+                await self.state.set_migration_subscription(False)
         else:
-            logger.error("Cannot subscribe to migrations: WebSocket not connected.")
+            await self.state.set_migration_subscription(False)
 
 
     async def resume_subscriptions(self):
@@ -345,3 +348,51 @@ class WebSocketHandler:
         
         await self._cleanup_connection()
         logger.info("WebSocketHandler shutdown sequence complete.")
+
+    def get_internal_task_statuses(self) -> list[tuple[str, str]]:
+        """Returns the status of internal WebSocket handler tasks."""
+        statuses = []
+        if not self.tasks:
+            return [("internal_tasks", "not started")]
+            
+        for task in self.tasks:
+            name = task.get_name().replace("ws_", "") # Shorten name for display
+            status_str = "unknown"
+            if task.cancelled():
+                status_str = "cancelled"
+            elif task.done():
+                exc = task.exception()
+                status_str = f"error ({type(exc).__name__})" if exc else "done"
+            else:
+                status_str = "running"
+            statuses.append((name, status_str))
+        return statuses
+
+    async def get_connection_summary(self) -> dict:
+        """Gathers a summary of the WebSocket connection status for monitoring."""
+        status_summary = {
+            "connection_status": "Not Initialized",
+            "new_token_subscribed": False,
+            "migration_subscribed": False,
+            "trade_subscriptions_count": 0,
+            "time_since_last_message_s": -1.0
+        }
+
+        if self.state.shutdown_event.is_set():
+            status_summary["connection_status"] = "Shutting Down"
+        elif self.websocket and self.websocket.open:
+            status_summary["connection_status"] = "Connected"
+        elif self._reconnect_lock.locked():
+            status_summary["connection_status"] = "Reconnecting..."
+        else:
+            status_summary["connection_status"] = "Disconnected"
+
+        status_summary["new_token_subscribed"] = await self.state.get_new_token_subscription()
+        status_summary["migration_subscribed"] = await self.state.get_migration_subscription()
+        active_subs = await self.state.get_token_subscriptions()
+        status_summary["trade_subscriptions_count"] = len(active_subs)
+        
+        if self.last_message_timestamp:
+            status_summary["time_since_last_message_s"] = asyncio.get_event_loop().time() - self.last_message_timestamp
+
+        return status_summary

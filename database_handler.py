@@ -708,6 +708,17 @@ class DatabaseClient:
             except Exception as e:
                 logger.error(f"Error fetching unique mints with names: {e}", exc_info=True)
                 return []
+            
+    async def get_all_migrated_tokens(self) -> List[str]:
+        """Fetches all active tokens that have been marked as migrated to DEXScreener."""
+        query = "SELECT mint FROM tokens WHERE data_source = 'DEXSCREENER' AND is_active = TRUE ORDER BY timestamp DESC"
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(query)
+                return [row['mint'] for row in rows]
+        except Exception as e:
+            logger.error(f"Error fetching migrated tokens: {e}", exc_info=True)
+            return []
 
     async def get_filtered_tokens(self, max_socials=100, max_rugcheck=10000, min_volume_sol=0, time_window_minutes=60, portfolio_only=False):
         """

@@ -417,6 +417,7 @@ class TradingBot:
                     # --- Gather WebSocket Connection Summary ---
                     ws_conn_status_line = "[bold cyan]│[/bold cyan] :electric_plug: [bold]WS Connection:[/bold] [dim white]N/A[/dim white]"
                     ws_new_token_line = "[bold cyan]│  ├─ [/bold cyan][bold]NewToken Stream:[/bold] [dim white]N/A[/dim white]"
+                    ws_migration_line = "[bold cyan]│  ├─ [/bold cyan][bold]Migration Stream:[/bold] [dim white]N/A[/dim white]"
                     ws_trades_subbed_line = "[bold cyan]│  └─ [/bold cyan][bold]Token Trades Subbed:[/bold] [dim white]N/A[/dim white]"
 
                     if self.ws_handler and hasattr(self.ws_handler, 'get_connection_summary'):
@@ -424,78 +425,53 @@ class TradingBot:
                             ws_summary = await self.ws_handler.get_connection_summary()
                             ws_conn_status = ws_summary.get("connection_status", "Error")
                             ws_new_token_sub = "Yes" if ws_summary.get("new_token_subscribed") else "No"
+                            ws_migration_sub = "Yes" if ws_summary.get("migration_subscribed") else "No"
                             ws_trades_sub_count = str(ws_summary.get("trade_subscriptions_count", "0"))
-
-                            ws_style = "dim white" # Default
-                            conn_status_lower = ws_conn_status.lower()
-                            if "connected" in conn_status_lower: ws_style = "green"
-                            elif "reconnecting" in conn_status_lower or "connecting" in conn_status_lower: ws_style = "blue"
-                            elif "closed" in conn_status_lower or "shutting down" in conn_status_lower or "not initialized" in conn_status_lower : ws_style = "yellow"
-                            elif "error" in conn_status_lower or "unknown" in conn_status_lower : ws_style = "bold red"
-
+                            time_since_msg = ws_summary.get("time_since_last_message_s", -1.0)
+                            
+                            ws_style = "green" if "connected" in ws_conn_status.lower() else "yellow"
+                            if time_since_msg != -1.0 and time_since_msg > 60:
+                                ws_conn_status += f" (Stale: {time_since_msg:.0f}s)"
+                                ws_style = "yellow"
+                            if "error" in ws_conn_status.lower(): ws_style = "bold red"
+                            
                             ws_conn_status_line = f"[bold cyan]│[/bold cyan] :electric_plug: [bold]Websocket:[/bold] [{ws_style}]{ws_conn_status}[/{ws_style}]"
                             ws_new_token_style = "green" if ws_new_token_sub == "Yes" else "yellow"
+                            ws_migration_style = "green" if ws_migration_sub == "Yes" else "yellow"
                             ws_new_token_line = f"[bold cyan]│  ├─ [/bold cyan][bold]NewToken Stream:[/bold] [{ws_new_token_style}]{ws_new_token_sub}[/{ws_new_token_style}]"
+                            ws_migration_line = f"[bold cyan]│  ├─ [/bold cyan][bold]Migration Stream:[/bold] [{ws_migration_style}]{ws_migration_sub}[/{ws_migration_style}]"
                             ws_trades_subbed_line = f"[bold cyan]│  └─ [/bold cyan][bold]Token Trades Subbed:[/bold] [magenta]{ws_trades_sub_count}[/magenta]"
                         except Exception as e_ws_sum:
                             ws_conn_status_line = f"[bold cyan]│[/bold cyan] :electric_plug: [bold]Websocket:[/bold] [bold red]Error: {e_ws_sum!r}[/bold red]"
 
-                    # --- Format Main Bot Tasks Status ---
+
+                     # --- Format Main Bot Tasks Status ---
                     main_task_status_lines_list = []
                     active_bot_tasks_count = 0
-                    for task in self.tasks: # Iterate TradingBot's self.tasks
+                    for task in self.tasks:
                         task_name = task.get_name()
-                        status_str = ""
-                        style = "green" # Default for running
-
-                        if task.cancelled():
-                            status_str = "cancelled"
-                            style = "dim yellow"
-                        elif task.done():
-                            if task.exception():
-                                exc = task.exception()
-                                exc_name = type(exc).__name__ if exc else "UnknownException"
-                                status_str = f"error ({exc_name})"
-                                style = "bold red"
-                            else:
-                                status_str = "done" 
-                                style = "yellow"
-                        else: # Not done
+                        style = "green"
+                        if task.done():
+                            style = "red"
+                            status_str = f"error ({type(task.exception()).__name__})" if task.exception() else "done"
+                        else:
                             status_str = "running"
                             active_bot_tasks_count += 1
                         
-                        line_prefix = "[bold cyan]├──[/bold cyan]"
-                        formatted_line = ""
-                        if task_name == "buy_opportunity_checker" and status_str == "running" and \
-                           hasattr(self.state, 'is_buying_enabled') and not self.state.is_buying_enabled:
-                            formatted_line = f"{line_prefix} {task_name}: [yellow]paused (buys disabled)[/yellow]"
-                        else:
-                            formatted_line = f"{line_prefix} {task_name}: [bold {style}]{status_str}[/bold {style}]"
+                        formatted_line = f"[bold cyan]├──[/bold cyan] {task_name}: [bold {style}]{status_str}[/bold {style}]"
                         main_task_status_lines_list.append(formatted_line)
 
-                        # --- Display WebSocket Internal Tasks under the 'websocket_services_manager' ---
                         if task_name == "websocket_services_manager" and self.ws_handler and hasattr(self.ws_handler, 'get_internal_task_statuses'):
-                            try:
-                                internal_ws_tasks = self.ws_handler.get_internal_task_statuses()
-                                if internal_ws_tasks:
-                                    for ws_task_name, ws_task_status_str in internal_ws_tasks:
-                                        ws_style_int = "green" # default for running
-                                        if "done" in ws_task_status_str.lower() or "completed" in ws_task_status_str.lower(): ws_style_int = "yellow"
-                                        if "error" in ws_task_status_str.lower(): ws_style_int = "bold red"
-                                        if "cancel" in ws_task_status_str.lower(): ws_style_int = "dim yellow"
-                                        if any(s in ws_task_status_str.lower() for s in ["not active", "not_started", "stopped", "cleared", "shutting down", "shutting_down"]): ws_style_int = "dim white"
-                                        if any(s in ws_task_status_str.lower() for s in ["pending", "initializing", "reconnecting"]): ws_style_int = "blue"
-                                        main_task_status_lines_list.append(f"[bold cyan]│  └───[/bold cyan] {ws_task_name}: [bold {ws_style_int}]{ws_task_status_str}[/bold {ws_style_int}]")
-                                else:
-                                    main_task_status_lines_list.append(f"[bold cyan]│  └───[/bold cyan] [dim white]No internal WS task statuses reported by handler.[/dim white]")
-                            except Exception as e_ws_int_status:
-                                main_task_status_lines_list.append(f"[bold cyan]│  └───[/bold cyan] [bold red]Error fetching WS internal tasks: {e_ws_int_status!r}[/bold red]")
+                            internal_ws_tasks = self.ws_handler.get_internal_task_statuses()
+                            for ws_task_name, ws_task_status_str in internal_ws_tasks:
+                                ws_style_int = "green" if "running" in ws_task_status_str else "yellow"
+                                if "error" in ws_task_status_str: ws_style_int = "bold red"
+                                main_task_status_lines_list.append(f"[bold cyan]│  └───[/bold cyan] {ws_task_name}: [bold {ws_style_int}]{ws_task_status_str}[/bold {ws_style_int}]")
                     
-                    main_tasks_formatted_str = "\n".join(main_task_status_lines_list) if main_task_status_lines_list else f"[bold cyan]├──[/bold cyan] [dim white]No main tasks defined yet.[/dim white]"
+                    main_tasks_formatted_str = "\n".join(main_task_status_lines_list)
 
-                    # --- Construct the final log message ---
                     log_parts = [
-                        "\n", # Start with a newline for separation in logs
+                        "\n",
                         "[bold cyan]┌────────────────────────────────────[/bold cyan]",
                         "[bold cyan]│[/bold cyan] :robot: [bold magenta]Task Monitor[/bold magenta]",
                         "[bold cyan]│────────────────────────────────────[/bold cyan]",
@@ -506,13 +482,13 @@ class TradingBot:
                         f"[bold cyan]│[/bold cyan] :speech_balloon: [bold]Socials Queue:[/bold] [blue]{socials_queue_size}[/blue]",
                         ws_conn_status_line,
                         ws_new_token_line,
+                        ws_migration_line,
                         ws_trades_subbed_line,
                         f"[bold cyan]│[/bold cyan] :gear: [bold]Managed Tasks:[/bold] {active_bot_tasks_count}/{len(self.tasks)}",
                         f"[bold cyan]│[/bold cyan] :clipboard: [bold]Tasks:[/bold]",
-                        main_tasks_formatted_str, # This now includes nested WS tasks
+                        main_tasks_formatted_str,
                         "[bold cyan]└────────────────────────────────────[/bold cyan]"
                     ]
-                    
                     log_debug("\n".join(log_parts))
                     
                 except Exception as e_monitor_loop:

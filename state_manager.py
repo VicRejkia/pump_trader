@@ -27,6 +27,7 @@ class GlobalState:
         self.shutdown_event = asyncio.Event()  # 🚀 Interruptible sleep support
         self.websocket_handler = None  # 🚀 Store WebSocketHandler instance
         self.new_token_subscription = False  # WebSocket subscription status
+        self.migration_stream_subscribed = False  # Migration stream subscription status 
         self.active_token_subscriptions = set()  # Active token subscriptions
         self.sol_price = None          # SOL price (updated hourly)
         self.db_client = None          # Database client instance
@@ -162,6 +163,14 @@ class GlobalState:
     async def get_new_token_subscription(self) -> bool:
         async with self.lock:
             return self.new_token_subscription
+        
+    async def set_migration_subscription(self, status: bool):
+        async with self.lock:
+            self.migration_stream_subscribed = status
+
+    async def get_migration_subscription(self) -> bool:
+        async with self.lock:
+            return self.migration_stream_subscribed
 
     ## 🚀 API Rate Limiting
     async def add_request_timestamp(self, timestamp):

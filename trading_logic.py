@@ -643,9 +643,8 @@ class TradingManager:
                         price_data = await self.db.get_price_and_market_cap_for_decision(mint, self.config, conn)
                         current_price_to_use = price_data.get('price')
                         current_market_cap_sol_for_log = price_data.get('market_cap')
+                        logger.debug(f"Checking sell for {mint} (ID: {pos_id}) - Current Price: {current_price_to_use}, Market Cap (SOL): {current_market_cap_sol_for_log}")
 
-                        # The rest of your sell logic remains completely unchanged...
-                        # (Code continues from here exactly as it was)
                         if isinstance(current_market_cap_sol_for_log, str): 
                             try: current_market_cap_sol_for_log = float(current_market_cap_sol_for_log)
                             except ValueError: current_market_cap_sol_for_log = None
