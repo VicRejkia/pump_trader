@@ -177,6 +177,7 @@ def analyze_feature_importance(model, env, num_samples=1000):
 def make_env_func(
     data_dict: Dict[str, pd.DataFrame],
     lifespan_dict: Dict[str, Dict[str, datetime]], # Add lifespans
+    snapshot_dict: Dict[str, pd.DataFrame],
     initial_capital: float,
     max_steps: int,
     rank: int = 0,
@@ -204,6 +205,9 @@ def make_env_func(
             if isinstance(v, pd.DataFrame) and not v.empty and k in lifespan_dict
         }
         valid_lifespans = {k: v for k, v in lifespan_dict.items() if k in valid_data}
+        # Filter snapshots to only include those for valid mints
+        valid_snapshots = {k: v for k, v in snapshot_dict.items() if k in valid_data}
+
 
         if not valid_data or not valid_lifespans:
             logger.error(f"make_env_func (rank {rank}) received empty/invalid data or missing lifespans!")
@@ -212,6 +216,7 @@ def make_env_func(
         env = TradingEnv(
             historical_data_dict=valid_data,
             token_lifespans=valid_lifespans, # Pass lifespans
+            dexscreener_snapshot_data=valid_snapshots,
             initial_capital=initial_capital,
             max_steps=max_steps,
             render_mode=render_mode # Pass render_mode to TradingEnv
@@ -256,20 +261,27 @@ async def train_rl_agent(render_mode: Optional[str] = None):
     data_split_config = rl_config.DATA_SPLIT_RL
 
     logger.info(f"Loading and splitting data from {start_date.isoformat()} to {end_date.isoformat()}...")
-    loaded_results: Optional[Tuple[Dict, Dict]] = await load_and_split_data(db_client_global, start_date, end_date, data_split_config)
+    loaded_results: Optional[Tuple[Dict, Dict, Dict]] = await load_and_split_data(
+        db_client_global, start_date, end_date, data_split_config
+    )
 
     if not loaded_results:
         logger.critical("Failed to load or split data. Exiting.")
         await db_client_global.close() if db_client_global else None
         return
 
-    loaded_data_sets, token_lifespans = loaded_results
+    loaded_data_sets, token_lifespans, dexscreener_snapshots  = loaded_results
 
     training_data = loaded_data_sets.get(rl_config.DATA_SET_KEY_TRAIN)
     eval_data = loaded_data_sets.get(rl_config.DATA_SET_KEY_EVAL)
 
     train_lifespans = {k: v for k, v in token_lifespans.items() if k in training_data} if training_data else {}
     eval_lifespans = {k: v for k, v in token_lifespans.items() if k in eval_data} if eval_data else {}
+
+    # Filter snapshots for each data split
+    train_snapshots = {k: v for k, v in dexscreener_snapshots.items() if k in training_data} if training_data else {}
+    eval_snapshots = {k: v for k, v in dexscreener_snapshots.items() if k in eval_data} if eval_data else {}
+
 
     if not training_data or not train_lifespans:
         logger.critical("No training data or corresponding lifespans available. Exiting.")
@@ -296,8 +308,18 @@ async def train_rl_agent(render_mode: Optional[str] = None):
         VecEnvClass = SubprocVecEnv if rl_config.N_ENVS > 1 else DummyVecEnv
 
         # Create training environments, passing lifespans
-        env_fns = [make_env_func(training_data, train_lifespans, rl_config.RL_INITIAL_CAPITAL, rl_config.MAX_STEPS_PER_EPISODE, rank=i, render_mode=render_mode)
-                   for i in range(rl_config.N_ENVS)]
+        # Create training environments, passing all three data dictionaries
+        env_fns = [
+            make_env_func(
+                data_dict=training_data, 
+                lifespan_dict=train_lifespans,
+                snapshot_dict=train_snapshots, # Pass snapshot data
+                initial_capital=rl_config.RL_INITIAL_CAPITAL, 
+                max_steps=rl_config.MAX_STEPS_PER_EPISODE, 
+                rank=i, 
+                render_mode=render_mode
+            ) for i in range(rl_config.N_ENVS)
+        ]
         train_env_raw = VecEnvClass(env_fns) # Revert passing render_mode to SubprocVecEnv constructor
         # Explicitly set render_mode on the VecEnv instance after creation
         if render_mode is not None:
@@ -317,8 +339,15 @@ async def train_rl_agent(render_mode: Optional[str] = None):
 
         # Create evaluation environment
         if eval_data and eval_lifespans:
-            eval_env_fn = make_env_func(eval_data, eval_lifespans, rl_config.RL_INITIAL_CAPITAL, rl_config.MAX_STEPS_PER_EPISODE, rank=100)
-            eval_env_raw = DummyVecEnv([eval_env_fn]) # Revert passing render_mode to DummyVecEnv constructor
+            eval_env_fn = make_env_func(
+                data_dict=eval_data, 
+                lifespan_dict=eval_lifespans,
+                snapshot_dict=eval_snapshots, # Pass snapshot data
+                initial_capital=rl_config.RL_INITIAL_CAPITAL, 
+                max_steps=rl_config.MAX_STEPS_PER_EPISODE, 
+                rank=100
+            )
+            eval_env_raw = DummyVecEnv([eval_env_fn])
             # Explicitly set render_mode on the VecEnv instance after creation
             if render_mode is not None:
                  eval_env_raw.render_mode = render_mode

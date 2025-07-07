@@ -10,7 +10,7 @@ PLAY_SELL_SOUND = False                     # Play the sell sound when a sell is
 
 # --- NEW TRADING MODE ---
 # Options: "simulate", "paper_trading", "live"
-# "simulate": Records trades to DB as if they happened, no external calls for execution. (Your current behavior)
+# "simulate": Records trades to DB as if they happened, no external calls for execution.
 # "paper_trading": Calls live execution APIs, signs transactions, but DOES NOT send to network. Simulates fills.
 # "live": Full live trading, sends transactions to the network.
 TRADING_MODE = "simulate"                   # <<< SET YOUR DEFAULT MODE HERE (e.g., "simulate" for safety)
@@ -22,8 +22,8 @@ DEFAULT_SELL_POOL = "auto"
 FIRST_SELL_PROFIT_MARGIN = 70.0             # Desired profit margin % on the *total initial investment* for the first TP sell
 FIRST_SELL_PERCENT = 35.0                   # % of *initial* tokens to sell at First TP (e.g., 50.0 for 50%)
 INITIAL_STOP_LOSS_PERCENT = 40.0            # Initial SL as % below buy price (e.g., 25.0 for -25%)
-TRAILING_STOP_LOSS_PERCENT = 50.0           # Trailing SL % drop from highest price *after* First TP (e.g., 15.0 for -15%)
-SECOND_TAKE_PROFIT_PERCENT = 800.0          # Second TP as % above buy price (e.g., 200.0 for +200%)
+TRAILING_STOP_LOSS_PERCENT = 10.0           # Trailing SL % drop from highest price *after* First TP (e.g., 15.0 for -15%)
+SECOND_TAKE_PROFIT_PERCENT = 450.0          # Second TP as % above buy price (e.g., 200.0 for +200%)
 
 # --- Fees and Tips ---
 DEFAULT_BUY_FEE = 0.001                     # Fee for buying in SOL
@@ -54,7 +54,7 @@ DEFAULT_RUGCHECK_SCORE_THRESHOLD = 401      # No trading if Rugcheck score is eq
 DEFAULT_SOCIAL_SCORE_THRESHOLD = 100        # No trading if Social score is equal or above this threshold
 DEFAULT_VOLUME_THRESHOLD = 40000            # Minimum volume threshold in USD
 MIN_MARKETCAP_THRESHOLD = 4000              # Minimum market cap threshold in USD to make emergency sell
-DEFAULT_MARKETCAP_THRESHOLD = 40000         # Minimum market cap threshold in USD to search for buy opportunities
+DEFAULT_MARKETCAP_THRESHOLD = 20000         # Minimum market cap threshold in USD to search for buy opportunities
 MIN_VOLATILITY = 0.18                       # Minimum volatility threshold in % to search for buy opportunities
 DEFAULT_TIME_INTERVALL = 10                 # Time interval for checking volatility, volume and marketcap in minutes
 MAX_TOKEN_COUNT_PER_CREATOR = 10            # Maximum number of tokens per creator to consider token as safe
@@ -85,8 +85,8 @@ DEX_REVERSAL_MIN_CONFIRMATIONS = 2          # How many snapshots must show stron
 
 # UNSUBSCRIBING CONDITIONS
 INACTIVITY_PERIOD = 60                      # Inactivity period in minutes before unsubscribing & backup
-MC_DROP_THRESHOLD = 2                       # Market cap drop threshold (in %) - for unsubscription & backup
-MIN_TOKEN_AGE = 30                          # Minimum token age in minutes before unsubscription & backup
+MC_DROP_THRESHOLD = 2                       # Market cap drop threshold (in %) under creation MC - for unsubscription & backup
+MIN_TOKEN_AGE = 30                          # Minimum token age in minutes before possible unsubscription & backup
 
 
 # PumpPortal
@@ -99,7 +99,7 @@ _RUGCHECK_AUTH_API = "https://api.rugcheck.xyz/auth/login/solana"
 _RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens"
 _RUGCHECK_RATE_LIMIT = 10                    # 10 requests per minute
 _RUGCHECK_INTERVAL = 60                      # 60 seconds interval for RugCheck checks
-RUGCHECK_SCORE_THRESHOLD = 1002             # Score above which a token is considered high risk and deactivated
+RUGCHECK_SCORE_THRESHOLD = 2500             # Score above which a token is considered high risk and deactivated
 
 # SOL price configuration
 _SOL_PRICE_API_URL = "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd"

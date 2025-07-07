@@ -393,14 +393,18 @@ class DatabaseClient:
                 -- THIS CTE IS NOW MODIFIED TO ONLY USE PUMP.FUN TRADES FOR RELIABLE CALCULATION
                 SELECT
                     mint,
+                    -- The volatility formula remains the same
                     STDDEV(log_return) * SQRT(GREATEST(COUNT(*), 1)) AS volatility
                 FROM (
                     SELECT
                         mint,
-                        LN(price / LAG(price) OVER (PARTITION BY mint ORDER BY timestamp)) AS log_return
-                    FROM trades -- <<< CHANGED: Use 'trades' table directly, not the unified view
+                        -- Use price_sol from the unified view
+                        LN(price_sol / LAG(price_sol) OVER (PARTITION BY mint ORDER BY timestamp)) AS log_return
+                    -- <<< CHANGE: Use 'v_unified_market_ticks_historical' view instead of 'trades'
+                    FROM v_unified_market_ticks_live
                     WHERE timestamp >= NOW() - ($6::text || ' minutes')::interval
-                      AND price > 0
+                      -- <<< CHANGE: Use 'price_sol' column from the view
+                      AND price_sol > 0
                 ) sub
                 WHERE log_return IS NOT NULL
                     AND log_return > '-Infinity'::double precision
@@ -442,7 +446,8 @@ class DatabaseClient:
         query = '''
             SELECT p.id, p.mint, p.price AS buy_price, p.initial_tokens, p.remaining_tokens, p.total_investment_sol,
                 p.stop_loss_price, p.highest_price, p.initial_tp_price, p.second_tp_price, p.first_tp_hit,
-                t.marketCapSol as initial_market_cap_sol, t.data_source
+                t.marketCapSol as initial_market_cap_sol, t.data_source,
+                p.timestamp
             FROM portfolio p
             JOIN tokens t ON p.mint = t.mint
             WHERE p.status = 'active' AND p.tx_type = 'buy'

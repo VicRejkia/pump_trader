@@ -19,7 +19,7 @@ from datetime import timezone, datetime
 # --- Project Modules ---
 from bot_logger import logger
 import rl_config # Import RL specific configurations
-from utils import calculate_volatility # Keep utility for potential recalculation
+from utils import calculate_volatility, calculate_trend_indicators # Keep utility for potential recalculation
 
 # --- Environment Class ---
 
@@ -43,6 +43,7 @@ class TradingEnv(gym.Env):
         self,
         historical_data_dict: Dict[str, pd.DataFrame], # Expects OHLCV data per mint
         token_lifespans: Dict[str, Dict[str, datetime]],
+        dexscreener_snapshot_data: Dict[str, pd.DataFrame],
         initial_capital: float = rl_config.RL_INITIAL_CAPITAL,
         max_steps: int = rl_config.MAX_STEPS_PER_EPISODE,
         render_mode: Optional[str] = None
@@ -101,6 +102,9 @@ class TradingEnv(gym.Env):
             else:
                  logger.warning(f"Skipping invalid/empty DataFrame for mint: {mint}")
 
+        # Store the snapshot data
+        self.dexscreener_snapshot_data = dexscreener_snapshot_data
+
         self.available_mints = list(self.historical_data_dict.keys())
         if not self.available_mints:
             raise ValueError("No valid OHLCV DataFrames found after validation.")
@@ -136,6 +140,7 @@ class TradingEnv(gym.Env):
         self._price_history: deque = deque(maxlen=rl_config.OBSERVATION_PRICE_HISTORY_LENGTH)
         self._previous_unrealized_pnl: float = 0.0
         self._last_step_processed_index = -1
+        self.current_snapshot_df: Optional[pd.DataFrame] = None # Add state for current snapshot df
 
         logger.info(f"TradingEnv (OHLCV) initialized. Observation space dim: {rl_config.OBSERVATION_SPACE_DIM}, Action space dim: {rl_config.ACTION_SPACE_DIM}")
 
@@ -242,70 +247,65 @@ class TradingEnv(gym.Env):
 
     def _run_trading_logic_step(self) -> Tuple[float, float]:
         """
-        Simulates one step of the trading logic using OHLCV data.
+        [REWRITTEN] Simulates one step of the trading logic using OHLCV data.
+        This now includes the complete, source-aware trend reversal logic to match the backtester.
         Returns realized PnL and any shaping bonuses/penalties for the step.
         """
         realized_pnl_this_step = 0.0
         reward_bonus_penalty = 0.0
 
-        current_data_index = self.current_step # Use current_step as index into current_data_df
-        self._last_step_processed_index = current_data_index # Update for observation
+        current_data_index = self.current_step
+        self._last_step_processed_index = current_data_index
 
         if self.current_data_df is None or current_data_index >= len(self.current_data_df):
             return realized_pnl_this_step, reward_bonus_penalty
 
+        # --- Get Current State and Parameters ---
         try:
             current_row = self.current_data_df.iloc[current_data_index]
-            current_timestamp = self.current_data_df.index[current_data_index] # Use current_data_index
+            current_timestamp = self.current_data_df.index[current_data_index]
             
             price = float(current_row.get('Close', 0.0))
-            volume_ohlcv = float(current_row.get('Volume', 0.0)) # OHLCV volume
+            volume_ohlcv = float(current_row.get('Volume', 0.0))
             high_price = float(current_row.get('High', 0.0))
             
-            # Live market caps from current row
             current_live_sol_mc = float(current_row.get('marketCapSol', 0.0))
             current_live_usd_mc = float(current_row.get('market_cap_calculated', 0.0))
-            # Token-specific creation time features
-            rugcheck_val = int(current_row.get('rugcheck_score', 10000)) # From OHLCV data
-            socials_val = int(current_row.get('socials_score', 100))     # From OHLCV data
-            volatility_val = float(current_row.get('volatility', 0.0))   # From OHLCV data
+            
+            rugcheck_val = int(current_row.get('rugcheck_score', 10000))
+            socials_val = int(current_row.get('socials_score', 100))
+            volatility_val = float(current_row.get('volatility', 0.0))
 
-
-            if price <= 1e-12: return realized_pnl_this_step, reward_bonus_penalty
+            if price <= 1e-12:
+                return realized_pnl_this_step, reward_bonus_penalty
 
             agent_params = self.current_parameters
-            if not agent_params: # Should be set by _apply_action
-                agent_params = {p[0]: (p[1] + p[2]) / 2.0 for p in rl_config.RL_TUNABLE_PARAMETERS}
-                agent_params['MC_DROP_THRESHOLD'] = 70.0 # Default if not set
-
-            # Get parameters tuned by the agent
             initial_sl_percent = agent_params.get('INITIAL_STOP_LOSS_PERCENT', 40.0)
             first_sell_perc_fraction = agent_params.get('FIRST_SELL_PERCENT', 35.0) / 100.0
             trailing_sl_percent = agent_params.get('TRAILING_STOP_LOSS_PERCENT', 50.0)
             first_profit_margin_fraction = agent_params.get('FIRST_SELL_PROFIT_MARGIN', 70.0) / 100.0
             second_tp_margin_fraction = agent_params.get('SECOND_TAKE_PROFIT_PERCENT', 800.0) / 100.0
             
-            # Thresholds for buy decisions (tuned by agent)
-            volume_thresh_usd = agent_params.get('DEFAULT_VOLUME_THRESHOLD', 40000) # USD
-            mcap_thresh_buy_usd = agent_params.get('DEFAULT_MARKETCAP_THRESHOLD', 45000) # USD
+            volume_thresh_usd = agent_params.get('DEFAULT_VOLUME_THRESHOLD', 40000)
+            mcap_thresh_buy_usd = agent_params.get('DEFAULT_MARKETCAP_THRESHOLD', 45000)
             rug_thresh_agent = agent_params.get('DEFAULT_RUGCHECK_SCORE_THRESHOLD', 401)
             social_thresh_agent = agent_params.get('DEFAULT_SOCIAL_SCORE_THRESHOLD', 100)
             volatility_thresh_agent = agent_params.get('MIN_VOLATILITY', 0.18)
             buy_amount_sol_agent = agent_params.get('SOL_TO_BUY', 0.5)
-            mc_drop_threshold_param = agent_params.get('MC_DROP_THRESHOLD', 70.0) # Tuned by agent
+            mc_drop_threshold_param = agent_params.get('MC_DROP_THRESHOLD_RL', 70.0)
+            use_trend_reversal = agent_params.get('USE_TREND_REVERSAL_CONFIRMATION', False)
 
-            # Fixed simulation parameters from rl_config
             buy_fee = rl_config.DEFAULT_BUY_FEE
             buy_tip = rl_config.DEFAULT_BUY_TIP
             sell_fee = rl_config.DEFAULT_SELL_FEE
             sell_tip = rl_config.DEFAULT_SELL_TIP
-            min_mcap_usd_fallback = rl_config.MIN_MARKET_CAP_USD_FALLBACK # Absolute USD fallback
+            min_mcap_usd_fallback = rl_config.MIN_MARKET_CAP_USD_FALLBACK
 
-        except (KeyError, ValueError, TypeError) as e:
-            logger.error(f"RL Env: Error getting data/params at step {self.current_step}, index {current_data_index}: {e}", exc_info=True)
+        except (KeyError, ValueError, TypeError, IndexError) as e:
+            logger.error(f"RL Env: Error getting data/params at step {self.current_step}: {e}", exc_info=False)
             return realized_pnl_this_step, reward_bonus_penalty
         
-        # --- Sell Logic ---
+        # --- Sell Logic (No change to this block) ---
         if self.active_position:
             pos = self.active_position
             pos['highest_price'] = max(pos['highest_price'], high_price)
@@ -333,25 +333,18 @@ class TradingEnv(gym.Env):
             elif is_first_tp_hit and current_trailing_sl_price > 0 and price <= current_trailing_sl_price:
                 sell_reason = "Trailing SL"; sell_all = True; sell_percentage = 1.0
                 reward_bonus_penalty += rl_config.REWARD_SL_HIT_PENALTY
-            elif self.initial_creation_market_cap_sol is not None and self.initial_creation_market_cap_sol > 1e-9 and \
-                 current_live_sol_mc > 0 and \
-                 current_live_sol_mc < (self.initial_creation_market_cap_sol * (1.0 - (mc_drop_threshold_param / 100.0))):
-                sell_reason = f"Emergency SL (MCap % Drop > {mc_drop_threshold_param:.1f}%)"
-                sell_all = True; sell_percentage = 1.0
-                reward_bonus_penalty += rl_config.REWARD_SL_HIT_PENALTY # Consider a different penalty if needed
-            elif current_live_usd_mc > 0 and current_live_usd_mc < min_mcap_usd_fallback: # Absolute USD fallback
-                 sell_reason = f"Emergency SL (Abs USD MCap < {min_mcap_usd_fallback})"
-                 sell_all = True; sell_percentage = 1.0
+            elif self.initial_creation_market_cap_sol is not None and self.initial_creation_market_cap_sol > 1e-9 and current_live_sol_mc > 0 and current_live_sol_mc < (self.initial_creation_market_cap_sol * (1.0 - (mc_drop_threshold_param / 100.0))):
+                sell_reason = f"Emergency SL (MCap % Drop > {mc_drop_threshold_param:.1f}%)"; sell_all = True; sell_percentage = 1.0
+                reward_bonus_penalty += rl_config.REWARD_SL_HIT_PENALTY
+            elif current_live_usd_mc > 0 and current_live_usd_mc < min_mcap_usd_fallback:
+                 sell_reason = f"Emergency SL (Abs USD MCap < {min_mcap_usd_fallback})"; sell_all = True; sell_percentage = 1.0
                  reward_bonus_penalty += rl_config.REWARD_SL_HIT_PENALTY
             
             if sell_reason:
                 initial_tokens = pos['initial_tokens']
                 remaining_tokens = pos['remaining_tokens']
                 total_investment_sol_for_pos = pos['total_investment_sol']
-                tokens_to_sell = 0.0
-
-                if sell_partial: tokens_to_sell = min(initial_tokens * sell_percentage, remaining_tokens)
-                elif sell_all: tokens_to_sell = remaining_tokens * sell_percentage # sell_percentage will be 1.0 here
+                tokens_to_sell = min(initial_tokens * sell_percentage, remaining_tokens) if sell_partial else remaining_tokens
                 
                 if tokens_to_sell > 1e-9:
                     gross_sol_recv = tokens_to_sell * price
@@ -364,40 +357,98 @@ class TradingEnv(gym.Env):
                     self.trade_history.append({'step': self.current_step, 'type': 'sell', 'price': price, 'tokens': tokens_to_sell, 'pnl': pnl, 'reason': sell_reason})
                     if sell_partial:
                         pos['first_tp_hit'] = True
-                        pos['stop_loss_price'] = pos['buy_price'] # Adjust SL to breakeven
-                    if pos['remaining_tokens'] < 1e-9: self.active_position = None
+                        pos['stop_loss_price'] = pos['buy_price']
+                    if pos['remaining_tokens'] < 1e-9:
+                        self.active_position = None
         
         # --- Buy Logic ---
         if not self.active_position and self.current_sol >= (buy_amount_sol_agent + buy_fee + buy_tip):
-            meets_buy_criteria = (
-                volume_ohlcv >= volume_thresh_usd and # OHLCV volume (USD)
-                current_live_usd_mc >= mcap_thresh_buy_usd and # Live USD MC
+            meets_standard_criteria = (
+                volume_ohlcv >= volume_thresh_usd and
+                current_live_usd_mc >= mcap_thresh_buy_usd and
                 rugcheck_val < rug_thresh_agent and
                 socials_val < social_thresh_agent and
                 volatility_val >= volatility_thresh_agent
             )
-            if meets_buy_criteria:
-                total_investment = buy_amount_sol_agent + buy_fee + buy_tip
-                tokens_bought = buy_amount_sol_agent / price if price > 0 else 0
-                if tokens_bought > 0:
-                    self.current_sol -= total_investment
-                    sl_price = price * (1.0 - initial_sl_percent / 100.0)
-                    
-                    cost_of_tp1_portion = total_investment * first_sell_perc_fraction
-                    desired_profit_tp1 = cost_of_tp1_portion * first_profit_margin_fraction
-                    gross_sol_needed_tp1 = cost_of_tp1_portion + desired_profit_tp1 + (sell_fee + sell_tip)
-                    tp1_price = gross_sol_needed_tp1 / (tokens_bought * first_sell_perc_fraction) if (tokens_bought * first_sell_perc_fraction) > 1e-9 else float('inf')
-                    
-                    tp2_price = price * (1.0 + second_tp_margin_fraction)
 
-                    self.active_position = {
-                        'buy_price': price, 'initial_tokens': tokens_bought,
-                        'remaining_tokens': tokens_bought, 'total_investment_sol': total_investment,
-                        'stop_loss_price': sl_price, 'initial_tp_price': tp1_price,
-                        'second_tp_price': tp2_price, 'highest_price': price,
-                        'first_tp_hit': False, 'entry_timestamp': current_timestamp
-                    }
-                    self.trade_history.append({'step': self.current_step, 'type': 'buy', 'price': price, 'tokens': tokens_bought})
+            proceed_with_buy_attempt = False
+
+            if not meets_standard_criteria:
+                proceed_with_buy_attempt = False
+            elif use_trend_reversal:
+                was_recently_sold_for_reversal_reason = False
+                if self.trade_history:
+                    recency_hours = agent_params.get('TREND_REVERSAL_RECENCY_HOURS', 6)
+                    applicable_reasons = ["Stop Loss", "Emergency SL", "Trailing SL", "Breakeven SL"]
+                    for trade in reversed(self.trade_history):
+                        if trade.get('type') == 'sell':
+                            time_since_last_sell = current_timestamp - self.current_data_df.index[trade['step']]
+                            if time_since_last_sell <= pd.Timedelta(hours=recency_hours):
+                                if any(reason in trade.get('reason', '') for reason in applicable_reasons):
+                                    was_recently_sold_for_reversal_reason = True
+                            break 
+                
+                if was_recently_sold_for_reversal_reason:
+                    is_migrated_token = self.current_snapshot_df is not None and not self.current_snapshot_df.empty
+                    
+                    if is_migrated_token:
+                        # --- DEXSCREENER REVERSAL LOGIC ---
+                        lookback_minutes = agent_params.get('DEX_REVERSAL_LOOKBACK_MINUTES', 15)
+                        min_snapshots = agent_params.get('DEX_REVERSAL_MIN_SNAPSHOTS', 3)
+                        min_liquidity = agent_params.get('DEX_REVERSAL_MIN_LIQUIDITY_USD', 5000)
+                        min_ratio = agent_params.get('DEX_REVERSAL_MIN_BUY_SELL_RATIO', 1.5)
+                        min_confirmations = agent_params.get('DEX_REVERSAL_MIN_CONFIRMATIONS', 2)
+                        
+                        snapshots = self.current_snapshot_df[self.current_snapshot_df.index <= current_timestamp].last(f'{lookback_minutes}min')
+
+                        if len(snapshots) < min_snapshots or float(snapshots.iloc[-1]['liquidity_usd']) < min_liquidity:
+                            proceed_with_buy_attempt = False
+                        else:
+                            count = sum(1 for _, s in snapshots.iterrows() if s.get('buys_m5', 0) > 0 and (s.get('sells_m5', 0) == 0 or (s.get('buys_m5') / s.get('sells_m5')) >= min_ratio))
+                            proceed_with_buy_attempt = count >= min_confirmations
+                    else:
+                        # --- PUMP.FUN REVERSAL LOGIC (TA INDICATORS) ---
+                        lookback_h = agent_params.get('INDICATOR_LOOKBACK_HOURS', 1)
+                        candles_needed = int(lookback_h * 3600 / 5)
+                        start_idx = max(0, self.current_step - candles_needed + 1)
+                        
+                        min_candles_cfg = rl_config.MIN_CANDLE_DATA_FOR_INDICATORS
+                        if (self.current_step - start_idx + 1) >= min_candles_cfg:
+                            indicator_config = {k: agent_params.get(k, v) for k, v in {'RSI_PERIOD': 14, 'BBANDS_PERIOD': 20, 'BBANDS_STD_DEV': 2.0, 'FAST_EMA_PERIOD': 9, 'SLOW_EMA_PERIOD': 21}.items()}
+                            indicator_config['MIN_CANDLE_DATA_FOR_INDICATORS'] = min_candles_cfg
+                            df_inds = calculate_trend_indicators(self.current_data_df.iloc[start_idx : self.current_step + 1].copy(), indicator_config)
+
+                            if not df_inds.empty and len(df_inds) >= 2:
+                                latest = df_inds.iloc[-1]; prev = df_inds.iloc[-2]
+                                rsi_neutral = agent_params.get('TREND_REVERSAL_RSI_NEUTRAL_LEVEL', 45)
+                                bbl_col = f"BBL_{indicator_config['BBANDS_PERIOD']}_{indicator_config['BBANDS_STD_DEV']}"
+                                stage1 = (latest.get('RSI', 50) > 30 and prev.get('RSI', 50) <= 30) or \
+                                         (latest.get('Close', 0) > latest.get(bbl_col, float('inf')) and prev.get('Close', 0) <= prev.get(bbl_col, float('inf'))) or \
+                                         (latest.get('RSI', 0) > rsi_neutral)
+                                stage2 = (latest.get('Close', 0) > latest.get('VWAP', float('-inf'))) and (latest.get('EMA_fast', 0) > latest.get('EMA_slow', float('inf')))
+                                proceed_with_buy_attempt = stage1 and stage2
+                            else:
+                                proceed_with_buy_attempt = False
+                        else:
+                            proceed_with_buy_attempt = False
+                else:
+                    proceed_with_buy_attempt = meets_standard_criteria
+            else:
+                proceed_with_buy_attempt = meets_standard_criteria
+
+            if proceed_with_buy_attempt:
+                total_investment = buy_amount_sol_agent + buy_fee + buy_tip
+                tokens_bought = buy_amount_sol_agent / price
+                self.current_sol -= total_investment
+                sl_price = price * (1.0 - initial_sl_percent / 100.0)
+                cost_tp1 = total_investment * first_sell_perc_fraction
+                profit_tp1 = cost_tp1 * first_profit_margin_fraction
+                gross_sol_tp1 = cost_tp1 + profit_tp1 + (sell_fee + sell_tip)
+                tp1_price = gross_sol_tp1 / (tokens_bought * first_sell_perc_fraction) if (tokens_bought * first_sell_perc_fraction) > 1e-9 else float('inf')
+                tp2_price = price * (1.0 + second_tp_margin_fraction)
+
+                self.active_position = {'buy_price': price, 'initial_tokens': tokens_bought, 'remaining_tokens': tokens_bought, 'total_investment_sol': total_investment, 'stop_loss_price': sl_price, 'initial_tp_price': tp1_price, 'second_tp_price': tp2_price, 'highest_price': price, 'first_tp_hit': False, 'entry_timestamp': current_timestamp}
+                self.trade_history.append({'step': self.current_step, 'type': 'buy', 'price': price, 'tokens': tokens_bought})
         
         return realized_pnl_this_step, reward_bonus_penalty
 
@@ -475,6 +526,9 @@ class TradingEnv(gym.Env):
 
         self.current_mint = random.choice(self.available_mints)
         self.current_data_df = self.historical_data_dict[self.current_mint].copy()
+        # ADDED: Set the snapshot dataframe for the chosen mint
+        self.current_snapshot_df = self.dexscreener_snapshot_data.get(self.current_mint)
+        
         lifespan = self.token_lifespans.get(self.current_mint)
         if not lifespan:
              raise RuntimeError(f"Lifespan info missing for selected mint {self.current_mint} during reset.")

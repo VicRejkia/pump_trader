@@ -134,7 +134,8 @@ async def run_backtest(
     parameters: dict,
     ohlcv_data: pd.DataFrame,
     initial_capital: float,
-    max_timestamp: Optional[datetime] = None
+    max_timestamp: Optional[datetime] = None,
+    dexscreener_snapshot_data: Optional[pd.DataFrame] = None
 ) -> dict:
     """
     Simulates trading with 5-second OHLCV candlestick data, respecting token lifespan,
@@ -427,77 +428,117 @@ async def run_backtest(
                     
                     if was_recently_sold_for_reversal_reason:
                         logger.debug(f"Trend reversal check triggered for {mint_addr} at {timestamp} due to recent sell.")
+
+                        is_migrated_token = dexscreener_snapshot_data is not None and not dexscreener_snapshot_data.empty
                         
-                        # Prepare data slice for indicators
-                        # Ensure 'df' here refers to the full ohlcv_data for the current mint, sorted by time
-                        current_df_index_loc = df.index.get_loc(timestamp) # df is the full data for this mint
-                        
-                        # Calculate how many 5s candles are in indicator_lookback_hours_ga
-                        candles_for_lookback = int(indicator_lookback_hours_ga * (60 * 60 / 5))
-                        start_loc_indicators = max(0, current_df_index_loc - candles_for_lookback + 1) # +1 because slice end is exclusive for iloc for length
-                        
-                        if (current_df_index_loc - start_loc_indicators + 1) >= min_candle_data_for_indicators_config:
-                            indicator_data_slice = df.iloc[start_loc_indicators : current_df_index_loc + 1]
+                        if is_migrated_token:
+                            # --- DEXSCREENER REVERSAL LOGIC ---
+                            logger.debug(f"Token {mint_addr} is migrated. Performing DexScreener snapshot-based check.")
                             
-                            indicator_config_for_utils = {
-                                'MIN_CANDLE_DATA_FOR_INDICATORS': min_candle_data_for_indicators_config, # This is fixed
-                                'RSI_PERIOD': rsi_period_ga,
-                                'BBANDS_PERIOD': bbands_period_ga,
-                                'BBANDS_STD_DEV': bbands_std_dev_ga,
-                                'FAST_EMA_PERIOD': fast_ema_period_ga,
-                                'SLOW_EMA_PERIOD': slow_ema_period_ga,
-                            }
-                            # Make sure 'utils' is imported
-                            df_with_indicators = utils.calculate_trend_indicators(indicator_data_slice.copy(), indicator_config_for_utils)
+                            # Filter snapshots up to the current simulation time
+                            lookback_minutes = parameters.get('DEX_REVERSAL_LOOKBACK_MINUTES', 15)
+                            snapshots = dexscreener_snapshot_data[dexscreener_snapshot_data.index <= timestamp]
+                            snapshots = snapshots.last(f'{lookback_minutes}min')
 
-                            if not df_with_indicators.empty and len(df_with_indicators) >= 2:
-                                latest_ind = df_with_indicators.iloc[-1]
-                                previous_ind = df_with_indicators.iloc[-2]
-
-                                # Stage 1: Potential Bottoming/Recovery Signals
-                                stage1_passed = False
-                                rsi_latest = latest_ind.get('RSI', float('nan'))
-                                rsi_previous = previous_ind.get('RSI', float('nan'))
-                                close_latest = latest_ind.get('Close', float('nan')) # Close from indicator df
-                                close_previous = previous_ind.get('Close', float('nan'))
-                                bb_lower_col = f"BBL_{bbands_period_ga}_{bbands_std_dev_ga}" # Construct BB col name
-                                bb_lower_latest = latest_ind.get(bb_lower_col, float('inf'))
-                                bb_lower_previous = previous_ind.get(bb_lower_col, float('inf'))
-
-                                rsi_crossed_up_30 = pd.notna(rsi_latest) and pd.notna(rsi_previous) and rsi_latest > 30 and rsi_previous <= 30
-                                bb_reentered = pd.notna(close_latest) and pd.notna(close_previous) and \
-                                               pd.notna(bb_lower_latest) and pd.notna(bb_lower_previous) and \
-                                               close_latest > bb_lower_latest and close_previous <= bb_lower_previous
-                                
-                                if rsi_crossed_up_30 or bb_reentered:
-                                    stage1_passed = True
-                                elif pd.notna(rsi_latest) and rsi_latest > trend_reversal_rsi_neutral_level_ga:
-                                    stage1_passed = True
-                                
-                                if stage1_passed:
-                                    # Stage 2: Confirmation Filters (VWAP & EMA)
-                                    vwap_latest = latest_ind.get('VWAP', float('-inf'))
-                                    ema_fast_latest = latest_ind.get('EMA_fast', float('-inf'))
-                                    ema_slow_latest = latest_ind.get('EMA_slow', float('inf'))
-
-                                    trend_confirmed_vwap = pd.notna(close_latest) and pd.notna(vwap_latest) and close_latest > vwap_latest
-                                    momentum_confirmed_ema = pd.notna(ema_fast_latest) and pd.notna(ema_slow_latest) and ema_fast_latest > ema_slow_latest
-
-                                    if trend_confirmed_vwap and momentum_confirmed_ema:
-                                        logger.info(f"Trend reversal confirmed for {mint_addr} at {timestamp}.")
+                            min_snapshots_needed = parameters.get('DEX_REVERSAL_MIN_SNAPSHOTS', 3)
+                            if len(snapshots) < min_snapshots_needed:
+                                logger.debug(f"DEX Reversal FAILED for {mint_addr}: Not enough recent snapshots (have {len(snapshots)}, need {min_snapshots_needed}).")
+                                proceed_with_buy_attempt = False
+                            else:
+                                latest_snapshot = snapshots.iloc[-1]
+                                min_liquidity_usd = parameters.get('DEX_REVERSAL_MIN_LIQUIDITY_USD', 5000)
+                                if float(latest_snapshot['liquidity_usd']) < min_liquidity_usd:
+                                    logger.debug(f"DEX Reversal FAILED for {mint_addr}: Liquidity (${latest_snapshot['liquidity_usd']:.2f}) is below threshold (${min_liquidity_usd:.2f}).")
+                                    proceed_with_buy_attempt = False
+                                else:
+                                    strong_buy_pressure_count = 0
+                                    min_buy_sell_ratio = parameters.get('DEX_REVERSAL_MIN_BUY_SELL_RATIO', 1.5)
+                                    for _, snap in snapshots.iterrows():
+                                        buys = snap.get('buys_m5', 0)
+                                        sells = snap.get('sells_m5', 0)
+                                        if buys > 0 and (sells == 0 or (buys / sells) >= min_buy_sell_ratio):
+                                            strong_buy_pressure_count += 1
+                                    
+                                    min_confirmations = parameters.get('DEX_REVERSAL_MIN_CONFIRMATIONS', 2)
+                                    if strong_buy_pressure_count >= min_confirmations:
+                                        logger.info(f"🚀 DEXScreener Trend Reversal CONFIRMED for {mint_addr} in backtest.")
                                         proceed_with_buy_attempt = True
                                     else:
-                                        logger.debug(f"Trend reversal Stage 2 failed for {mint_addr}: VWAP={trend_confirmed_vwap}, EMA={momentum_confirmed_ema}")
+                                        logger.debug(f"DEX Reversal FAILED for {mint_addr}: Not enough confirmations (have {strong_buy_pressure_count}, need {min_confirmations}).")
+                                        proceed_with_buy_attempt = False
+                                        
+                        else:
+                            # --- PUMP.FUN REVERSAL LOGIC (existing logic) ---
+                            logger.debug(f"Token {mint_addr} is on Pump.fun. Performing indicator-based check.")
+                            current_df_index_loc = df.index.get_loc(timestamp)
+                            current_df_index_loc = df.index.get_loc(timestamp) # df is the full data for this mint
+                            
+                            # Calculate how many 5s candles are in indicator_lookback_hours_ga
+                            candles_for_lookback = int(indicator_lookback_hours_ga * (60 * 60 / 5))
+                            start_loc_indicators = max(0, current_df_index_loc - candles_for_lookback + 1) # +1 because slice end is exclusive for iloc for length
+                            
+                            if (current_df_index_loc - start_loc_indicators + 1) >= min_candle_data_for_indicators_config:
+                                indicator_data_slice = df.iloc[start_loc_indicators : current_df_index_loc + 1]
+                                
+                                indicator_config_for_utils = {
+                                    'MIN_CANDLE_DATA_FOR_INDICATORS': min_candle_data_for_indicators_config, # This is fixed
+                                    'RSI_PERIOD': rsi_period_ga,
+                                    'BBANDS_PERIOD': bbands_period_ga,
+                                    'BBANDS_STD_DEV': bbands_std_dev_ga,
+                                    'FAST_EMA_PERIOD': fast_ema_period_ga,
+                                    'SLOW_EMA_PERIOD': slow_ema_period_ga,
+                                }
+                                # Make sure 'utils' is imported
+                                df_with_indicators = utils.calculate_trend_indicators(indicator_data_slice.copy(), indicator_config_for_utils)
+
+                                if not df_with_indicators.empty and len(df_with_indicators) >= 2:
+                                    latest_ind = df_with_indicators.iloc[-1]
+                                    previous_ind = df_with_indicators.iloc[-2]
+
+                                    # Stage 1: Potential Bottoming/Recovery Signals
+                                    stage1_passed = False
+                                    rsi_latest = latest_ind.get('RSI', float('nan'))
+                                    rsi_previous = previous_ind.get('RSI', float('nan'))
+                                    close_latest = latest_ind.get('Close', float('nan')) # Close from indicator df
+                                    close_previous = previous_ind.get('Close', float('nan'))
+                                    bb_lower_col = f"BBL_{bbands_period_ga}_{bbands_std_dev_ga}" # Construct BB col name
+                                    bb_lower_latest = latest_ind.get(bb_lower_col, float('inf'))
+                                    bb_lower_previous = previous_ind.get(bb_lower_col, float('inf'))
+
+                                    rsi_crossed_up_30 = pd.notna(rsi_latest) and pd.notna(rsi_previous) and rsi_latest > 30 and rsi_previous <= 30
+                                    bb_reentered = pd.notna(close_latest) and pd.notna(close_previous) and \
+                                                pd.notna(bb_lower_latest) and pd.notna(bb_lower_previous) and \
+                                                close_latest > bb_lower_latest and close_previous <= bb_lower_previous
+                                    
+                                    if rsi_crossed_up_30 or bb_reentered:
+                                        stage1_passed = True
+                                    elif pd.notna(rsi_latest) and rsi_latest > trend_reversal_rsi_neutral_level_ga:
+                                        stage1_passed = True
+                                    
+                                    if stage1_passed:
+                                        # Stage 2: Confirmation Filters (VWAP & EMA)
+                                        vwap_latest = latest_ind.get('VWAP', float('-inf'))
+                                        ema_fast_latest = latest_ind.get('EMA_fast', float('-inf'))
+                                        ema_slow_latest = latest_ind.get('EMA_slow', float('inf'))
+
+                                        trend_confirmed_vwap = pd.notna(close_latest) and pd.notna(vwap_latest) and close_latest > vwap_latest
+                                        momentum_confirmed_ema = pd.notna(ema_fast_latest) and pd.notna(ema_slow_latest) and ema_fast_latest > ema_slow_latest
+
+                                        if trend_confirmed_vwap and momentum_confirmed_ema:
+                                            logger.info(f"Trend reversal confirmed for {mint_addr} at {timestamp}.")
+                                            proceed_with_buy_attempt = True
+                                        else:
+                                            logger.debug(f"Trend reversal Stage 2 failed for {mint_addr}: VWAP={trend_confirmed_vwap}, EMA={momentum_confirmed_ema}")
+                                            proceed_with_buy_attempt = False
+                                    else:
+                                        logger.debug(f"Trend reversal Stage 1 failed for {mint_addr}.")
                                         proceed_with_buy_attempt = False
                                 else:
-                                    logger.debug(f"Trend reversal Stage 1 failed for {mint_addr}.")
-                                    proceed_with_buy_attempt = False
+                                    logger.debug(f"Indicator calculation for trend reversal failed or insufficient data for {mint_addr}.")
+                                    proceed_with_buy_attempt = False # Cannot confirm
                             else:
-                                logger.debug(f"Indicator calculation for trend reversal failed or insufficient data for {mint_addr}.")
-                                proceed_with_buy_attempt = False # Cannot confirm
-                        else:
-                            logger.debug(f"Not enough candles for indicator lookback for {mint_addr}.")
-                            proceed_with_buy_attempt = False # Cannot confirm
+                                logger.debug(f"Not enough candles for indicator lookback for {mint_addr}.")
+                                proceed_with_buy_attempt = False # Cannot confirm       
                     else: # Not recently sold for applicable reason, standard buy applies
                         proceed_with_buy_attempt = True 
                 else: # use_trend_reversal is False

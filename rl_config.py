@@ -15,8 +15,8 @@ from typing import List, Dict, Any, Tuple, Union
 # --- General Configuration ---
 # NOTE: THESE DATES ARE EXAMPLES - ADJUST TO YOUR ACTUAL DATA RANGE
 # Use the same extended range as GA for consistency?
-RL_HISTORICAL_DATA_START_TS: datetime = datetime(2025, 5, 20, 15, 0, 0, tzinfo=timezone.utc)
-RL_HISTORICAL_DATA_END_TS: datetime = datetime(2025, 5, 20, 20, 59, 0, tzinfo=timezone.utc)
+RL_HISTORICAL_DATA_START_TS: datetime = datetime(2025, 6, 26, 0, 0, 0, tzinfo=timezone.utc)
+RL_HISTORICAL_DATA_END_TS: datetime = datetime(2025, 7, 4, 23, 59, 0, tzinfo=timezone.utc)
 
 # --- Environment Configuration ---
 DATA_SET_KEY_TRAIN: str = 'train'       # Data used for agent training episodes.
@@ -69,22 +69,27 @@ OBSERVATION_HIGH: float = np.inf
 # Parameters controlled by the RL agent.
 # Format: (parameter_name, low_bound, high_bound, type)
 RL_TUNABLE_PARAMETERS: List[Tuple[str, float, float, type]] = [
-    # Focus on sell-side parameters for initial RL experiments
-    ('INITIAL_STOP_LOSS_PERCENT', 5.0, 70.0, float),    # 5% to 70% SL
-    ('FIRST_SELL_PERCENT', 20.0, 100.0, float),         # 20% to 100% partial sell
-    ('TRAILING_STOP_LOSS_PERCENT', 5.0, 50.0, float),   # 5% to 50% TSL
-    ('FIRST_SELL_PROFIT_MARGIN', 10.0, 200.0, float),   # 10% to 200% margin for TP1
-    ('SECOND_TAKE_PROFIT_PERCENT', 100.0, 1000.0, float), # 100% to 1000% TP2
-    ('DEFAULT_VOLUME_THRESHOLD', 5000, 50000, int),     # 5k to 50k USD volume threshold
-    ('DEFAULT_MARKETCAP_THRESHOLD', 10000, 100000, int), # 10k to 100k USD market cap threshold
-    ('MIN_VOLATILITY', 0.01, 1.0, float),                # 0.01% to 1% volatility threshold
-    ('DEFAULT_RUGCHECK_SCORE_THRESHOLD', 1, 1002, int), # 1 to 1000 score threshold
-    ('DEFAULT_SOCIAL_SCORE_THRESHOLD', 1, 100, int),  # 1 to 100 score threshold
-    # ('DEFAULT_TIME_INTERVALL', 1, 60, int),
-    ('SOL_TO_BUY', 0.1, 0.5, float), # Add buy amount later if needed
-    ('MC_DROP_THRESHOLD_RL', 5.0, 95.0, float), # 5% to 70% market cap drop threshold
-    ('USE_TREND_REVERSAL_CONFIRMATION', 0.0, 1.0, float), # Agent outputs float; env converts (e.g., > 0.5 is True)
+    # Sell-side parameters
+    ('INITIAL_STOP_LOSS_PERCENT', 5.0, 70.0, float),
+    ('FIRST_SELL_PERCENT', 20.0, 100.0, float),
+    ('TRAILING_STOP_LOSS_PERCENT', 5.0, 50.0, float),
+    ('FIRST_SELL_PROFIT_MARGIN', 10.0, 200.0, float),
+    ('SECOND_TAKE_PROFIT_PERCENT', 100.0, 1000.0, float),
+    
+    # Buy condition thresholds
+    ('DEFAULT_VOLUME_THRESHOLD', 5000, 50000, int),
+    ('DEFAULT_MARKETCAP_THRESHOLD', 10000, 100000, int),
+    ('MIN_VOLATILITY', 0.01, 1.0, float),
+    ('DEFAULT_RUGCHECK_SCORE_THRESHOLD', 1, 1002, int),
+    ('DEFAULT_SOCIAL_SCORE_THRESHOLD', 1, 100, int),
+    ('SOL_TO_BUY', 0.1, 0.5, float),
+    
+    # Emergency & Re-buy parameters
+    ('MC_DROP_THRESHOLD_RL', 5.0, 95.0, float),
+    ('USE_TREND_REVERSAL_CONFIRMATION', 0.0, 1.0, float),
     ('STOP_LOSS_COOLDOWN_MINUTES', 0.0, 60.0, int),
+    
+    # PUMP.FUN Trend Reversal Parameters
     ('TREND_REVERSAL_RECENCY_HOURS', 0.25, 12.0, int),
     ('TREND_REVERSAL_RSI_NEUTRAL_LEVEL', 30.0, 60.0, float),
     ('INDICATOR_LOOKBACK_HOURS', 0.25, 6.0, int),
@@ -93,6 +98,13 @@ RL_TUNABLE_PARAMETERS: List[Tuple[str, float, float, type]] = [
     ('BBANDS_STD_DEV', 1.5, 2.5, float),
     ('FAST_EMA_PERIOD', 5.0, 15.0, int),
     ('SLOW_EMA_PERIOD', 15.0, 30.0, int),
+
+    # [NEW] DEXSCREENER Trend Reversal Parameters
+    ('DEX_REVERSAL_LOOKBACK_MINUTES', 15.0, 60.0, int),
+    ('DEX_REVERSAL_MIN_SNAPSHOTS', 3.0, 10.0, int),
+    ('DEX_REVERSAL_MIN_LIQUIDITY_USD', 1000.0, 10000.0, int),
+    ('DEX_REVERSAL_MIN_BUY_SELL_RATIO', 1.1, 3.0, float),
+    ('DEX_REVERSAL_MIN_CONFIRMATIONS', 1.0, 5.0, int),
 ]
 ACTION_SPACE_DIM: int = len(RL_TUNABLE_PARAMETERS)
 
@@ -127,6 +139,8 @@ DEFAULT_SELL_TIP: float = 0.001
 # Fixed thresholds for the *simulated* buy decision (agent learns parameters, not timing)
 # MIN_MARKET_CAP is an absolute USD threshold, used as a fallback if MC_DROP_THRESHOLD logic doesn't trigger
 MIN_MARKET_CAP_USD_FALLBACK: int = 3500 # Renamed for clarity
+
+MIN_CANDLE_DATA_FOR_INDICATORS: int = 30
 
 VOLATILITY_WINDOW: int = 120 # Window size (steps) for volatility calculation in env
 

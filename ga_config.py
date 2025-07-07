@@ -19,110 +19,141 @@ from typing import List, Dict, Any, Union
 # Using discrete values simplifies the search space initially.
 
 OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
+    # --- Standard Trading Parameters ---
     {
         "name": "SOL_TO_BUY",
-        "values": [round(x * 0.1, 1) for x in range(1, 6)], # 0.2 to 1.0 SOL in steps of 0.1
+        "values": [round(x * 0.1, 1) for x in range(1, 6)], # 0.1 to 0.5 SOL
         "type": float
     },
     {
         "name": "INITIAL_STOP_LOSS_PERCENT",
-        "values": list(range(40, 81, 5)), # 10% to 70% SL in steps of 5%
+        "values": list(range(10, 71, 5)), # 10% to 70% SL
         "type": float
     },
     {
         "name": "FIRST_SELL_PERCENT",
-        "values": list(range(15, 81, 5)), # 20% to 100% of initial tokens in steps of 10%
+        "values": list(range(20, 101, 10)), # 20% to 100% of initial tokens
         "type": float
     },
     {
         "name": "TRAILING_STOP_LOSS_PERCENT",
-        "values": list(range(40, 81, 5)), # 5% to 50% trailing SL in steps of 5% (tighter range)
+        "values": list(range(5, 41, 5)), # 5% to 40% trailing SL
         "type": float
     },
     {
         "name": "SECOND_TAKE_PROFIT_PERCENT",
-        "values": list(range(550, 1101, 50)), # 100% to 1000% TP2 in steps of 50%
+        "values": list(range(100, 1001, 50)), # 100% to 1000% TP2
         "type": float
     },
     {
         "name": "FIRST_SELL_PROFIT_MARGIN",
-        "values": list(range(10, 101, 10)), # 20% to 200% margin in steps of 20%
+        "values": list(range(20, 201, 20)), # 20% to 200% margin
         "type": float
     },
+    
+    # --- Buy Condition Thresholds ---
     {
         "name": "DEFAULT_VOLUME_THRESHOLD",
-        "values": list(range(10000, 40001, 2500)), # 5k to 50k USD volume in steps of 2.5k
+        "values": list(range(5000, 50001, 2500)), # 5k to 50k USD volume
         "type": int
     },
     {
         "name": "DEFAULT_MARKETCAP_THRESHOLD",
-        "values": list(range(10000, 50001, 5000)), # 5k to 50k USD market cap in steps of 2.5k
+        "values": list(range(5000, 50001, 2500)), # 5k to 50k USD market cap
         "type": int
     },
     {
         "name": "MIN_VOLATILITY",
-        # Volatility as % change (e.g., 0.1 means 0.1%)
-        "values": [round(x * 0.02, 2) for x in range(1, 11)], # 0.05% to 0.5% in steps of 0.05%
+        "values": [round(x * 0.05, 2) for x in range(1, 11)], # 0.05% to 0.5%
         "type": float
     },
     {
         "name": "DEFAULT_RUGCHECK_SCORE_THRESHOLD",
-        "values": list(range(1, 801, 100)), # 1 to 1001 score in steps of 100
+        "values": list(range(201, 1002, 100)), # 201 to 1001 score
         "type": int
     },
     {
         "name": "DEFAULT_SOCIAL_SCORE_THRESHOLD",
-        "values": list(range(0, 101, 10)), # 0 to 80 score in steps of 10
+        "values": list(range(100, 100, 1)), # 10 to 80 score
         "type": int
     },
+    
+    # --- PUMP.FUN Trend Reversal Parameters ---
     {
         "name": "USE_TREND_REVERSAL_CONFIRMATION",
         "values": [0, 1], # 0 for False, 1 for True
-        "type": int # Will be cast to bool in the backtester/logic
+        "type": int 
     },
     {
         "name": "STOP_LOSS_COOLDOWN_MINUTES",
-        "values": list(range(0, 61, 5)), # e.g., 0 to 60 minutes in 5-min steps
+        "values": list(range(0, 61, 5)), # 0 to 60 minutes
         "type": int
     },
     {
         "name": "TREND_REVERSAL_RECENCY_HOURS",
-        "values": list(range(1, 25, 1)), # e.g., 1 to 24 hours
+        "values": list(range(1, 13, 1)), # 1 to 12 hours
         "type": int
     },
     {
         "name": "TREND_REVERSAL_RSI_NEUTRAL_LEVEL",
-        "values": [round(x * 2.5 + 30, 1) for x in range(0, 13)], # e.g., 30.0 to 60.0 in 2.5 steps
+        "values": [round(x * 2.5 + 30, 1) for x in range(0, 13)], # 30.0 to 60.0
         "type": float
     },
     {
         "name": "INDICATOR_LOOKBACK_HOURS",
-        "values": list(range(1, 13, 1)), # e.g., 1 to 12 hours
+        "values": list(range(1, 7, 1)), # 1 to 6 hours
         "type": int
     },
     {
         "name": "RSI_PERIOD",
-        "values": list(range(7, 29, 1)), # e.g., 7 to 28
+        "values": list(range(7, 29, 1)), # 7 to 28
         "type": int
     },
     {
         "name": "BBANDS_PERIOD",
-        "values": list(range(10, 31, 2)), # e.g., 10 to 30
+        "values": list(range(10, 31, 2)), # 10 to 30
         "type": int
     },
     {
         "name": "BBANDS_STD_DEV",
-        "values": [round(x * 0.1 + 1.5, 1) for x in range(0, 11)], # e.g., 1.5 to 2.5
+        "values": [round(x * 0.1 + 1.5, 1) for x in range(0, 11)], # 1.5 to 2.5
         "type": float
     },
     {
         "name": "FAST_EMA_PERIOD",
-        "values": list(range(5, 16, 1)), # e.g., 5 to 15
+        "values": list(range(5, 16, 1)), # 5 to 15
         "type": int
     },
     {
         "name": "SLOW_EMA_PERIOD",
-        "values": list(range(15, 31, 1)), # e.g., 15 to 30
+        "values": list(range(15, 31, 1)), # 15 to 30
+        "type": int
+    },
+
+    # --- [NEW] DEXSCREENER Trend Reversal Parameters ---
+    {
+        "name": "DEX_REVERSAL_LOOKBACK_MINUTES",
+        "values": list(range(15, 61, 5)), # 15 to 60 minutes
+        "type": int
+    },
+    {
+        "name": "DEX_REVERSAL_MIN_SNAPSHOTS",
+        "values": list(range(3, 11, 1)), # 3 to 10 snapshots
+        "type": int
+    },
+    {
+        "name": "DEX_REVERSAL_MIN_LIQUIDITY_USD",
+        "values": list(range(1000, 10001, 1000)), # 1k to 10k USD
+        "type": int
+    },
+    {
+        "name": "DEX_REVERSAL_MIN_BUY_SELL_RATIO",
+        "values": [round(x * 0.1 + 1.1, 1) for x in range(0, 20)], # 1.1 to 3.0
+        "type": float
+    },
+    {
+        "name": "DEX_REVERSAL_MIN_CONFIRMATIONS",
+        "values": list(range(1, 6, 1)), # 1 to 5 confirmations
         "type": int
     },
 ]
@@ -176,8 +207,8 @@ DATA_SPLIT: Dict[str, float] = {
 
 # Overall date range for historical data fetch
 # NOTE: THESE DATES ARE EXAMPLES - ADJUST TO YOUR ACTUAL DATA RANGE
-HISTORICAL_DATA_START_TS: datetime = datetime(2025, 5, 23, 14, 0, 0, tzinfo=timezone.utc)
-HISTORICAL_DATA_END_TS: datetime = datetime(2025, 5, 23, 23, 59, 0, tzinfo=timezone.utc) # Extended range example
+HISTORICAL_DATA_START_TS: datetime = datetime(2025, 6, 26, 0, 0, 0, tzinfo=timezone.utc)
+HISTORICAL_DATA_END_TS: datetime = datetime(2025, 7, 5, 23, 59, 0, tzinfo=timezone.utc) # Extended range example
 
 # --- Backtester Settings ---
 BACKTEST_INITIAL_CAPITAL: float = 100.0 # In SOL

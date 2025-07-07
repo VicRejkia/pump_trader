@@ -44,8 +44,14 @@ except ImportError:
             pass
         def normalize_obs(self, obs):
             return obs
+        @classmethod
         def load(self, *args, **kwargs):
-            pass
+            # Return a dummy instance that can be called but does nothing
+            return VecNormalize()
+    class PPO: # Dummy PPO
+        @classmethod
+        def load(cls, *args, **kwargs): return None
+
 # Import RL config to know parameter names and observation details
 import rl_config
 # --- End RL Imports ---
@@ -86,6 +92,7 @@ class TradingBot:
         self._last_dynamic_config_mtime = 0
         self.bot_start_time = datetime.now(timezone.utc) # For uptime calculation
         self.dexscreener_fetcher = None
+        self._price_history_cache = {} # Cache for recent prices for RL observation
 
         # Ensure data directory exists
         os.makedirs(DATA_DIR_BOT, exist_ok=True)
@@ -645,205 +652,119 @@ class TradingBot:
         Gathers LIVE market and portfolio data and formats it into the
         observation format expected by the RL agent. Includes normalization.
         Returns None if essential data is missing or calculation fails.
-        **NOTE:** This requires significant implementation based on live data sources.
         """
         log_debug("Attempting to generate live observation for RL agent...")
-        obs_data = {} # Dictionary to hold raw feature values
+        raw_obs_map = {feat: 0.0 for feat in rl_config.OBSERVATION_FEATURES} # Initialize with zeros
 
-        # --- Fetch Portfolio State ---
         try:
-            obs_data['sol_balance'] = await self.state.get_current_sol_balance()
-            active_positions = await self.db_client.get_active_buy_positions() # Assumes this returns quickly
-            # Simplification: Focus observation on the *first* active position if multiple exist
+            # --- Portfolio & Time State ---
+            raw_obs_map['sol_balance_norm'] = await self.state.get_current_sol_balance()
+            active_positions = await self.db_client.get_active_buy_positions()
             current_pos = active_positions[0] if active_positions else None
-            obs_data['is_holding'] = 1.0 if current_pos else 0.0
-        except Exception as e:
-            log_error(f"Failed to get portfolio state for observation: {e}")
-            return None
+            
+            now = datetime.now(timezone.utc)
+            raw_obs_map['weekday'] = float(now.weekday())
+            raw_obs_map['daytime'] = float(now.hour)
 
-        # --- Fetch Market State (Focus on current position's mint if holding) ---
-        target_mint = current_pos['mint'] if current_pos else None
+            # --- Market State ---
+            target_mint = None
+            if current_pos:
+                raw_obs_map['is_holding'] = 1.0
+                target_mint = current_pos['mint']
+                buy_price = float(current_pos['buy_price'])
+                rem_tokens = float(current_pos['remaining_tokens'])
+                total_investment = float(current_pos.get('total_investment_sol', 1.0))
+                entry_ts = current_pos['timestamp'].replace(tzinfo=timezone.utc)
+                raw_obs_map['time_holding_norm'] = (now - entry_ts).total_seconds()
+            else:
+                raw_obs_map['is_holding'] = 0.0
+                # If not holding, which mint to observe? Can't get price changes.
+                # Use a neutral observation (mostly zeros).
+                log_debug("Not holding a position. Using neutral market observation.")
+                
+                # Construct the final observation vector from the map
+                obs_list = [raw_obs_map.get(feat, 0.0) for feat in rl_config.OBSERVATION_FEATURES]
+                final_obs = np.array(obs_list, dtype=np.float32)
 
-        if target_mint:
-            try:
-                # Price, Volume, MC (Needs efficient fetching - maybe latest from DB?)
-                latest_prices = await self.db_client.get_latest_prices([target_mint])
-                if target_mint in latest_prices:
-                    obs_data['current_price'] = latest_prices[target_mint]['price']
-                    obs_data['market_cap'] = latest_prices[target_mint]['market_cap'] # Assuming SOL MC
-                else:
-                    log_warning(f"Could not get latest price/MC for active mint {target_mint}")
-                    obs_data['current_price'] = current_pos['buy_price'] # Fallback? Risky
-                    obs_data['market_cap'] = 0.0
+                # Normalize using VecNormalize
+                if self.vec_normalize:
+                    final_obs = self.vec_normalize.normalize_obs(final_obs.reshape(1, -1))[0]
+                return final_obs
 
-                # --- Fetch recent trades for volume/volatility (Example DB Query) ---
-                # This query needs optimization for speed in live trading
+            # --- Continue if Holding a Position ---
+            if not target_mint: return None
+
+            # Efficiently fetch all needed data for the mint
+            async with self.db_client.pool.acquire() as conn:
+                price_data = await self.db_client.get_price_and_market_cap_for_decision(target_mint, self.config, conn)
+                
+                # Fetch recent trades for price history and volatility
                 query_recent = """
-                    SELECT price, sol_amount as volume FROM trades
-                    WHERE mint = $1 AND timestamp >= NOW() - INTERVAL '10 minutes'
+                    SELECT timestamp, price_sol, sol_amount as volume FROM v_unified_market_ticks_live
+                    WHERE mint = $1 AND timestamp >= NOW() - INTERVAL '15 minutes'
                     ORDER BY timestamp DESC LIMIT 100;
-                """ # Adjust interval/limit as needed
-                recent_trades = await self.db_client.pool.fetch(query_recent, target_mint)
-                if recent_trades:
-                    recent_df = pd.DataFrame(recent_trades, columns=['price', 'volume'])
-                    obs_data['volume'] = recent_df['volume'].sum() # Example: sum volume
-                    # Calculate volatility (needs sufficient points)
-                    if len(recent_df) > 5:
-                        prices_series = pd.Series(pd.to_numeric(recent_df['price'], errors='coerce'), index=pd.to_datetime(recent_df['timestamp'], errors='coerce', utc=True)).sort_index() # Create Series with time index
-                        prices_series = prices_series.dropna()
-                        # Use appropriate window size (e.g., matching training or a reasonable live window)
-                        obs_data['volatility'] = calculate_volatility(prices_series, window=20) # Example window
-                    else:
-                        obs_data['volatility'] = 0.0
-                else:
-                    obs_data['volume'] = 0.0
-                    obs_data['volatility'] = 0.0
+                """
+                recent_trades_records = await conn.fetch(query_recent, target_mint)
+                
+                # Fetch token creation time and scores
+                token_info_row = await conn.fetchrow("""
+                    SELECT t.timestamp as creation_time, t.socials_score, r.score as rugcheck_score
+                    FROM tokens t
+                    LEFT JOIN rugcheck r ON t.mint = r.mint
+                    WHERE t.mint = $1
+                    ORDER BY r.last_checked DESC NULLS LAST
+                    LIMIT 1
+                """, target_mint)
 
-
-                # Scores (Fetch latest from DB - needs dedicated functions)
-                # obs_data['rugcheck_score'] = await self.db_client.get_latest_score(target_mint, 'rugcheck')
-                # obs_data['socials_score'] = await self.db_client.get_latest_score(target_mint, 'socials')
-                obs_data['rugcheck_score'] = 10000 # Placeholder
-                obs_data['socials_score'] = 100 # Placeholder
-
-                # Token creation time
-                # token_info = await self.db_client.get_token_info(target_mint) # Needs function
-                # obs_data['creation_time'] = token_info['timestamp'] if token_info else pd.NaT
-                obs_data['creation_time'] = pd.NaT # Placeholder
-
-            except Exception as e:
-                log_error(f"Failed to get market state for {target_mint}: {e}")
-                return None # Can't proceed without market data if holding
-        else:
-            # If not holding, what state to use? Average market state? Random token?
-            # Simplest: return a 'neutral' state or zeros.
-            log_debug("Not holding any position, generating neutral observation.")
-            # Use defaults or averages if possible, otherwise zeros
-            obs_data['current_price'] = 0.0
-            obs_data['market_cap'] = 0.0
-            obs_data['volume'] = 0.0
-            obs_data['volatility'] = 0.0
-            obs_data['rugcheck_score'] = 10000
-            obs_data['socials_score'] = 100
-            obs_data['creation_time'] = pd.NaT
-
-
-        # --- Calculate Derived Features ---
-        # Needs access to historical prices (e.g., stored in state_manager or queried)
-        # This part is complex for live data - requires maintaining price history
-        obs_data['price_change_1'] = 0.0 # Placeholder
-        obs_data['price_change_5'] = 0.0 # Placeholder
-        obs_data['price_change_10'] = 0.0 # Placeholder
-
-        time_since_creation_seconds = 0
-        if pd.notna(obs_data.get('creation_time')):
-            time_diff = datetime.now(timezone.utc) - obs_data['creation_time'].replace(tzinfo=timezone.utc) # Ensure tz
-            time_since_creation_seconds = max(0, time_diff.total_seconds())
-
-        position_pnl_norm = 0.0
-        steps_holding = 0 # How to track 'steps' live? Use time held instead.
-        if obs_data['is_holding'] and current_pos:
-            # Calculate PnL based on live price and DB data
-            buy_price = float(current_pos['buy_price'])
-            rem_tokens = float(current_pos['remaining_tokens'])
-            total_investment = float(current_pos.get('total_investment_sol', 1.0) or 1.0)
-            current_value = obs_data.get('current_price', buy_price) * rem_tokens
-            initial_cost_for_remaining = buy_price * rem_tokens
-            unrealized_pnl = current_value - initial_cost_for_remaining
-            position_pnl_norm = unrealized_pnl / total_investment
-            # Calculate time held instead of steps
-            # time_held_seconds = (datetime.now(timezone.utc) - current_pos['timestamp'].replace(tzinfo=timezone.utc)).total_seconds()
-            # steps_holding = time_held_seconds / 10 # Approximate steps if using 10s intervals
-
-        # --- Normalization (MUST MATCH TRAINING ENV) ---
-        # Apply the *exact same* normalization logic used in _get_observation
-        norm_price_change_1 = np.clip(obs_data['price_change_1'] * 20, -1, 1)
-        norm_price_change_5 = np.clip(obs_data['price_change_5'] * 10, -1, 1)
-        norm_price_change_10 = np.clip(obs_data['price_change_10'] * 5, -1, 1)
-        norm_volatility = np.clip(obs_data['volatility'] * 10, 0, 1)
-        norm_market_cap = np.clip(np.log10(obs_data['market_cap'] + 1e-9) / 7, -1, 1)
-        norm_volume = np.clip(np.log10(obs_data['volume'] + 1e-9) / 5, -1, 1)
-        norm_rugcheck = np.clip(1.0 - (obs_data['rugcheck_score'] / 1000.0), 0, 1)
-        norm_socials = np.clip(1.0 - (obs_data['socials_score'] / 100.0), 0, 1)
-        norm_time_creation = np.clip(np.log10(time_since_creation_seconds + 1) / 6, 0, 1)
-        norm_pos_pnl = np.clip(position_pnl_norm, -1, 1)
-        norm_steps_held = np.clip(steps_holding / (rl_config.MAX_STEPS_PER_EPISODE * 0.5), 0, 1) # Or use normalized time held
-        norm_sol_balance = np.clip(obs_data['sol_balance'] / (rl_config.RL_INITIAL_CAPITAL * 2.0), 0, 1)
-
-        # --- Calculate Time Features ---
-        current_timestamp = datetime.now(timezone.utc)
-        # Weekday: Monday=0, Sunday=6. Normalize to [0, 1].
-        weekday = current_timestamp.weekday()
-        norm_weekday = weekday / 6.0 if 6.0 > 0 else 0.0 # Avoid division by zero
-
-        # Daytime: Hour of the day (0-23). Normalize to [0, 1].
-        hour = current_timestamp.hour
-        norm_daytime = hour / 23.0 if 23.0 > 0 else 0.0 # Avoid division by zero
-
-        # --- Normalize Tunable Parameters ---
-        norm_tunable_params = []
-        epsilon = 1e-9 # Use a small epsilon for division by zero avoidance
-        for param_name, low, high, p_type in rl_config.RL_TUNABLE_PARAMETERS:
-            # Get current value from bot's config, use midpoint if not found
-            current_val = self.config.get(param_name.upper(), (low + high) / 2.0)
-
-            # Ensure current_val is the correct type for normalization
-            if p_type == int:
-                 current_val = int(current_val)
-            else:
-                 current_val = float(current_val)
-
-            # Min-Max Normalization: (value - min) / (max - min)
-            if high - low > epsilon: # Avoid division by zero
-                norm_val = (current_val - low) / (high - low)
-            else:
-                norm_val = 0.0 # Or 0.5 if min == max, depending on desired behavior
-
-            # Clip to ensure it's within [0, 1] after normalization
-            norm_tunable_params.append(np.clip(norm_val, 0.0, 1.0))
-
-
-        # --- Construct Raw Observation Vector (Order MUST match rl_config.OBSERVATION_FEATURES) ---
-        # Ensure the order matches the list in rl_config.py
-        raw_observation_list = [
-            norm_price_change_1, norm_price_change_5, norm_price_change_10,
-            norm_volatility, norm_market_cap, norm_volume,
-            norm_rugcheck, norm_socials, norm_time_creation,
-            obs_data['is_holding'], norm_pos_pnl, norm_steps_held, norm_sol_balance,
-            norm_weekday, norm_daytime # Add new time features
-        ]
-        # Add normalized tunable parameters
-        raw_observation_list.extend(norm_tunable_params)
-
-        try:
-            raw_observation = np.array(raw_observation_list, dtype=np.float32)
-
-            # --- Apply VecNormalize (CRITICAL for live deployment) ---
-            if self.vec_normalize:
-                # VecNormalize expects a batch, so reshape the single observation
-                normalized_observation = self.vec_normalize.normalize_obs(raw_observation.reshape(1, -1))
-                observation = normalized_observation[0] # Extract the single observation from the batch
-                log_debug(f"Generated and normalized live observation: {observation}")
-            else:
-                log_warning("VecNormalize not loaded. Live observations will NOT be normalized.")
-                observation = raw_observation # Use raw observation if normalization is not available
-
-            # --- Final Validation ---
-            if observation.shape != (rl_config.OBSERVATION_SPACE_DIM,) or not np.all(np.isfinite(observation)):
-                log_error(f"Live observation generation failed after normalization! Shape: {observation.shape}, Expected: {(rl_config.OBSERVATION_SPACE_DIM,)}, Finite: {np.all(np.isfinite(observation))}")
-                # Log the observation list and its length for debugging
-                log_error(f"Observation list length: {len(raw_observation_list)}, Expected: {rl_config.OBSERVATION_SPACE_DIM}")
-                log_error(f"Observation list content (first 20): {raw_observation_list[:20]}")
+            # Process fetched data
+            current_price = price_data.get('price')
+            if current_price is None:
+                log_warning(f"RL obs: Could not get live price for {target_mint}. Aborting.")
                 return None
 
-            # Clip the final observation to the defined bounds [-1, 1]
-            observation = np.clip(observation, rl_config.OBSERVATION_LOW, rl_config.OBSERVATION_HIGH)
+            raw_obs_map['live_market_cap_sol_norm'] = price_data.get('market_cap', 0.0)
+            raw_obs_map['live_market_cap_usd_norm'] = raw_obs_map['live_market_cap_sol_norm'] * (await self.state.get_sol_price() or 0.0)
+            raw_obs_map['rugcheck_score_norm'] = float(token_info_row.get('rugcheck_score', 10000)) if token_info_row else 10000.0
+            raw_obs_map['socials_score_norm'] = float(token_info_row.get('socials_score', 100)) if token_info_row else 100.0
+            creation_time = token_info_row.get('creation_time') if token_info_row else None
+            if creation_time:
+                raw_obs_map['time_since_creation_norm'] = (now - creation_time.replace(tzinfo=timezone.utc)).total_seconds()
+            
+            # PnL Calculation
+            current_value = current_price * rem_tokens
+            cost_basis = total_investment * (rem_tokens / float(current_pos['initial_tokens']))
+            raw_obs_map['position_pnl_norm'] = current_value - cost_basis
 
+            # Price change and volatility calculation
+            if recent_trades_records:
+                recent_df = pd.DataFrame([dict(r) for r in recent_trades_records])
+                recent_df['timestamp'] = pd.to_datetime(recent_df['timestamp'], utc=True)
+                recent_df = recent_df.set_index('timestamp')
+                prices = pd.to_numeric(recent_df['price_sol'], errors='coerce').dropna()
+                if len(prices) > 1:
+                    safe_prices = prices[prices > 1e-12].to_numpy()
+                    raw_obs_map['price_change_1'] = np.log(safe_prices[0] / safe_prices[1]) if len(safe_prices) > 1 else 0.0
+                    raw_obs_map['price_change_5'] = np.log(safe_prices[0] / safe_prices[5]) if len(safe_prices) > 5 else 0.0
+                    raw_obs_map['price_change_10'] = np.log(safe_prices[0] / safe_prices[10]) if len(safe_prices) > 10 else 0.0
+                    raw_obs_map['volatility'] = calculate_volatility(prices.iloc[::-1], window=20).iloc[-1] if len(prices) > 5 else 0.0 # Reverse for chronological order
+                raw_obs_map['volume_sol_norm'] = pd.to_numeric(recent_df['volume'], errors='coerce').sum()
 
-            return observation
+            # --- Final Assembly and Normalization ---
+            obs_list = [raw_obs_map.get(feat, 0.0) for feat in rl_config.OBSERVATION_FEATURES]
+            final_obs = np.array(obs_list, dtype=np.float32)
+
+            if final_obs.shape != (rl_config.OBSERVATION_SPACE_DIM,) or not np.all(np.isfinite(final_obs)):
+                log_error(f"Live observation generation failed before normalization! Shape: {final_obs.shape}, IsFinite: {np.all(np.isfinite(final_obs))}")
+                return None
+
+            if self.vec_normalize:
+                final_obs = self.vec_normalize.normalize_obs(final_obs.reshape(1, -1))[0]
+            
+            log_debug(f"Generated live observation for {target_mint}.")
+            return final_obs
 
         except Exception as e:
-            log_error(f"Error constructing or normalizing live observation array: {e}", exc_info=True)
+            log_error(f"Error constructing live observation: {e}", exc_info=True)
             return None
 
     async def run_rl_agent_updates(self):
@@ -856,56 +777,51 @@ class TradingBot:
         while not self.state.shutdown_event.is_set():
             try:
                 start_time = time.time()
-                # 1. Get Live Observation
                 observation = await self._get_live_observation()
 
                 if observation is not None:
-                    # 2. Predict Action (Parameters)
-                    # Use deterministic=True for exploitation during live trading
                     action, _ = self.rl_agent.predict(observation, deterministic=True)
                     log_debug(f"RL Agent raw action output: {action}")
 
-                    # 3. Apply Action (Update self.config used by TradingManager)
                     updated_params_count = 0
+                    changed_params_log = []
                     for i, (param_name, low, high, p_type) in enumerate(rl_config.RL_TUNABLE_PARAMETERS):
-                         # Clip action to ensure it's within training bounds
-                        val = np.clip(action[i], low, high)
-                        # Convert type if necessary (e.g., for int parameters)
-                        current_val = p_type(val)
-                        # Only log if value changes significantly?
-                        if param_name in self.config and self.config[param_name] != current_val:
-                             log_info(f"RL Agent Update: '{param_name}' changed from {self.config[param_name]} -> {current_val}")
-                             self.config[param_name] = current_val # Update the shared config dictionary
-                             updated_params_count += 1
-                        elif param_name not in self.config:
-                             log_info(f"RL Agent Update: Setting '{param_name}' -> {current_val}")
-                             self.config[param_name] = current_val
-                             updated_params_count += 1
+                        # The action is already scaled by the agent. We need to un-normalize it.
+                        # However, SB3 handles this for us if the action space is defined correctly.
+                        # The raw action from `predict` is already in the high/low range of the action space.
+                        val = action[i]
 
+                        # Clip just in case, and set type
+                        clipped_val = np.clip(val, low, high)
+                        final_val = p_type(clipped_val) if p_type is not str else str(clipped_val)
+
+                        # Special handling for boolean
+                        if param_name == "USE_TREND_REVERSAL_CONFIRMATION":
+                            final_val = bool(clipped_val > 0.5)
+
+                        param_name_upper = param_name.upper()
+                        if param_name_upper not in self.config or self.config[param_name_upper] != final_val:
+                             self.config[param_name_upper] = final_val
+                             updated_params_count += 1
+                             changed_params_log.append(f"'{param_name}': {final_val}")
 
                     if updated_params_count > 0:
-                         log_info(f"Applied {updated_params_count} parameter updates from RL agent.")
-                         # Pass the updated config to TradingManager if necessary,
-                         # or ensure TradingManager reads from the updated self.config
+                         log_info(f"RL Agent applied {updated_params_count} parameter updates: {', '.join(changed_params_log)}")
                          if self.trading_manager:
-                              self.trading_manager.config = self.config # Ensure manager uses the updated dict
-                    else:
-                         log_debug("RL Agent parameters did not change significantly.")
-
+                              self.trading_manager.config = self.config
                 else:
                     log_warning("Failed to get live observation for RL agent. Skipping parameter update.")
 
-                # 4. Wait for the next interval
                 end_time = time.time()
                 wait_time = max(0, rl_config.AGENT_ACTION_INTERVAL_SECONDS - (end_time - start_time))
-                await asyncio.sleep(wait_time)
+                await self.state.wait_or_interrupt(timeout=wait_time)
 
             except asyncio.CancelledError:
                 log_info(":no_entry_sign: RL agent update task cancelled.")
                 break
             except Exception as e:
                 log_error(f":x: Error in RL agent update loop: {e}", exc_info=True)
-                await asyncio.sleep(rl_config.AGENT_ACTION_INTERVAL_SECONDS) # Wait before retrying on error
+                await self.state.wait_or_interrupt(timeout=rl_config.AGENT_ACTION_INTERVAL_SECONDS)
 
     # --- End RL Agent Integration Functions ---
 
@@ -969,24 +885,34 @@ class TradingBot:
                         log_info(f":white_check_mark: Successfully loaded RL agent: {self.rl_agent_path}")
 
                         # Attempt to load corresponding VecNormalize stats
-                        vec_normalize_path = self.rl_agent_path.replace('_final.zip', '_vecnormalize.pkl').replace('.zip', '_vecnormalize.pkl') # Infer path
+                        vec_normalize_path = self.rl_agent_path.replace('.zip', '_vecnormalize.pkl')
+                        if '_final' in vec_normalize_path:
+                             vec_normalize_path = vec_normalize_path.replace('_final', '')
+                        else: # Handle best model case
+                             base_dir = os.path.dirname(self.rl_agent_path)
+                             vec_normalize_path = os.path.join(base_dir, "best_vecnormalize.pkl")
+                        
                         if os.path.exists(vec_normalize_path):
                             try:
-                                # Create a dummy environment to load stats into
-                                from rl_environment import TradingEnv # Import TradingEnv
-                                # Need dummy env with correct observation space shape
-                                # The actual data doesn't matter, only the observation space structure
-                                dummy_env = TradingEnv(historical_data_dict={'dummy_mint': pd.DataFrame(np.zeros((1, len(['Open', 'High', 'Low', 'Close', 'Volume', 'market_cap_calculated', 'rugcheck_score', 'socials_score', 'token_creation_time']))), columns=['Open', 'High', 'Low', 'Close', 'Volume', 'market_cap_calculated', 'rugcheck_score', 'socials_score', 'token_creation_time'], index=pd.DatetimeIndex([datetime.now(timezone.utc)], tz=timezone.utc))}, token_lifespans={'dummy_mint': {'start_ts': datetime.now(timezone.utc), 'end_ts': datetime.now(timezone.utc) + timedelta(days=1)}}, initial_capital=rl_config.RL_INITIAL_CAPITAL, max_steps=rl_config.MAX_STEPS_PER_EPISODE)
+                                # VecNormalize.load requires a dummy environment, but we can't create a real one here easily.
+                                # A common practice is to load it without one and manually set its attributes if needed,
+                                # or create a minimal dummy env.
+                                from rl_environment import TradingEnv
+                                dummy_env = DummyVecEnv([lambda: TradingEnv(
+                                    historical_data_dict={'dummy': pd.DataFrame([{'Close':0, 'Open':0, 'High':0, 'Low':0, 'Volume':0,'market_cap_calculated':0,'marketCapSol':0, 'creation_init_market_cap_sol':0,'volatility':0, 'rugcheck_score':0,'socials_score':0, 'token_creation_time':pd.NaT}], index=[datetime.now(timezone.utc)])},
+                                    token_lifespans={'dummy': {'start_ts': datetime.now(timezone.utc), 'end_ts': datetime.now(timezone.utc)}},
+                                    dexscreener_snapshot_data={}
+                                )])
 
-                                self.vec_normalize = VecNormalize.load(vec_normalize_path, venv=DummyVecEnv([lambda: dummy_env])) # Load stats into dummy VecEnv
-                                self.vec_normalize.training = False # Set to evaluation mode
-                                self.vec_normalize.norm_reward = False # Do not normalize rewards in live bot
+                                self.vec_normalize = VecNormalize.load(vec_normalize_path, venv=dummy_env)
+                                self.vec_normalize.training = False
+                                self.vec_normalize.norm_reward = False
                                 log_info(f":white_check_mark: Successfully loaded VecNormalize stats from: {vec_normalize_path}")
                             except Exception as vn_load_err:
                                 log_error(f":x: Failed to load VecNormalize stats from {vec_normalize_path}: {vn_load_err}", exc_info=True)
-                                self.vec_normalize = None # Ensure it's None if loading fails
+                                self.vec_normalize = None
                         else:
-                            log_warning(f":warning: VecNormalize stats file not found: {vec_normalize_path}. Live observations will NOT be normalized.")
+                            log_warning(f":warning: VecNormalize stats file not found at expected path: {vec_normalize_path}. Live observations will NOT be normalized.")
                             self.vec_normalize = None
 
                         if self.params_file:
@@ -994,11 +920,11 @@ class TradingBot:
                     except Exception as e:
                         log_error(f":x: Failed to load RL agent from {self.rl_agent_path}: {e}", exc_info=True)
                         self.rl_agent = None
-                        self.vec_normalize = None # Also set VecNormalize to None if agent fails to load
+                        self.vec_normalize = None
                 else:
                     log_warning(f":warning: RL Agent file not found: {self.rl_agent_path}. Cannot use RL agent.")
                     self.rl_agent = None
-                    self.vec_normalize = None # Also set VecNormalize to None if agent file not found
+                    self.vec_normalize = None
 
         # --- Initialize DYNAMIC_CONFIG_FILE ---
         try:
@@ -1086,10 +1012,8 @@ class TradingBot:
             # Start the single, self-recovering WebSocket service task
             asyncio.create_task(self.ws_handler.connect_and_run(), name="websocket_services_manager")
         ]
-        # Removed: self.tasks.extend(self.ws_handler.start())
-        # Removed: asyncio.create_task(self.ws_handler.unsubscribe_new_tokens()) 
-        # (assuming connect/shutdown in handler manage this)
-
+        
+        # ADDED: Conditionally start the RL agent update task
         if self.rl_agent:
             self.tasks.append(asyncio.create_task(self.run_rl_agent_updates(), name="rl_agent_updater"))
         

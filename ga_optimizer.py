@@ -43,6 +43,7 @@ manager = None
 historical_data_sets_shared = None
 # Store token lifespans (start_ts, end_ts) fetched once
 token_lifespans_shared = None
+dexscreener_snapshots_shared = None 
 pool_ref: Optional[Pool] = None
 
 
@@ -67,7 +68,7 @@ def run_backtest_sync_worker(task_data: Tuple[int, Dict[str, Any], str, pd.DataF
         A tuple (solution_idx, mint, fitness_value) on success,
         or None if the backtest fails or the metric is invalid.
     """
-    solution_idx, parameters, mint, df_data, max_timestamp, initial_capital, fitness_metric = task_data
+    solution_idx, parameters, mint, df_data, max_timestamp, initial_capital, fitness_metric, dexscreener_snapshots = task_data
     # logger.debug(f"[Worker {os.getpid()}] Starting sync backtest for Sol {solution_idx}, Mint {mint}, End: {max_timestamp}") # Optional detailed log
     parameters['mint'] = mint # Include mint in parameters for backtest
 
@@ -88,7 +89,7 @@ def run_backtest_sync_worker(task_data: Tuple[int, Dict[str, Any], str, pd.DataF
 
     try:
         # Execute the asynchronous backtest function with max_timestamp
-        result = asyncio.run(run_backtest(parameters, df_data, initial_capital, max_timestamp)) # Pass max_timestamp
+        result = asyncio.run(run_backtest(parameters, df_data, initial_capital, max_timestamp, dexscreener_snapshots)) # Pass max_timestamp
 
         if isinstance(result, dict):
             fitness = result.get(fitness_metric)
@@ -127,11 +128,11 @@ def fitness_func_main_process(ga_instance, solution: np.ndarray, solution_idx: i
         The calculated average fitness for the solution over the sampled tokens,
         or a penalty value if errors occur.
     """
-    global pool_ref, historical_data_sets_shared, token_lifespans_shared
+    global pool_ref, historical_data_sets_shared, token_lifespans_shared, dexscreener_snapshots_shared
     if pool_ref is None:
         logger.critical("Multiprocessing pool (pool_ref) is None! Cannot run fitness.")
         return -float('inf') if FITNESS_GOAL == 'max' else float('inf')
-    if historical_data_sets_shared is None or token_lifespans_shared is None:
+    if historical_data_sets_shared is None or token_lifespans_shared is None or dexscreener_snapshots_shared is None:
         logger.critical("Shared historical data or token lifespans are None!")
         return -float('inf') if FITNESS_GOAL == 'max' else float('inf')
 
@@ -171,11 +172,12 @@ def fitness_func_main_process(ga_instance, solution: np.ndarray, solution_idx: i
     for mint in mints_to_evaluate:
         df_data = data_for_backtest.get(mint)
         lifespan = token_lifespans.get(mint)
+        snapshots = dexscreener_snapshots_shared.get(mint)
         max_timestamp = lifespan['end_ts'] if lifespan else None
 
         if isinstance(df_data, pd.DataFrame) and not df_data.empty and isinstance(df_data.index, pd.DatetimeIndex):
             # Task items are the tuples that run_backtest_sync_worker expects as its single argument
-            tasks.append((solution_idx, parameters.copy(), mint, df_data, max_timestamp, BACKTEST_INITIAL_CAPITAL, FITNESS_METRIC))
+            tasks.append((solution_idx, parameters.copy(), mint, df_data, max_timestamp, BACKTEST_INITIAL_CAPITAL, FITNESS_METRIC, snapshots))
         else:
             logger.warning(f"[Main] Invalid data for sampled mint {mint}. Skipping.")
 
@@ -258,6 +260,7 @@ async def evaluate_solution(
     data_set_key: str,
     historical_data: Dict[str, pd.DataFrame], # Use regular dict here
     token_lifespans: Dict[str, Dict[str, datetime]], # Pass lifespan info
+    dexscreener_snapshots: Dict[str, pd.DataFrame],
     initial_capital: float
 ) -> Dict[str, Any]:
     """
@@ -294,11 +297,12 @@ async def evaluate_solution(
             # Get max_timestamp for this token
             lifespan = token_lifespans.get(mint)
             max_timestamp = lifespan['end_ts'] if lifespan else None
+            snapshots_for_mint = dexscreener_snapshots.get(mint)
 
             parameters['mint'] = mint # Include mint in parameters for backtest
 
             tasks.append(asyncio.create_task(
-                run_backtest(parameters, df_data, initial_capital, max_timestamp), # Pass max_timestamp
+                run_backtest(parameters, df_data, initial_capital, max_timestamp, snapshots_for_mint), # Pass max_timestamp
                 name=f"eval_{mint}"
             ))
         else:
@@ -383,7 +387,7 @@ async def evaluate_solution(
 
 async def main_async_logic():
     """Main asynchronous function to set up and run the GA optimization."""
-    global historical_data_sets_shared, token_lifespans_shared, pool_ref # Access globals
+    global historical_data_sets_shared, token_lifespans_shared, pool_ref, dexscreener_snapshots_shared
     setup_logging(logger_name="ga_optimizer") # Initialize logging
     db_client = None # Initialize db_client
 
@@ -418,7 +422,7 @@ async def main_async_logic():
         logger.info("[Async Main] Database connection closed.")
         return
 
-    loaded_data_sets, token_lifespans = loaded_results # Unpack the results
+    loaded_data_sets, token_lifespans, dexscreener_snapshots = loaded_results # Unpack the results
     if not loaded_data_sets or not loaded_data_sets.get('train') or not token_lifespans:
          logger.critical("Training set or token lifespans are empty after loading. Exiting.")
          if db_client: await db_client.close()
@@ -428,7 +432,8 @@ async def main_async_logic():
     # --- Populate the shared Manager dictionaries ---
     historical_data_sets_shared.update(loaded_data_sets) # Update shared data
     token_lifespans_shared.update(token_lifespans)       # Update shared lifespans
-    logger.info("Data and token lifespans loaded into shared dictionary proxies.")
+    dexscreener_snapshots_shared.update(dexscreener_snapshots) # Update shared snapshots
+    logger.info("Data, lifespans, and DexScreener snapshots loaded into shared dictionaries.")
     logger.info(f"Training set size: {len(historical_data_sets_shared.get('train', {}))}")
     logger.info(f"Validation set size: {len(historical_data_sets_shared.get('validation', {}))}")
     logger.info(f"Test set size: {len(historical_data_sets_shared.get('test', {}))}")
@@ -513,8 +518,8 @@ async def main_async_logic():
         logger.info(f"Best Parameters:\n{json.dumps(best_params, indent=2)}")
 
         # --- Final Evaluation (using non-shared data and lifespans) ---
-        validation_metrics = await evaluate_solution(best_params, 'validation', loaded_data_sets, token_lifespans, BACKTEST_INITIAL_CAPITAL)
-        test_metrics = await evaluate_solution(best_params, 'test', loaded_data_sets, token_lifespans, BACKTEST_INITIAL_CAPITAL)
+        validation_metrics = await evaluate_solution(best_params, 'validation', loaded_data_sets, token_lifespans, dexscreener_snapshots, BACKTEST_INITIAL_CAPITAL)
+        test_metrics = await evaluate_solution(best_params, 'test', loaded_data_sets, token_lifespans, dexscreener_snapshots, BACKTEST_INITIAL_CAPITAL)
 
         # --- Save Results ---
         os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -594,6 +599,7 @@ if __name__ == "__main__":
         with Manager() as manager:
             historical_data_sets_shared = manager.dict()
             token_lifespans_shared = manager.dict() # Add shared dict for lifespans
+            dexscreener_snapshots_shared = manager.dict()
 
             # Determine number of processes
             num_processes = os.cpu_count() - 2 if os.cpu_count() > 2 else 1
