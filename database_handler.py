@@ -264,19 +264,35 @@ class DatabaseClient:
         query = """
             SELECT t.mint
             FROM tokens t
-            INNER JOIN (
+            LEFT JOIN (
+                -- Subquery to find the very latest trade tick for each token
                 SELECT mint, market_cap_sol, timestamp,
                     ROW_NUMBER() OVER (PARTITION BY mint ORDER BY timestamp DESC) AS rn
                 FROM v_unified_market_ticks_live
             ) latest ON t.mint = latest.mint AND latest.rn = 1
-            WHERE 
-                (
-                    (latest.market_cap_sol * 100.0 / t.marketCapSol) < (100 - $1)
-                    OR
-                    latest.timestamp <= NOW() - (INTERVAL '1 minute' * $2)
-                )
-                AND t.timestamp <= NOW() - (INTERVAL '1 minute' * $3)
+            WHERE
+                -- Condition 1: The token must be older than the minimum age.
+                t.timestamp <= NOW() - (INTERVAL '1 minute' * $3) -- $3 = min_token_age
+                
+                -- Condition 2: The token must not have an active position in the portfolio.
                 AND t.mint NOT IN (SELECT mint FROM portfolio WHERE status = 'active')
+                
+                -- Condition 3: The token must meet one of the "dead" criteria.
+                AND (
+                    -- Criteria A: The token HAS trades but is inactive or has crashed.
+                    (
+                        latest.mint IS NOT NULL AND (
+                            -- Market cap has dropped below the threshold.
+                            (latest.market_cap_sol * 100.0 / t.marketCapSol) < (100 - $1) -- $1 = mc_drop_threshold
+                            OR
+                            -- The last trade was longer ago than the inactivity period.
+                            latest.timestamp <= NOW() - (INTERVAL '1 minute' * $2) -- $2 = inactivity_period
+                        )
+                    )
+                    OR
+                    -- Criteria B: The token has NO trades at all.
+                    (latest.mint IS NULL)
+                )
             ORDER BY t.timestamp DESC;
         """
         async with self.pool.acquire() as conn:
@@ -1289,15 +1305,21 @@ class DatabaseClient:
         NEW HELPER: Fetches the single latest price snapshot for a migrated token.
         """
         query = """
-            SELECT price_usd, market_cap, sol_price_usd
+            SELECT price_usd, market_cap, sol_price_usd, volume_m5
             FROM dexscreener_data
             WHERE mint_address = $1
             ORDER BY timestamp DESC
             LIMIT 1;
         """
         record = await conn.fetchrow(query, mint)
-        if not record or not record['price_usd'] or not record['sol_price_usd'] or record['sol_price_usd'] <= 0:
+        # --- FIX ---
+        # This conditional logic is the core of the fix.
+        # It now checks if 5-minute volume is greater than zero.
+        if not record or not record['price_usd'] or not record['sol_price_usd'] or record['sol_price_usd'] <= 0 or float(record['volume_m5']) <= 0:
+            logger.warning(f"DEXScreener data for {mint} is stale (0 volume in m5). Treating price AND market cap as invalid.")
+            # Return None for both price and market cap
             return {'price': None, 'market_cap': None}
+        # --- END FIX ---
 
         price_usd = float(record['price_usd'])
         market_cap_usd = float(record['market_cap'])

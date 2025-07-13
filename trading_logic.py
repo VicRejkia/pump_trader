@@ -638,12 +638,37 @@ class TradingManager:
                         pos_id = position['id']
                         mint = position['mint']
 
+                        # Fetch the token's data source to apply source-specific rules
+                        token_data_source = position['data_source']
+
                         # The data source check is GONE. This one call handles everything
                         # because get_price_and_market_cap_for_decision now uses the unified live view.
                         price_data = await self.db.get_price_and_market_cap_for_decision(mint, self.config, conn)
                         current_price_to_use = price_data.get('price')
                         current_market_cap_sol_for_log = price_data.get('market_cap')
                         logger.debug(f"Checking sell for {mint} (ID: {pos_id}) - Current Price: {current_price_to_use}, Market Cap (SOL): {current_market_cap_sol_for_log}")
+
+                        # ======================================================================
+                        # --- NEW LOGIC: The "No Volume" Kill Switch for Migrated Tokens ---
+                        # This block is the definitive fix for the problem you identified.
+                        # ======================================================================
+                        if token_data_source == 'DEXSCREENER' and current_price_to_use is None:
+                            sell_reason = "🆘 Emergency SL (No Volume)"
+                            logger.info(f"{sell_reason} for migrated token {mint} (ID: {pos_id}). Price is invalid due to zero volume on DexScreener.")
+                            
+                            # For the transaction record, we must use a fallback price. The original buy price is a safe,
+                            # conservative choice. The actual SOL received will be whatever dust, if any, is recovered.
+                            fallback_price_for_record = float(position['buy_price']) 
+                            
+                            await self.execute_sell(
+                                conn, mint, fallback_price_for_record, 0, # Market cap is effectively 0
+                                sell_reason, 1.0, pos_id, {"reason": "Zero volume on DexScreener"}
+                            )
+                            continue # IMPORTANT: Skip to the next position after selling.
+                        # ======================================================================
+                        # --- END OF NEW LOGIC ---
+                        # ======================================================================
+
 
                         if isinstance(current_market_cap_sol_for_log, str): 
                             try: current_market_cap_sol_for_log = float(current_market_cap_sol_for_log)

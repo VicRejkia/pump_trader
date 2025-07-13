@@ -40,7 +40,7 @@ PRICE_AVG_WINDOW_MINUTES = 0.25           # You mentioned you already set this t
 # Determines the primary source for decision price and market cap.
 # "direct_price": Calculates robust price from trades (sol_amount/token_amount), then derives MC.
 # "market_cap": Calculates robust MC from trades (marketCapSol), then derives price.
-PRICE_SOURCE_METHOD = "market_cap"  # Default, Options: "direct_price", "market_cap"
+PRICE_SOURCE_METHOD = "direct_price"  # Default, Options: "direct_price", "market_cap"
 
 # Determines how the lookback window for price/MC calculation is defined.
 # "time": Uses PRICE_AVG_WINDOW_MINUTES.
@@ -90,10 +90,12 @@ MIN_TOKEN_AGE = 30                          # Minimum token age in minutes befor
 
 
 # PumpPortal
-_MAX_SUBSCRIPTION_BATCH: int = 100           # For batch unsubscription ... can be deleted?
 _TOTAL_SUPPLY = 1000000000                   # Assumed total supply if not provided
 _PUMPPORTAL_WS = "wss://pumpportal.fun/api/data"
 _PUMPORTAL_LOCAL_API_URL = "https://pumpportal.fun/api/trade-local"
+_WEBSOCKET_SUBSCRIPTION_REFRESH_ENABLED = True       # Enable periodic refresh of all trade subscriptions
+_WEBSOCKET_SUBSCRIPTION_REFRESH_INTERVAL_MINUTES = 240 # Interval in minutes to perform the refresh
+
 
 _RUGCHECK_AUTH_API = "https://api.rugcheck.xyz/auth/login/solana"
 _RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens"

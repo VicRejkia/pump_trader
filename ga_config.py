@@ -18,142 +18,312 @@ from typing import List, Dict, Any, Union
 # Ensure 'name' matches the exact key used in the trading logic/backtester.
 # Using discrete values simplifies the search space initially.
 
+# OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
+#     # --- Standard Trading Parameters ---
+#     {
+#         "name": "SOL_TO_BUY",
+#         "values": [round(x * 0.1, 1) for x in range(1, 6)], # 0.1 to 0.5 SOL
+#         "type": float
+#     },
+#     {
+#         "name": "INITIAL_STOP_LOSS_PERCENT",
+#         "values": list(range(10, 71, 5)), # 10% to 70% SL
+#         "type": float
+#     },
+#     {
+#         "name": "FIRST_SELL_PERCENT",
+#         "values": list(range(20, 101, 10)), # 20% to 100% of initial tokens
+#         "type": float
+#     },
+#     {
+#         "name": "TRAILING_STOP_LOSS_PERCENT",
+#         "values": list(range(5, 41, 5)), # 5% to 40% trailing SL
+#         "type": float
+#     },
+#     {
+#         "name": "SECOND_TAKE_PROFIT_PERCENT",
+#         "values": list(range(100, 1001, 50)), # 100% to 1000% TP2
+#         "type": float
+#     },
+#     {
+#         "name": "FIRST_SELL_PROFIT_MARGIN",
+#         "values": list(range(20, 201, 20)), # 20% to 200% margin
+#         "type": float
+#     },
+    
+#     # --- Buy Condition Thresholds ---
+#     {
+#         "name": "DEFAULT_VOLUME_THRESHOLD",
+#         "values": list(range(5000, 50001, 2500)), # 5k to 50k USD volume
+#         "type": int
+#     },
+#     {
+#         "name": "DEFAULT_MARKETCAP_THRESHOLD",
+#         "values": list(range(5000, 50001, 2500)), # 5k to 50k USD market cap
+#         "type": int
+#     },
+#     {
+#         "name": "MIN_VOLATILITY",
+#         "values": [round(x * 0.05, 2) for x in range(1, 11)], # 0.05% to 0.5%
+#         "type": float
+#     },
+#     {
+#         "name": "DEFAULT_RUGCHECK_SCORE_THRESHOLD",
+#         "values": list(range(201, 1002, 100)), # 201 to 1001 score
+#         "type": int
+#     },
+#     {
+#         "name": "DEFAULT_SOCIAL_SCORE_THRESHOLD",
+#         "values": list(range(100, 100, 1)), # 10 to 80 score
+#         "type": int
+#     },
+    
+#     # --- PUMP.FUN Trend Reversal Parameters ---
+#     {
+#         "name": "USE_TREND_REVERSAL_CONFIRMATION",
+#         "values": [0, 1], # 0 for False, 1 for True
+#         "type": int 
+#     },
+#     {
+#         "name": "STOP_LOSS_COOLDOWN_MINUTES",
+#         "values": list(range(0, 61, 5)), # 0 to 60 minutes
+#         "type": int
+#     },
+#     {
+#         "name": "TREND_REVERSAL_RECENCY_HOURS",
+#         "values": list(range(1, 13, 1)), # 1 to 12 hours
+#         "type": int
+#     },
+#     {
+#         "name": "TREND_REVERSAL_RSI_NEUTRAL_LEVEL",
+#         "values": [round(x * 2.5 + 30, 1) for x in range(0, 13)], # 30.0 to 60.0
+#         "type": float
+#     },
+#     {
+#         "name": "INDICATOR_LOOKBACK_HOURS",
+#         "values": list(range(1, 7, 1)), # 1 to 6 hours
+#         "type": int
+#     },
+#     {
+#         "name": "RSI_PERIOD",
+#         "values": list(range(7, 29, 1)), # 7 to 28
+#         "type": int
+#     },
+#     {
+#         "name": "BBANDS_PERIOD",
+#         "values": list(range(10, 31, 2)), # 10 to 30
+#         "type": int
+#     },
+#     {
+#         "name": "BBANDS_STD_DEV",
+#         "values": [round(x * 0.1 + 1.5, 1) for x in range(0, 11)], # 1.5 to 2.5
+#         "type": float
+#     },
+#     {
+#         "name": "FAST_EMA_PERIOD",
+#         "values": list(range(5, 16, 1)), # 5 to 15
+#         "type": int
+#     },
+#     {
+#         "name": "SLOW_EMA_PERIOD",
+#         "values": list(range(15, 31, 1)), # 15 to 30
+#         "type": int
+#     },
+
+#     # --- [NEW] DEXSCREENER Trend Reversal Parameters ---
+#     {
+#         "name": "DEX_REVERSAL_LOOKBACK_MINUTES",
+#         "values": list(range(15, 61, 5)), # 15 to 60 minutes
+#         "type": int
+#     },
+#     {
+#         "name": "DEX_REVERSAL_MIN_SNAPSHOTS",
+#         "values": list(range(3, 11, 1)), # 3 to 10 snapshots
+#         "type": int
+#     },
+#     {
+#         "name": "DEX_REVERSAL_MIN_LIQUIDITY_USD",
+#         "values": list(range(1000, 10001, 1000)), # 1k to 10k USD
+#         "type": int
+#     },
+#     {
+#         "name": "DEX_REVERSAL_MIN_BUY_SELL_RATIO",
+#         "values": [round(x * 0.1 + 1.1, 1) for x in range(0, 20)], # 1.1 to 3.0
+#         "type": float
+#     },
+#     {
+#         "name": "DEX_REVERSAL_MIN_CONFIRMATIONS",
+#         "values": list(range(1, 6, 1)), # 1 to 5 confirmations
+#         "type": int
+#     },
+# ]
+
 OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
-    # --- Standard Trading Parameters ---
+    # --- Standard Trading Parameters (Fine-Tuning) ---
     {
         "name": "SOL_TO_BUY",
-        "values": [round(x * 0.1, 1) for x in range(1, 6)], # 0.1 to 0.5 SOL
+        # Previous Best: 0.4. Zooming in on the 0.3-0.5 range.
+        "values": [round(x * 0.05, 2) for x in range(6, 11)],  # 0.3, 0.35, ..., 0.5
         "type": float
     },
     {
         "name": "INITIAL_STOP_LOSS_PERCENT",
-        "values": list(range(10, 71, 5)), # 10% to 70% SL
+        # Previous Best: 10.0. Zooming in on the 8-15% range.
+        "values": list(range(8, 16, 1)),  # 8, 9, ..., 15
         "type": float
     },
     {
         "name": "FIRST_SELL_PERCENT",
-        "values": list(range(20, 101, 10)), # 20% to 100% of initial tokens
+        # Previous Best: 20.0 (low end of 10-50). Exploring 15-35 range.
+        "values": list(range(15, 36, 5)), # 15, 20, 25, 30, 35
         "type": float
     },
     {
         "name": "TRAILING_STOP_LOSS_PERCENT",
-        "values": list(range(5, 41, 5)), # 5% to 40% trailing SL
+        # Previous Best: 15.0. Zooming in on the 12-18% range.
+        "values": list(range(12, 19, 1)), # 12, 13, ..., 18
         "type": float
     },
     {
         "name": "SECOND_TAKE_PROFIT_PERCENT",
-        "values": list(range(100, 1001, 50)), # 100% to 1000% TP2
+        # Previous Best: 250.0. Zooming in on the 200-350% range.
+        "values": list(range(200, 351, 25)), # 200, 225, ..., 350
         "type": float
     },
     {
         "name": "FIRST_SELL_PROFIT_MARGIN",
-        "values": list(range(20, 201, 20)), # 20% to 200% margin
+        # No data from previous run, making a conservative reduction in range.
+        "values": list(range(20, 101, 10)), # 20% to 100% margin
         "type": float
     },
-    
-    # --- Buy Condition Thresholds ---
+
+    # --- Buy Condition Thresholds (Fine-Tuning) ---
     {
         "name": "DEFAULT_VOLUME_THRESHOLD",
-        "values": list(range(5000, 50001, 2500)), # 5k to 50k USD volume
+        # Previous Best: 5000. Zooming in on the 3k-8k range.
+        "values": list(range(3000, 8001, 1000)), # 3k to 8k USD volume
         "type": int
     },
     {
         "name": "DEFAULT_MARKETCAP_THRESHOLD",
-        "values": list(range(5000, 50001, 2500)), # 5k to 50k USD market cap
+        # Previous Best: 7500. Zooming in on the 5k-10k range.
+        "values": list(range(5000, 10001, 1000)), # 5k to 10k USD market cap
         "type": int
     },
     {
         "name": "MIN_VOLATILITY",
-        "values": [round(x * 0.05, 2) for x in range(1, 11)], # 0.05% to 0.5%
+        # Previous Best: 0.25. Zooming in on the 0.2-0.3 range.
+        "values": [round(x * 0.01, 2) for x in range(20, 31)], # 0.20, 0.21, ..., 0.30
         "type": float
     },
     {
         "name": "DEFAULT_RUGCHECK_SCORE_THRESHOLD",
-        "values": list(range(201, 1002, 100)), # 201 to 1001 score
+        # Previous Best: 901 (extreme high end of 1-1000). The GA wants this as high as possible.
+        # Focusing on a very high, granular range.
+        "values": list(range(850, 1001, 10)), # 850 to 1000
         "type": int
     },
     {
         "name": "DEFAULT_SOCIAL_SCORE_THRESHOLD",
-        "values": list(range(100, 100, 1)), # 10 to 80 score
+        # Previous Best: 70. Zooming in on the 60-80 range.
+        "values": list(range(60, 81, 2)), # 60, 62, ..., 80
         "type": int
     },
-    
-    # --- PUMP.FUN Trend Reversal Parameters ---
-    {
-        "name": "USE_TREND_REVERSAL_CONFIRMATION",
-        "values": [0, 1], # 0 for False, 1 for True
-        "type": int 
-    },
+
+    # --- PUMP.FUN Trend Reversal Parameters (Fine-Tuning) ---
+    # {
+    #     # Previous Best: 0. The GA found this feature unhelpful.
+    #     # REMOVING from optimization to reduce complexity and speed up the run.
+    #     # You should hard-code USE_TREND_REVERSAL_CONFIRMATION = False in your config.
+    #     "name": "USE_TREND_REVERSAL_CONFIRMATION",
+    #     "values": [0],
+    #     "type": int
+    # },
     {
         "name": "STOP_LOSS_COOLDOWN_MINUTES",
-        "values": list(range(0, 61, 5)), # 0 to 60 minutes
+        # Previous Best: 20. Zooming in on the 15-30 minute range.
+        "values": list(range(15, 31, 5)), # 15, 20, 25, 30
         "type": int
     },
     {
         "name": "TREND_REVERSAL_RECENCY_HOURS",
-        "values": list(range(1, 13, 1)), # 1 to 12 hours
+        # Previous Best: 8. Zooming in on the 6-10 hour range.
+        "values": list(range(6, 11, 1)), # 6, 7, ..., 10
         "type": int
     },
     {
         "name": "TREND_REVERSAL_RSI_NEUTRAL_LEVEL",
-        "values": [round(x * 2.5 + 30, 1) for x in range(0, 13)], # 30.0 to 60.0
+        # No data from previous run, making a conservative reduction in range.
+        "values": [round(x * 1.0 + 40, 1) for x in range(0, 11)], # 40.0 to 50.0
         "type": float
     },
     {
         "name": "INDICATOR_LOOKBACK_HOURS",
-        "values": list(range(1, 7, 1)), # 1 to 6 hours
+        # Previous Best: 4. Zooming in on the 3-6 hour range.
+        "values": list(range(3, 7, 1)), # 3, 4, 5, 6
         "type": int
     },
     {
         "name": "RSI_PERIOD",
-        "values": list(range(7, 29, 1)), # 7 to 28
+        # Previous Best: 11 (low end of 7-21). Exploring a lower, tighter range.
+        "values": list(range(8, 15, 1)), # 8, 9, ..., 14
         "type": int
     },
     {
         "name": "BBANDS_PERIOD",
-        "values": list(range(10, 31, 2)), # 10 to 30
+        # Previous Best: 18. Zooming in on the 15-22 range.
+        "values": list(range(15, 23, 1)), # 15, 16, ..., 22
         "type": int
     },
     {
         "name": "BBANDS_STD_DEV",
-        "values": [round(x * 0.1 + 1.5, 1) for x in range(0, 11)], # 1.5 to 2.5
+        # No data, making conservative reduction.
+        "values": [round(x * 0.1 + 1.8, 1) for x in range(0, 8)], # 1.8 to 2.5
         "type": float
     },
     {
         "name": "FAST_EMA_PERIOD",
-        "values": list(range(5, 16, 1)), # 5 to 15
+        # No data, making conservative reduction.
+        "values": list(range(7, 14, 1)), # 7 to 13
         "type": int
     },
     {
         "name": "SLOW_EMA_PERIOD",
-        "values": list(range(15, 31, 1)), # 15 to 30
+        # No data, making conservative reduction.
+        "values": list(range(18, 26, 1)), # 18 to 25
         "type": int
     },
 
-    # --- [NEW] DEXSCREENER Trend Reversal Parameters ---
+    # --- DEXSCREENER Trend Reversal Parameters (Fine-Tuning) ---
     {
         "name": "DEX_REVERSAL_LOOKBACK_MINUTES",
-        "values": list(range(15, 61, 5)), # 15 to 60 minutes
+        # No data, making conservative reduction.
+        "values": list(range(15, 31, 5)), # 15 to 30 minutes
         "type": int
     },
     {
         "name": "DEX_REVERSAL_MIN_SNAPSHOTS",
-        "values": list(range(3, 11, 1)), # 3 to 10 snapshots
+        # No data, making conservative reduction.
+        "values": list(range(2, 6, 1)), # 2 to 5 snapshots
         "type": int
     },
     {
         "name": "DEX_REVERSAL_MIN_LIQUIDITY_USD",
-        "values": list(range(1000, 10001, 1000)), # 1k to 10k USD
+        # Previous Best: 1000 (extreme low end). The GA wants low liquidity.
+        # Exploring an even lower range.
+        "values": list(range(500, 4001, 500)), # 500 to 4k USD
         "type": int
     },
     {
         "name": "DEX_REVERSAL_MIN_BUY_SELL_RATIO",
-        "values": [round(x * 0.1 + 1.1, 1) for x in range(0, 20)], # 1.1 to 3.0
+        # No data, making conservative reduction.
+        "values": [round(x * 0.2 + 1.2, 1) for x in range(0, 10)], # 1.2 to 3.0
         "type": float
     },
     {
         "name": "DEX_REVERSAL_MIN_CONFIRMATIONS",
-        "values": list(range(1, 6, 1)), # 1 to 5 confirmations
+        # No data, making conservative reduction.
+        "values": list(range(1, 4, 1)), # 1 to 3 confirmations
         "type": int
     },
 ]
@@ -208,14 +378,14 @@ DATA_SPLIT: Dict[str, float] = {
 # Overall date range for historical data fetch
 # NOTE: THESE DATES ARE EXAMPLES - ADJUST TO YOUR ACTUAL DATA RANGE
 HISTORICAL_DATA_START_TS: datetime = datetime(2025, 6, 26, 0, 0, 0, tzinfo=timezone.utc)
-HISTORICAL_DATA_END_TS: datetime = datetime(2025, 7, 5, 23, 59, 0, tzinfo=timezone.utc) # Extended range example
+HISTORICAL_DATA_END_TS: datetime = datetime(2025, 6, 30, 23, 59, 0, tzinfo=timezone.utc) # Extended range example
 
 # --- Backtester Settings ---
 BACKTEST_INITIAL_CAPITAL: float = 100.0 # In SOL
 
 # --- Multiprocessing Settings ---
 # 'auto' lets ga_optimizer determine cores (e.g., cpu_count() - 2) or set specific number (e.g., 4)
-MULTIPROCESSING_CORES: str = "auto"
+MULTIPROCESSING_CORES: str = 8
 
 # --- Results ---
 RESULTS_DIR: str = "ga_optimization_results"

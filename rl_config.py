@@ -16,7 +16,7 @@ from typing import List, Dict, Any, Tuple, Union
 # NOTE: THESE DATES ARE EXAMPLES - ADJUST TO YOUR ACTUAL DATA RANGE
 # Use the same extended range as GA for consistency?
 RL_HISTORICAL_DATA_START_TS: datetime = datetime(2025, 6, 26, 0, 0, 0, tzinfo=timezone.utc)
-RL_HISTORICAL_DATA_END_TS: datetime = datetime(2025, 7, 4, 23, 59, 0, tzinfo=timezone.utc)
+RL_HISTORICAL_DATA_END_TS: datetime = datetime(2025, 7, 12, 23, 59, 0, tzinfo=timezone.utc)
 
 # --- Environment Configuration ---
 DATA_SET_KEY_TRAIN: str = 'train'       # Data used for agent training episodes.
@@ -77,15 +77,15 @@ RL_TUNABLE_PARAMETERS: List[Tuple[str, float, float, type]] = [
     ('SECOND_TAKE_PROFIT_PERCENT', 100.0, 1000.0, float),
     
     # Buy condition thresholds
-    ('DEFAULT_VOLUME_THRESHOLD', 5000, 50000, int),
+    ('DEFAULT_VOLUME_THRESHOLD', 1000, 50000, int),
     ('DEFAULT_MARKETCAP_THRESHOLD', 10000, 100000, int),
-    ('MIN_VOLATILITY', 0.01, 1.0, float),
+    ('MIN_VOLATILITY', 0.01, 3.0, float),
     ('DEFAULT_RUGCHECK_SCORE_THRESHOLD', 1, 1002, int),
-    ('DEFAULT_SOCIAL_SCORE_THRESHOLD', 1, 100, int),
+    ('DEFAULT_SOCIAL_SCORE_THRESHOLD', 100, 100, int),
     ('SOL_TO_BUY', 0.1, 0.5, float),
     
     # Emergency & Re-buy parameters
-    ('MC_DROP_THRESHOLD_RL', 5.0, 95.0, float),
+    ('MC_DROP_THRESHOLD_RL', 1.0, 20.0, float),
     ('USE_TREND_REVERSAL_CONFIRMATION', 0.0, 1.0, float),
     ('STOP_LOSS_COOLDOWN_MINUTES', 0.0, 60.0, int),
     
@@ -93,11 +93,11 @@ RL_TUNABLE_PARAMETERS: List[Tuple[str, float, float, type]] = [
     ('TREND_REVERSAL_RECENCY_HOURS', 0.25, 12.0, int),
     ('TREND_REVERSAL_RSI_NEUTRAL_LEVEL', 30.0, 60.0, float),
     ('INDICATOR_LOOKBACK_HOURS', 0.25, 6.0, int),
-    ('RSI_PERIOD', 7.0, 28.0, int),
+    ('RSI_PERIOD', 4.0, 50.0, int),
     ('BBANDS_PERIOD', 10.0, 30.0, int),
-    ('BBANDS_STD_DEV', 1.5, 2.5, float),
-    ('FAST_EMA_PERIOD', 5.0, 15.0, int),
-    ('SLOW_EMA_PERIOD', 15.0, 30.0, int),
+    ('BBANDS_STD_DEV', 1.0, 2.5, float),
+    ('FAST_EMA_PERIOD', 5.0, 20.0, int),
+    ('SLOW_EMA_PERIOD', 15.0, 80.0, int),
 
     # [NEW] DEXSCREENER Trend Reversal Parameters
     ('DEX_REVERSAL_LOOKBACK_MINUTES', 15.0, 60.0, int),
@@ -138,7 +138,7 @@ DEFAULT_SELL_TIP: float = 0.001
 
 # Fixed thresholds for the *simulated* buy decision (agent learns parameters, not timing)
 # MIN_MARKET_CAP is an absolute USD threshold, used as a fallback if MC_DROP_THRESHOLD logic doesn't trigger
-MIN_MARKET_CAP_USD_FALLBACK: int = 3500 # Renamed for clarity
+MIN_MARKET_CAP_USD_FALLBACK: int = 4000 # Renamed for clarity
 
 MIN_CANDLE_DATA_FOR_INDICATORS: int = 30
 
@@ -164,7 +164,7 @@ MODEL_SAVE_DIR: str = "./rl_trained_models/"
 EVAL_FREQ: int = 50000 # Evaluate every 50k total steps
 
 # Number of episodes for each evaluation run.
-N_EVAL_EPISODES: int = 40 # More episodes for better evaluation stability
+N_EVAL_EPISODES: int = 60 # More episodes for better evaluation stability
 
 # Checkpoint saving frequency (in total agent steps).
 CHECKPOINT_FREQ: int = 100000 # Save every 100k total steps
@@ -179,4 +179,4 @@ DATA_SPLIT_RL: Dict[str, float] = {
 
 # --- Live Agent Configuration (for deployment) ---
 # How often the live bot queries the trained agent for new parameters (seconds).
-AGENT_ACTION_INTERVAL_SECONDS: int = 60 # Update parameters every minute
+AGENT_ACTION_INTERVAL_SECONDS: int = 15 # Update parameters every minute

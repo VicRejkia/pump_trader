@@ -11,7 +11,7 @@ from typing import Optional
 import websockets
 
 # Assuming these are in your project structure
-from config import _PUMPPORTAL_WS
+from config import _PUMPPORTAL_WS, _WEBSOCKET_SUBSCRIPTION_REFRESH_ENABLED, _WEBSOCKET_SUBSCRIPTION_REFRESH_INTERVAL_MINUTES
 from database_handler import DatabaseClient
 from bot_logger import logger
 from state_manager import GlobalState
@@ -76,6 +76,9 @@ class WebSocketHandler:
                     asyncio.create_task(self.monitor_connection(), name="ws_connection_monitor"),
                     asyncio.create_task(self.unsubscribe_checker(), name="ws_unsubscribe_checker"),
                 ]
+                if _WEBSOCKET_SUBSCRIPTION_REFRESH_ENABLED:
+                    self.tasks.append(asyncio.create_task(self.subscription_refresher(), name="ws_subscription_refresher"))
+                
                 
                 # Wait for any of the tasks to finish. If one finishes,
                 # it's likely due to an error or a disconnection.
@@ -254,6 +257,54 @@ class WebSocketHandler:
         else:
             await self.state.set_migration_subscription(False)
 
+    async def subscription_refresher(self):
+        """
+        Periodically refreshes all active token trade subscriptions to prevent desync.
+        """
+        logger.info("🔄 WebSocket subscription refresher task started.")
+        refresh_interval_seconds = _WEBSOCKET_SUBSCRIPTION_REFRESH_INTERVAL_MINUTES * 60
+
+        while not self.state.shutdown_event.is_set():
+            try:
+                # --- MODIFICATION: Set next run timestamp before sleeping ---
+                next_run_ts = datetime.now(timezone.utc) + timedelta(seconds=refresh_interval_seconds)
+                await self.state.set_ws_refresh_next_run_ts(next_run_ts)
+                # --- END MODIFICATION ---
+
+                # Wait for the specified interval, but allow for early exit on shutdown.
+                await self.state.wait_or_interrupt(timeout=refresh_interval_seconds)
+                if self.state.shutdown_event.is_set():
+                    break
+                
+                # --- MODIFICATION: Clear timestamp to indicate "In Progress" ---
+                await self.state.set_ws_refresh_next_run_ts(None)
+                # --- END MODIFICATION ---
+
+                logger.info("🔄 Starting periodic WebSocket subscription refresh...")
+
+                subs_to_refresh = list(await self.state.get_token_subscriptions())
+                
+                if not subs_to_refresh:
+                    logger.info("Subscription refresher: No active subscriptions to refresh. Skipping cycle.")
+                    continue
+
+                logger.info(f"Refreshing {len(subs_to_refresh)} token trade subscriptions.")
+                await self.unsubscribe_token_trades_batch(subs_to_refresh, "periodic_refresh")
+                await asyncio.sleep(2)
+                await self.resume_subscriptions()
+
+                logger.info("✅ Periodic WebSocket subscription refresh complete.")
+
+            except asyncio.CancelledError:
+                logger.info("🔄 Subscription refresher task cancelled.")
+                break
+            except Exception as e:
+                logger.error(f"Error in subscription_refresher loop: {e}", exc_info=True)
+                await self.state.wait_or_interrupt(timeout=60)
+                
+        # On shutdown, clear the timestamp
+        await self.state.set_ws_refresh_next_run_ts(None)
+        logger.info("🔄 WebSocket subscription refresher task stopped.")
 
     async def resume_subscriptions(self):
         """Resubscribes to all active tokens from the database."""
@@ -315,10 +366,13 @@ class WebSocketHandler:
             except Exception as e:
                 logger.error(f"Failed to send batch unsubscribe message: {e}")
 
+        # A set of reasons that should NOT trigger a database backup/delete.
+        reasons_to_skip_db_backup = {"shutdown", "periodic_refresh"}
+
         # Update state and DB regardless of whether send succeeded, as we no longer want to track them.
         for mint in mints:
             await self.state.remove_token_subscription(mint) # This also saves state to file
-            if reason != "shutdown":
+            if reason not in reasons_to_skip_db_backup:
                 await self.db_client.backup_and_delete_token(mint, datetime.now(timezone.utc), reason)
 
     async def shutdown(self):

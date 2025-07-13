@@ -16,6 +16,7 @@ PROJECT_ROOT_DIR = CURRENT_SCRIPT_DIR  # Assuming main.py is in the project root
 # --- File Paths ---
 DATA_DIR = os.path.join(PROJECT_ROOT_DIR, 'data')
 STATUS_FILE = os.path.join(DATA_DIR, 'bot_status.json')
+COMMAND_FILE = os.path.join(DATA_DIR, 'bot_command.txt')
 TELEGRAM_SCRIPT_PATH = os.path.join(PROJECT_ROOT_DIR, 'telegram_interface.py')
 TRADING_BOT_SCRIPT_PATH = os.path.join(PROJECT_ROOT_DIR, 'trading_bot.py')
 
@@ -25,6 +26,8 @@ BOT_CHECK_INTERVAL_SECONDS = 15  # How often to check if the TradingBot is runni
 PYTHON_EXECUTABLE = sys.executable
 MAX_RESTART_ATTEMPTS = 5 # Maximum number of consecutive restart attempts before giving up for a while
 RESTART_COOLDOWN_SECONDS = 300 # Wait this long after max restart attempts
+# --- NEW: Timeout for graceful shutdown ---
+GRACEFUL_SHUTDOWN_TIMEOUT = 45
 
 # --- Helper Functions ---
 def is_process_running(process_handle):
@@ -32,6 +35,18 @@ def is_process_running(process_handle):
     if process_handle is None:
         return False
     return process_handle.poll() is None
+
+# --- NEW: IPC helper function to send commands to the bot ---
+def write_bot_command(command: str):
+    """Writes a command to the shared command file for the bot to process."""
+    try:
+        with open(COMMAND_FILE, 'w', encoding='utf-8') as f:
+            f.write(command)
+        log_info(f"Controller sent command to bot: '{command}'")
+        return True
+    except IOError as e:
+        log_error(f"Controller error writing command file: {e}")
+        return False
 
 def get_trading_bot_status_from_file() -> str:
     """
@@ -108,22 +123,56 @@ def start_script_in_new_console(script_path: str, cwd: str, args: list = None) -
         log_error(f"Failed to Popen {os.path.basename(script_path)}: {e}")
         return None
 
-
+# --- MODIFICATION: The role of this function is now a fallback ---
 async def ensure_process_terminated(process_handle: subprocess.Popen, process_name: str):
-    """Ensures a process is terminated."""
+    """Forcefully terminates a process that did not shut down gracefully."""
     if process_handle and is_process_running(process_handle):
-        log_info(f"Terminating {process_name} process (PID: {process_handle.pid})...")
+        log_warning(f"Graceful shutdown failed for {process_name}. Forcefully terminating process (PID: {process_handle.pid})...")
         process_handle.terminate()
         try:
-            process_handle.wait(timeout=10)
-            log_info(f"{process_name} process terminated gracefully.")
-        except subprocess.TimeoutExpired:
-            log_warning(f"{process_name} process did not terminate gracefully, killing (PID: {process_handle.pid}).")
-            process_handle.kill()
-            try:
-                process_handle.wait(timeout=5) # Wait for kill to take effect
-            except subprocess.TimeoutExpired:
-                log_error(f"Failed to kill {process_name} process (PID: {process_handle.pid}).")
+            # wait() is blocking, so we use a loop with sleep in async context
+            for _ in range(10): # ~10 seconds
+                if not is_process_running(process_handle): break
+                await asyncio.sleep(1)
+            else: # If loop finishes without break
+                log_warning(f"{process_name} did not terminate gracefully, killing (PID: {process_handle.pid}).")
+                process_handle.kill()
+        except Exception as e:
+            log_error(f"Error during forceful termination of {process_name}: {e}")
+
+# --- NEW: Function to request a graceful shutdown from the trading bot ---
+async def request_graceful_shutdown(process_handle: subprocess.Popen, process_name: str):
+    """Sends a STOP command to the bot and waits for it to terminate."""
+    if not process_handle or not is_process_running(process_handle):
+        log_debug(f"Process {process_name} is not running, no shutdown needed.")
+        return
+
+    log_info(f"Requesting graceful shutdown for {process_name} (PID: {process_handle.pid})...")
+    # Send the STOP command via the file IPC mechanism
+    if not write_bot_command("STOP"):
+        log_error(f"Failed to send STOP command to {process_name}. Proceeding with forceful termination.")
+        await ensure_process_terminated(process_handle, process_name)
+        return
+
+    # Wait for the process to terminate
+    try:
+        # In an async context, we poll instead of using wait()
+        shutdown_start_time = time.monotonic()
+        while time.monotonic() - shutdown_start_time < GRACEFUL_SHUTDOWN_TIMEOUT:
+            if not is_process_running(process_handle):
+                log_info(f"✅ {process_name} shut down gracefully.")
+                return
+            await asyncio.sleep(1)
+
+        # If the loop finishes, the timeout was reached
+        log_warning(f"Timeout ({GRACEFUL_SHUTDOWN_TIMEOUT}s) reached while waiting for {process_name} to shut down gracefully.")
+        await ensure_process_terminated(process_handle, process_name)
+
+    except Exception as e:
+        log_error(f"Error during graceful shutdown for {process_name}: {e}", exc_info=True)
+        await ensure_process_terminated(process_handle, process_name)
+
+
 
 async def main_controller(args):
     setup_logging()
@@ -244,7 +293,8 @@ async def main_controller(args):
         log_error(f"An unexpected error occurred in Main Controller: {e}", exc_info=True)
     finally:
         log_info("--- Main Controller Shutting Down ---")
-        await ensure_process_terminated(trading_bot_process, "Trading Bot")
+        await request_graceful_shutdown(trading_bot_process, "Trading Bot")
+        # await ensure_process_terminated(trading_bot_process, "Trading Bot")
         await ensure_process_terminated(telegram_interface_process, "Telegram Interface")
         log_info("Main Controller shutdown complete.")
 

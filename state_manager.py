@@ -9,6 +9,8 @@ import config # Import config to access INITIAL_SOL_BALANCE
 import json # Added for file writing
 from bot_logger import logger
 import os
+from typing import Optional
+from datetime import datetime
 
 # Define the path for the shared SOL price file
 SOL_PRICE_FILE = 'data/sol_price.json'
@@ -44,9 +46,12 @@ class GlobalState:
         self.socialscheck_queue = asyncio.PriorityQueue()  # SocialsCheck processing queue
         self.enrichment_queue = asyncio.Queue() # Transaction enrichment queue
 
+        self.ws_refresh_next_run_ts: Optional[datetime] = None
+
         # Concurrency control
         self.lock = asyncio.Lock()  # General state lock
         self.db_write_lock = asyncio.Lock()  # Database write lock
+        
 
     def _load_subscriptions_from_file(self):
         """Load active token subscriptions from file if it exists."""
@@ -171,6 +176,16 @@ class GlobalState:
     async def get_migration_subscription(self) -> bool:
         async with self.lock:
             return self.migration_stream_subscribed
+        
+    async def set_ws_refresh_next_run_ts(self, timestamp: Optional[datetime]):
+        """Sets the timestamp for the next WebSocket subscription refresh."""
+        async with self.lock:
+            self.ws_refresh_next_run_ts = timestamp
+
+    async def get_ws_refresh_next_run_ts(self) -> Optional[datetime]:
+        """Gets the timestamp for the next WebSocket subscription refresh."""
+        async with self.lock:
+            return self.ws_refresh_next_run_ts
 
     ## 🚀 API Rate Limiting
     async def add_request_timestamp(self, timestamp):

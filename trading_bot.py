@@ -409,24 +409,14 @@ class TradingBot:
                     sol_amount = sol_amount_raw if sol_amount_raw is not None else 0.0
                     rug_queue_size = self.state.get_rugcheck_queue().qsize()
                     socials_queue_size = self.state.get_socialscheck_queue().qsize()
-                    
-                    open_trades_count_str = "[dim white]N/A[/dim white]"
-                    if self.db_client and self.db_client.pool:
-                        try:
-                            active_positions = await self.db_client.get_active_buy_positions()
-                            open_trades_count_str = f"[yellow]{len(active_positions)}[/yellow]"
-                        except Exception as e_db_trades:
-                            open_trades_count_str = "[bold red]DB Error[/bold red]"
-                            log_debug(f"Monitor: Error fetching open trades: {e_db_trades}") # Log less critical here
-                    
+                    sol_price_usd = await self.state.get_sol_price()
+                    sol_price = f"[bold green]${sol_price_usd:.4f}[/bold green]" if sol_price_usd and sol_price_usd > 0 else "[bold red]N/A[/red]"
+                    uptime = str(timedelta(seconds=int((datetime.now(timezone.utc) - self.bot_start_time).total_seconds())))
+                    open_trades_count_str = f"[yellow]{len(await self.db_client.get_active_buy_positions())}[/yellow]" if self.db_client and self.db_client.pool else "[dim white]N/A[/dim white]"
                     rl_status_str = "[green]Loaded & Active[/green]" if self.rl_agent else "[dim white]Not Loaded[/dim white]"
 
-                    # --- Gather WebSocket Connection Summary ---
-                    ws_conn_status_line = "[bold cyan]│[/bold cyan] :electric_plug: [bold]WS Connection:[/bold] [dim white]N/A[/dim white]"
-                    ws_new_token_line = "[bold cyan]│  ├─ [/bold cyan][bold]NewToken Stream:[/bold] [dim white]N/A[/dim white]"
-                    ws_migration_line = "[bold cyan]│  ├─ [/bold cyan][bold]Migration Stream:[/bold] [dim white]N/A[/dim white]"
-                    ws_trades_subbed_line = "[bold cyan]│  └─ [/bold cyan][bold]Token Trades Subbed:[/bold] [dim white]N/A[/dim white]"
-
+                    # --- Build WebSocket Status Section ---
+                    ws_status_lines = []
                     if self.ws_handler and hasattr(self.ws_handler, 'get_connection_summary'):
                         try:
                             ws_summary = await self.ws_handler.get_connection_summary()
@@ -442,17 +432,37 @@ class TradingBot:
                                 ws_style = "yellow"
                             if "error" in ws_conn_status.lower(): ws_style = "bold red"
                             
-                            ws_conn_status_line = f"[bold cyan]│[/bold cyan] :electric_plug: [bold]Websocket:[/bold] [{ws_style}]{ws_conn_status}[/{ws_style}]"
                             ws_new_token_style = "green" if ws_new_token_sub == "Yes" else "yellow"
                             ws_migration_style = "green" if ws_migration_sub == "Yes" else "yellow"
-                            ws_new_token_line = f"[bold cyan]│  ├─ [/bold cyan][bold]NewToken Stream:[/bold] [{ws_new_token_style}]{ws_new_token_sub}[/{ws_new_token_style}]"
-                            ws_migration_line = f"[bold cyan]│  ├─ [/bold cyan][bold]Migration Stream:[/bold] [{ws_migration_style}]{ws_migration_sub}[/{ws_migration_style}]"
-                            ws_trades_subbed_line = f"[bold cyan]│  └─ [/bold cyan][bold]Token Trades Subbed:[/bold] [magenta]{ws_trades_sub_count}[/magenta]"
+
+                            ws_status_lines.append(f"[bold cyan]│[/bold cyan] :electric_plug: [bold]Websocket:[/bold] [{ws_style}]{ws_conn_status}[/{ws_style}]")
+                            ws_status_lines.append(f"[bold cyan]│  ├─ [/bold cyan][bold]NewToken Stream:[/bold] [{ws_new_token_style}]{ws_new_token_sub}[/{ws_new_token_style}]")
+
+                            refresher_enabled = config_module._WEBSOCKET_SUBSCRIPTION_REFRESH_ENABLED
+                            
+                            if refresher_enabled:
+                                ws_status_lines.append(f"[bold cyan]│  ├─ [/bold cyan][bold]Migration Stream:[/bold] [{ws_migration_style}]{ws_migration_sub}[/{ws_migration_style}]")
+                                ws_status_lines.append(f"[bold cyan]│  ├─ [/bold cyan][bold]Token Trades Subbed:[/bold] [magenta]{ws_trades_sub_count}[/magenta]")
+                                
+                                next_refresh_ts = await self.state.get_ws_refresh_next_run_ts()
+                                timer_content = ""
+                                if next_refresh_ts:
+                                    remaining_seconds = (next_refresh_ts - datetime.now(timezone.utc)).total_seconds()
+                                    if remaining_seconds > 0:
+                                        timer_content = f"[yellow]{remaining_seconds / 60:.1f} min[/yellow]"
+                                    else:
+                                        timer_content = f"[yellow]Soon...[/yellow]"
+                                else:
+                                    timer_content = f"[green]In Progress...[/green]"
+                                ws_status_lines.append(f"[bold cyan]│  └─ [/bold cyan][bold]Next WS Refresh:[/bold] {timer_content}")
+                            else:
+                                ws_status_lines.append(f"[bold cyan]│  ├─ [/bold cyan][bold]Migration Stream:[/bold] [{ws_migration_style}]{ws_migration_sub}[/{ws_migration_style}]")
+                                ws_status_lines.append(f"[bold cyan]│  └─ [/bold cyan][bold]Token Trades Subbed:[/bold] [magenta]{ws_trades_sub_count}[/magenta]")
+
                         except Exception as e_ws_sum:
-                            ws_conn_status_line = f"[bold cyan]│[/bold cyan] :electric_plug: [bold]Websocket:[/bold] [bold red]Error: {e_ws_sum!r}[/bold red]"
-
-
-                     # --- Format Main Bot Tasks Status ---
+                            ws_status_lines.append(f"[bold cyan]│[/bold cyan] :electric_plug: [bold]Websocket:[/bold] [bold red]Error: {e_ws_sum!r}[/bold red]")
+                    
+                    # --- Gather Main Bot Tasks Status ---
                     main_task_status_lines_list = []
                     active_bot_tasks_count = 0
                     for task in self.tasks:
@@ -467,49 +477,44 @@ class TradingBot:
                         
                         formatted_line = f"[bold cyan]├──[/bold cyan] {task_name}: [bold {style}]{status_str}[/bold {style}]"
                         main_task_status_lines_list.append(formatted_line)
-
-                        if task_name == "websocket_services_manager" and self.ws_handler and hasattr(self.ws_handler, 'get_internal_task_statuses'):
-                            internal_ws_tasks = self.ws_handler.get_internal_task_statuses()
-                            for ws_task_name, ws_task_status_str in internal_ws_tasks:
-                                ws_style_int = "green" if "running" in ws_task_status_str else "yellow"
-                                if "error" in ws_task_status_str: ws_style_int = "bold red"
-                                main_task_status_lines_list.append(f"[bold cyan]│  └───[/bold cyan] {ws_task_name}: [bold {ws_style_int}]{ws_task_status_str}[/bold {ws_style_int}]")
-                    
                     main_tasks_formatted_str = "\n".join(main_task_status_lines_list)
 
+                    # --- Assemble Final Log Message ---
                     log_parts = [
                         "\n",
                         "[bold cyan]┌────────────────────────────────────[/bold cyan]",
                         "[bold cyan]│[/bold cyan] :robot: [bold magenta]Task Monitor[/bold magenta]",
                         "[bold cyan]│────────────────────────────────────[/bold cyan]",
-                        f"[bold cyan]│[/bold cyan] :brain: [bold]RL Agent:[/bold] {rl_status_str}",
                         f"[bold cyan]│[/bold cyan] :moneybag: [bold]SOL Balance:[/bold] {sol_amount:.4f}",
+                        f"[bold cyan]│[/bold cyan] :timer_clock:  [bold]Uptime:[/bold]  {uptime}",
+                        f"[bold cyan]│[/bold cyan] :heavy_dollar_sign: [bold]Actual SOL Price:[/bold] {sol_price}",
+                        f"[bold cyan]│[/bold cyan] :brain: [bold]RL Agent:[/bold] {rl_status_str}",
                         f"[bold cyan]│[/bold cyan] :bar_chart: [bold]Open Trades:[/bold] {open_trades_count_str}",
                         f"[bold cyan]│[/bold cyan] :recycle: [bold]RugCheck Queue:[/bold] [blue]{rug_queue_size}[/blue]",
                         f"[bold cyan]│[/bold cyan] :speech_balloon: [bold]Socials Queue:[/bold] [blue]{socials_queue_size}[/blue]",
-                        ws_conn_status_line,
-                        ws_new_token_line,
-                        ws_migration_line,
-                        ws_trades_subbed_line,
+                    ]
+                    log_parts.extend(ws_status_lines)
+                    log_parts.extend([
                         f"[bold cyan]│[/bold cyan] :gear: [bold]Managed Tasks:[/bold] {active_bot_tasks_count}/{len(self.tasks)}",
                         f"[bold cyan]│[/bold cyan] :clipboard: [bold]Tasks:[/bold]",
                         main_tasks_formatted_str,
                         "[bold cyan]└────────────────────────────────────[/bold cyan]"
-                    ]
+                    ])
+
                     log_debug("\n".join(log_parts))
                     
                 except Exception as e_monitor_loop:
-                    log_error(f":x: [bold red]Error in monitor_tasks formatting/display loop[/bold red]: {e_monitor_loop}", exc_info=True) #
+                    log_error(f":x: [bold red]Error in monitor_tasks formatting/display loop[/bold red]: {e_monitor_loop}", exc_info=True)
                 
-                monitor_interval_seconds = self.config.get('MONITOR_TASK_INTERVAL_SECONDS', 30) # Default from your old code
-                await self.state.wait_or_interrupt(timeout=monitor_interval_seconds) # Use interruptible sleep
+                monitor_interval_seconds = self.config.get('MONITOR_TASK_INTERVAL_SECONDS', 30)
+                await self.state.wait_or_interrupt(timeout=monitor_interval_seconds)
 
         except asyncio.CancelledError:
-            log_info(":stop_sign: Monitor task shutting down (cancelled).") #
+            log_info(":stop_sign: Monitor task shutting down (cancelled).")
         except Exception as e_outer:
-            log_error(f":x: [bold red]FATAL error in Monitor task outer loop[/bold red]: {e_outer}", exc_info=True) #
+            log_error(f":x: [bold red]FATAL error in Monitor task outer loop[/bold red]: {e_outer}", exc_info=True)
         finally:
-            log_debug("Monitor task finished.") #
+            log_debug("Monitor task finished.")
 
     async def command_listener(self):
         """Periodically checks the command file for commands."""
