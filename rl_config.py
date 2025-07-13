@@ -16,7 +16,7 @@ from typing import List, Dict, Any, Tuple, Union
 # NOTE: THESE DATES ARE EXAMPLES - ADJUST TO YOUR ACTUAL DATA RANGE
 # Use the same extended range as GA for consistency?
 RL_HISTORICAL_DATA_START_TS: datetime = datetime(2025, 6, 26, 0, 0, 0, tzinfo=timezone.utc)
-RL_HISTORICAL_DATA_END_TS: datetime = datetime(2025, 7, 12, 23, 59, 0, tzinfo=timezone.utc)
+RL_HISTORICAL_DATA_END_TS: datetime = datetime(2025, 6, 28, 23, 59, 0, tzinfo=timezone.utc)
 
 # --- Environment Configuration ---
 DATA_SET_KEY_TRAIN: str = 'train'       # Data used for agent training episodes.
@@ -133,14 +133,11 @@ DEFAULT_BUY_FEE: float = 0.001
 DEFAULT_BUY_TIP: float = 0.001
 DEFAULT_SELL_FEE: float = 0.001
 DEFAULT_SELL_TIP: float = 0.001
-# DEFAULT_BUY_SOL_AMOUNT: float = 0.5 # Fixed buy amount for RL env simulation
-# SECOND_TAKE_PROFIT_PERCENT: float = 550.0 # Fixed second TP target
 
-# Fixed thresholds for the *simulated* buy decision (agent learns parameters, not timing)
-# MIN_MARKET_CAP is an absolute USD threshold, used as a fallback if MC_DROP_THRESHOLD logic doesn't trigger
-MIN_MARKET_CAP_USD_FALLBACK: int = 4000 # Renamed for clarity
+MIN_MARKET_CAP_USD_FALLBACK: int = 4000
 
 MIN_CANDLE_DATA_FOR_INDICATORS: int = 30
+APPLY_TREND_REVERSAL_ON_SELL_REASONS = ["🛑 Stop Loss", "🆘 Emergency SL (MCap)", "↘️ Trailing SL", "🛡️ Breakeven SL", "manual_override"]
 
 VOLATILITY_WINDOW: int = 120 # Window size (steps) for volatility calculation in env
 
@@ -149,7 +146,6 @@ RL_ALGORITHM: str = "PPO" # PPO is robust; SAC/TD3 are alternatives
 
 # Policy network architecture. Adjust hidden layer sizes as needed.
 POLICY_KWARGS: Dict[str, Any] = dict(net_arch=dict(pi=[128, 128], vf=[128, 128]))
-# For SAC/TD3: dict(net_arch=[256, 256]) might be suitable
 
 # Total training timesteps. Needs significant increase for real training.
 TOTAL_TIMESTEPS: int = 1_000_000 # Increase for more thorough training (e.g., 1M+)

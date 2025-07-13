@@ -571,34 +571,34 @@ def calculate_trend_indicators(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     Returns:
         pd.DataFrame: The original DataFrame with new indicator columns appended.
     """
-    if df.empty or len(df) < config['MIN_CANDLE_DATA_FOR_INDICATORS']:
-        logger.debug(f"Not enough data to calculate indicators (Have: {len(df)}, Need: {config['MIN_CANDLE_DATA_FOR_INDICATORS']}).")
-        return pd.DataFrame() # Return empty DataFrame if not enough data
+    if df.empty or len(df) < config.get('MIN_CANDLE_DATA_FOR_INDICATORS', 30):
+        logger.debug(f"Not enough data to calculate indicators (Have: {len(df)}, Need: {config.get('MIN_CANDLE_DATA_FOR_INDICATORS', 30)}).")
+        return pd.DataFrame()
 
     try:
-        # Create a copy to avoid SettingWithCopyWarning
         df_ta = df.copy()
 
-        # Calculate Bollinger Bands
-        bbands = df_ta.ta.bbands(length=config['BBANDS_PERIOD'], std=config['BBANDS_STD_DEV'])
-        if bbands is not None and not bbands.empty:
-            df_ta = pd.concat([df_ta, bbands], axis=1)
+        # --- BUG FIX START ---
+        # Explicitly use the 'Close' column for indicators that operate on a single price series.
+        # This prevents pandas-ta from returning a multi-column DataFrame when a single Series is expected.
+        close_prices = df_ta['Close']
 
-        # Calculate RSI
-        df_ta['RSI'] = df_ta.ta.rsi(length=config['RSI_PERIOD'])
+        # Calculate Bollinger Bands (this is usually fine as it uses H, L, C)
+        bbands = df_ta.ta.bbands(length=config['BBANDS_PERIOD'], std=config['BBANDS_STD_DEV'], append=True)
 
-        # Calculate EMAs
-        df_ta['EMA_fast'] = df_ta.ta.ema(length=config['FAST_EMA_PERIOD'])
-        df_ta['EMA_slow'] = df_ta.ta.ema(length=config['SLOW_EMA_PERIOD'])
+        # Calculate RSI using the specified close price series
+        df_ta.ta.rsi(close=close_prices, length=config['RSI_PERIOD'], append=True)
+
+        # Calculate EMAs using the specified close price series
+        df_ta.ta.ema(close=close_prices, length=config['FAST_EMA_PERIOD'], append=True, col_names=('EMA_fast',))
+        df_ta.ta.ema(close=close_prices, length=config['SLOW_EMA_PERIOD'], append=True, col_names=('EMA_slow',))
         
-                # --- MODIFICATION TO SUPPRESS VWAP WARNING ---
-        # Temporarily catch and ignore the specific UserWarning for VWAP calculation
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
-            df_ta['VWAP'] = df_ta.ta.vwap()
-        # --- END MODIFICATION ---
+            # VWAP requires High, Low, Close, and Volume, which df_ta has.
+            df_ta.ta.vwap(append=True)
+        # --- BUG FIX END ---
         
-        # Drop rows with NaN values that were created during indicator calculation
         df_ta.dropna(inplace=True)
         
         logger.debug(f"Successfully calculated indicators. Resulting data shape: {df_ta.shape}")
@@ -606,7 +606,8 @@ def calculate_trend_indicators(df: pd.DataFrame, config: dict) -> pd.DataFrame:
 
     except Exception as e:
         logger.error(f"Error calculating indicators: {e}", exc_info=True)
-        return pd.DataFrame() # Return empty on error
+        return pd.DataFrame()
+
 
 class NpEncoder(json.JSONEncoder):
     """
@@ -633,4 +634,3 @@ class NpEncoder(json.JSONEncoder):
             return obj.isoformat()
         # Let the base class default method raise the TypeError for unsupported types
         return super(NpEncoder, self).default(obj)
-    
