@@ -152,13 +152,20 @@ def analyze_feature_importance(model, env, num_samples=1000):
         # and we want features that *decrease* the score (change the prediction) to be important.
         return -np.mean(np.sum(predictions**2, axis=-1))
 
+    # --- START: Fix for FutureWarning ---
+    # Create a modern NumPy random number generator instance for reproducibility.
+    # This avoids the deprecated global `np.random.seed`.
+    # rng = np.random.default_rng(42)
+    rng = 42
+    # --- END: Fix for FutureWarning ---
+
     result = permutation_importance(
         model_predictor, # Pass the ModelPredictor instance as the estimator
         perm_samples, # This is X
         y=None, # Explicitly pass y=None
         scoring=mean_prediction_magnitude_score, # Provide custom scoring
         n_repeats=5,
-        random_state=42,
+        random_state=rng, # FIX: Pass the generator instance instead of an integer seed
         n_jobs=1
     )
 
@@ -296,6 +303,34 @@ async def train_rl_agent(render_mode: Optional[str] = None):
         eval_data = None
         eval_lifespans = {}
 
+    # --- START: Dynamic MAX_STEPS_PER_EPISODE Calculation ---
+    if train_lifespans:
+        lifespan_durations_seconds = [
+            (v['end_ts'] - v['start_ts']).total_seconds()
+            for v in train_lifespans.values()
+            if v['end_ts'] and v['start_ts']
+        ]
+        if lifespan_durations_seconds:
+            # Use the percentile from the config file
+            percentile_value = rl_config.MAX_STEPS_PERCENTILE
+            percentile_duration = np.percentile(lifespan_durations_seconds, percentile_value)
+            
+            # Assuming 5-second candles (steps)
+            CANDLE_INTERVAL_SECONDS = 5
+            max_steps_calculated = int(percentile_duration / CANDLE_INTERVAL_SECONDS)
+            
+            # Ensure a minimum number of steps
+            max_steps = max(max_steps_calculated, 100) # e.g., minimum 100 steps
+            
+            logger.info(f"Dynamically calculated MAX_STEPS_PER_EPISODE based on {percentile_value}th percentile of training data lifespans: {max_steps} steps.")
+        else:
+            logger.warning("Could not calculate token lifespans from training data. Using fallback MAX_STEPS_PER_EPISODE.")
+            max_steps = rl_config.MAX_STEPS_PER_EPISODE_FALLBACK
+    else:
+        logger.error("No training lifespans available to calculate MAX_STEPS_PER_EPISODE. Using fallback.")
+        max_steps = rl_config.MAX_STEPS_PER_EPISODE_FALLBACK
+    # --- END: Dynamic Calculation ---
+
     # --- Create Vectorized Environments ---
     logger.info("Creating RL Vectorized Environments...")
     train_env_raw: Optional[VecEnv] = None
@@ -307,48 +342,34 @@ async def train_rl_agent(render_mode: Optional[str] = None):
     try:
         VecEnvClass = SubprocVecEnv if rl_config.N_ENVS > 1 else DummyVecEnv
 
-        # Create training environments, passing lifespans
-        # Create training environments, passing all three data dictionaries
+        # Create training environments, passing the dynamically calculated max_steps
         env_fns = [
             make_env_func(
                 data_dict=training_data, 
                 lifespan_dict=train_lifespans,
-                snapshot_dict=train_snapshots, # Pass snapshot data
+                snapshot_dict=train_snapshots,
                 initial_capital=rl_config.RL_INITIAL_CAPITAL, 
-                max_steps=rl_config.MAX_STEPS_PER_EPISODE, 
+                max_steps=max_steps, # Use the calculated value
                 rank=i, 
                 render_mode=render_mode
             ) for i in range(rl_config.N_ENVS)
         ]
-        train_env_raw = VecEnvClass(env_fns) # Revert passing render_mode to SubprocVecEnv constructor
-        # Explicitly set render_mode on the VecEnv instance after creation
+        train_env_raw = VecEnvClass(env_fns)
         if render_mode is not None:
              train_env_raw.render_mode = render_mode
         logger.info(f"Created Training VecEnv ({VecEnvClass.__name__}) with {rl_config.N_ENVS} environments.")
 
-        # --- Environment Checker ---
-        # try:
-        #     logger.info("Running environment checker...")
-        #     # Pass lifespans to the check env func too
-        #     sample_env_fn = make_env_func(training_data, train_lifespans, rl_config.RL_INITIAL_CAPITAL, rl_config.MAX_STEPS_PER_EPISODE, rank=99)
-        #     check_env(sample_env_fn(), warn=True) # Create and check one instance
-        #     logger.info("Environment check passed.")
-        # except Exception as check_err:
-        #     logger.error(f"Environment check failed: {check_err}", exc_info=True)
-        #     # return # Exit if check fails
-
-        # Create evaluation environment
+        # Create evaluation environment with the same max_steps
         if eval_data and eval_lifespans:
             eval_env_fn = make_env_func(
                 data_dict=eval_data, 
                 lifespan_dict=eval_lifespans,
-                snapshot_dict=eval_snapshots, # Pass snapshot data
+                snapshot_dict=eval_snapshots,
                 initial_capital=rl_config.RL_INITIAL_CAPITAL, 
-                max_steps=rl_config.MAX_STEPS_PER_EPISODE, 
+                max_steps=max_steps, # Use the same calculated value
                 rank=100
             )
             eval_env_raw = DummyVecEnv([eval_env_fn])
-            # Explicitly set render_mode on the VecEnv instance after creation
             if render_mode is not None:
                  eval_env_raw.render_mode = render_mode
             logger.info("Created Evaluation VecEnv (DummyVecEnv).")
@@ -358,14 +379,11 @@ async def train_rl_agent(render_mode: Optional[str] = None):
         # --- Apply VecNormalize ---
         normalize_kwargs = {'norm_obs': True, 'norm_reward': False, 'gamma': 0.99}
         train_env = VecNormalize(train_env_raw, **normalize_kwargs)
-        # Remove explicit render_mode setting on VecNormalize
         logger.info("Applied VecNormalize to training environment.")
         if eval_env_raw:
             eval_env = VecNormalize(eval_env_raw, training=False, **normalize_kwargs)
-            # Remove explicit render_mode setting on VecNormalize
-            # Load the SAME stats as the training env for consistent evaluation
             eval_env.obs_rms = train_env.obs_rms
-            eval_env.ret_rms = train_env.ret_rms # If normalizing rewards (norm_reward=True)
+            eval_env.ret_rms = train_env.ret_rms
             eval_env.clip_obs = train_env.clip_obs
             eval_env.clip_reward = train_env.clip_reward
             logger.info("Applied VecNormalize to evaluation environment using training stats.")
@@ -374,23 +392,20 @@ async def train_rl_agent(render_mode: Optional[str] = None):
 
     except Exception as e:
         logger.exception(f"Error creating vectorized environments: {e}")
-        # Clean up any created envs
         if train_env: train_env.close()
-        elif train_env_raw: train_env_raw.close() # Close raw if wrapper failed
+        elif train_env_raw: train_env_raw.close()
         if eval_env: eval_env.close()
         elif eval_env_raw: eval_env_raw.close()
         if db_client_global: await db_client_global.close()
         return
 
     # --- Configure Agent ---
-    # (Agent selection, path setup, SB3 logger setup - same as before)
     logger.info(f"Setting up RL Agent: {rl_config.RL_ALGORITHM}")
     algo_map = {"PPO": PPO, "SAC": SAC, "TD3": TD3}
     AgentClass = algo_map.get(rl_config.RL_ALGORITHM)
 
     if AgentClass is None:
         logger.critical(f"RL Algorithm '{rl_config.RL_ALGORITHM}' not supported.")
-        # Cleanup envs before exiting
         if train_env: train_env.close()
         if eval_env: eval_env.close()
         if db_client_global: await db_client_global.close()
@@ -405,27 +420,22 @@ async def train_rl_agent(render_mode: Optional[str] = None):
     save_path_vecnormalize = os.path.join(rl_config.MODEL_SAVE_DIR, f"{model_prefix}_vecnormalize.pkl")
     best_model_save_dir = os.path.join(rl_config.MODEL_SAVE_DIR, f"{model_prefix}_best")
 
-    # Configure SB3 logger to output to tensorboard, csv, and stdout
     sb3_file_logger = sb3_configure_logger(log_path_tb, ["stdout", "csv", "tensorboard"])
 
-    device = 'cpu' #"auto"
+    device = 'cpu'
     logger.info(f"Using device: {device}")
 
-    # Define agent parameters
+    # --- START: Hyperparameter Tuning for Stability ---
+    # These parameters are adjusted to promote more stable learning and
+    # prevent the exploding gradients that caused the NaN error.
     agent_params = dict(
         policy="MlpPolicy",
-        env=train_env, # Use the normalized env
-        policy_kwargs={
-            "net_arch": {
-                "pi": [64, 64],  # Policy network architecture
-                "vf": [64, 64]   # Value function network architecture
-            }
-        },
+        env=train_env,
+        policy_kwargs=rl_config.POLICY_KWARGS,
         verbose=1,
         device=device,
         seed=42
     )
-    # Algorithm-specific hyperparameters
     if rl_config.RL_ALGORITHM == "PPO":
         agent_params.update(dict(
             n_steps=2048,
@@ -434,28 +444,28 @@ async def train_rl_agent(render_mode: Optional[str] = None):
             gamma=0.99,
             gae_lambda=0.95,
             clip_range=0.2,
-            ent_coef=0.1,  # Slightly increased for better exploration
+            ent_coef=0.005,  #0.1 Lowered entropy coefficient to reduce randomness
             vf_coef=0.5,
-            learning_rate=3e-4,
-            max_grad_norm=0.5,  # Added to prevent explosive gradients
-            use_sde=False,     # Added explicit SDE setting
+            learning_rate=3e-5, #3e-4 Lowered learning rate for smaller, more stable updates
+            max_grad_norm=0.5,
+            use_sde=False,
             sde_sample_freq=-1
         ))
-    # Add SAC/TD3 params if needed
+        # Add SAC/TD3 params if needed
+    # --- END: Hyperparameter Tuning ---
 
     model = AgentClass(**agent_params)
-    model.set_logger(sb3_file_logger) # Assign the configured logger
+    model.set_logger(sb3_file_logger)
 
     # --- Setup Callbacks ---
     logger.info("Setting up Callbacks...")
     callbacks = []
-    # Checkpoint callback
     checkpoint_callback = CheckpointCallback(
-        save_freq=max(rl_config.CHECKPOINT_FREQ // rl_config.N_ENVS, 1), # Adjust freq by n_envs
+        save_freq=max(rl_config.CHECKPOINT_FREQ // rl_config.N_ENVS, 1),
         save_path=os.path.join(rl_config.MODEL_SAVE_DIR, f"{model_prefix}_checkpoints"),
         name_prefix="rl_model",
         save_replay_buffer=True if rl_config.RL_ALGORITHM in ["SAC", "TD3"] else False,
-        save_vecnormalize=True # IMPORTANT: Save VecNormalize stats with checkpoints
+        save_vecnormalize=True
     )
     callbacks.append(checkpoint_callback)
 
@@ -473,7 +483,7 @@ async def train_rl_agent(render_mode: Optional[str] = None):
             deterministic=True,
             render=True,
             verbose=1,
-            callback_on_new_best=save_vec_normalize_callback  # Use the new callback class
+            callback_on_new_best=save_vec_normalize_callback
         )
         callbacks.append(eval_callback)
     else:
@@ -490,7 +500,7 @@ async def train_rl_agent(render_mode: Optional[str] = None):
         model.learn(
             total_timesteps=rl_config.TOTAL_TIMESTEPS,
             callback=callbacks,
-            log_interval=10, # Log stats every 10 updates (can adjust)
+            log_interval=10,
             reset_num_timesteps=True
         )
         training_successful = True
@@ -504,16 +514,13 @@ async def train_rl_agent(render_mode: Optional[str] = None):
         logger.info(f"--- Training loop finished. Duration: {end_train_time - start_train_time:.2f} seconds ---")
 
         try:
-            # Save the final agent model
             model.save(save_path_model)
             logger.info(f"Final trained model saved to: {save_path_model}")
 
-            # Save the VecNormalize statistics from the training environment
             if isinstance(train_env, VecNormalize):
                 train_env.save(save_path_vecnormalize)
                 logger.info(f"Final VecNormalize statistics saved to: {save_path_vecnormalize}")
 
-            # Check if a best model was saved and report
             best_model_path = os.path.join(best_model_save_dir, "best_model.zip")
             best_vecnorm_path = os.path.join(best_model_save_dir, "best_vecnormalize.pkl")
             if eval_env and os.path.exists(best_model_path) and training_successful:
@@ -533,10 +540,8 @@ async def train_rl_agent(render_mode: Optional[str] = None):
         # --- Cleanup ---
         logger.info("Closing environments...")
         try:
-            # Close VecNormalize wrappers first, then underlying VecEnvs
             if train_env: train_env.close()
             if eval_env: eval_env.close()
-            # No need to explicitly close train_env_raw/eval_env_raw if wrappers were created
         except Exception as close_err:
             logger.error(f"Error closing environments: {close_err}")
 

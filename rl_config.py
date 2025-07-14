@@ -16,7 +16,7 @@ from typing import List, Dict, Any, Tuple, Union
 # NOTE: THESE DATES ARE EXAMPLES - ADJUST TO YOUR ACTUAL DATA RANGE
 # Use the same extended range as GA for consistency?
 RL_HISTORICAL_DATA_START_TS: datetime = datetime(2025, 6, 26, 0, 0, 0, tzinfo=timezone.utc)
-RL_HISTORICAL_DATA_END_TS: datetime = datetime(2025, 6, 28, 23, 59, 0, tzinfo=timezone.utc)
+RL_HISTORICAL_DATA_END_TS: datetime = datetime(2025, 7, 12, 23, 59, 0, tzinfo=timezone.utc)
 
 # --- Environment Configuration ---
 DATA_SET_KEY_TRAIN: str = 'train'       # Data used for agent training episodes.
@@ -24,9 +24,14 @@ DATA_SET_KEY_EVAL: str = 'validation'   # Data used for periodic evaluation duri
 
 RL_INITIAL_CAPITAL: float = 100.0 # In SOL
 
-# Max steps based on typical token lifespan (e.g., 4 hours * 12 steps/min * 60 min/hr = 2880 steps if 5s candles)
-# Let's set a reasonable upper bound, actual episodes will be truncated by data end.
-MAX_STEPS_PER_EPISODE: int = 2880 # Max simulation steps if token lives unusually long
+# --- START: Modified MAX_STEPS_PER_EPISODE ---
+# This value is now calculated dynamically in rl_trainer.py based on the
+# percentile of token lifespans in the training dataset.
+# A fallback value can be set here if the calculation fails.
+MAX_STEPS_PER_EPISODE: Union[int, None] = None # Set to None to indicate dynamic calculation
+MAX_STEPS_PERCENTILE: float = 95.0 # The percentile of token lifespans to use as the max step limit.
+MAX_STEPS_PER_EPISODE_FALLBACK: int = 2880 # Fallback if dynamic calculation fails or None is passed
+# --- END: Modified MAX_STEPS_PER_EPISODE ---
 
 # --- Observation Space Configuration ---
 # Features observed at each step. Normalization is crucial.
@@ -148,7 +153,7 @@ RL_ALGORITHM: str = "PPO" # PPO is robust; SAC/TD3 are alternatives
 POLICY_KWARGS: Dict[str, Any] = dict(net_arch=dict(pi=[128, 128], vf=[128, 128]))
 
 # Total training timesteps. Needs significant increase for real training.
-TOTAL_TIMESTEPS: int = 1_000_000 # Increase for more thorough training (e.g., 1M+)
+TOTAL_TIMESTEPS: int = 10_000_000 #1_000_000 # Increase for more thorough training (e.g., 1M+)
 
 # Number of parallel environments. Adjust based on CPU cores.
 N_ENVS: int = 8 # Example: Use 8 parallel environments if CPU allows
@@ -157,13 +162,13 @@ TENSORBOARD_LOG_DIR: str = "./rl_tensorboard_logs/"
 MODEL_SAVE_DIR: str = "./rl_trained_models/"
 
 # Evaluation frequency (in total agent steps across all envs).
-EVAL_FREQ: int = 50000 # Evaluate every 50k total steps
+EVAL_FREQ: int = 100000 #50000 # Evaluate every 50k total steps
 
 # Number of episodes for each evaluation run.
-N_EVAL_EPISODES: int = 60 # More episodes for better evaluation stability
+N_EVAL_EPISODES: int = 120 #60 # More episodes for better evaluation stability
 
 # Checkpoint saving frequency (in total agent steps).
-CHECKPOINT_FREQ: int = 100000 # Save every 100k total steps
+CHECKPOINT_FREQ: int = 500000 # Save every 100k total steps
 
 # --- Data Settings ---
 # Same split as GA for consistency when reusing load_and_split_data

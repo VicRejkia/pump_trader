@@ -471,7 +471,6 @@ def run_backtest_sync(
                         else:
                             # --- PUMP.FUN REVERSAL LOGIC (existing logic) ---
                             logger.debug(f"Token {mint_addr} is on Pump.fun. Performing indicator-based check.")
-                            current_df_index_loc = df.index.get_loc(timestamp)
                             current_df_index_loc = df.index.get_loc(timestamp) # df is the full data for this mint
                             
                             # Calculate how many 5s candles are in indicator_lookback_hours_ga
@@ -745,7 +744,7 @@ async def main_test():
     logger.info(f"Max Timestamp (Token Death): {max_ts}")
 
     # Pass the OHLCV data directly
-    results = await run_backtest(test_params, test_ohlcv_data, BACKTEST_INITIAL_CAPITAL, max_ts)
+    results = await run_backtest_sync(test_params, test_ohlcv_data, BACKTEST_INITIAL_CAPITAL, max_ts)
 
     logger.info("--- Backtester Test Results ---")
     import pprint

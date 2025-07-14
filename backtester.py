@@ -470,7 +470,6 @@ async def run_backtest(
                         else:
                             # --- PUMP.FUN REVERSAL LOGIC (existing logic) ---
                             logger.debug(f"Token {mint_addr} is on Pump.fun. Performing indicator-based check.")
-                            current_df_index_loc = df.index.get_loc(timestamp)
                             current_df_index_loc = df.index.get_loc(timestamp) # df is the full data for this mint
                             
                             # Calculate how many 5s candles are in indicator_lookback_hours_ga

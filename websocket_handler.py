@@ -276,6 +276,14 @@ class WebSocketHandler:
                 if self.state.shutdown_event.is_set():
                     break
                 
+                # --- START: THE FIX ---
+                # Before starting the refresh logic, check if the connection is still valid.
+                # This prevents the race condition if the connection dropped during the await.
+                if not (self.websocket and self.websocket.open):
+                    logger.warning("Subscription refresher: WebSocket not open. Skipping refresh cycle.")
+                    continue
+                # --- END: THE FIX ---
+                
                 # --- MODIFICATION: Clear timestamp to indicate "In Progress" ---
                 await self.state.set_ws_refresh_next_run_ts(None)
                 # --- END MODIFICATION ---

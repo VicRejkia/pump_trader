@@ -56,7 +56,7 @@ DEFAULT_VOLUME_THRESHOLD = 40000            # Minimum volume threshold in USD
 MIN_MARKETCAP_THRESHOLD = 4000              # Minimum market cap threshold in USD to make emergency sell
 DEFAULT_MARKETCAP_THRESHOLD = 20000         # Minimum market cap threshold in USD to search for buy opportunities
 MIN_VOLATILITY = 0.18                       # Minimum volatility threshold in % to search for buy opportunities
-DEFAULT_TIME_INTERVALL = 10                 # Time interval for checking volatility, volume and marketcap in minutes
+DEFAULT_TIME_INTERVAL = 10                 # Time interval for checking volatility, volume and marketcap in minutes
 MAX_TOKEN_COUNT_PER_CREATOR = 10            # Maximum number of tokens per creator to consider token as safe
 
 # --- Re-Buy Logic Configuration ---

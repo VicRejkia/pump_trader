@@ -206,7 +206,7 @@ class TradingManager:
                 marketcap_threshold=self.config['DEFAULT_MARKETCAP_THRESHOLD'],
                 rugcheck_threshold=self.config['DEFAULT_RUGCHECK_SCORE_THRESHOLD'],
                 social_score_threshold=self.config['DEFAULT_SOCIAL_SCORE_THRESHOLD'],
-                time_interval_minutes=self.config['DEFAULT_TIME_INTERVALL'],
+                time_interval_minutes=self.config['DEFAULT_TIME_INTERVAL'],
                 min_volatility=self.config['MIN_VOLATILITY']
             )
 

@@ -45,7 +45,7 @@ class TradingEnv(gym.Env):
         token_lifespans: Dict[str, Dict[str, datetime]],
         dexscreener_snapshot_data: Dict[str, pd.DataFrame],
         initial_capital: float = rl_config.RL_INITIAL_CAPITAL,
-        max_steps: int = rl_config.MAX_STEPS_PER_EPISODE,
+        max_steps: Optional[int] = None,
         render_mode: Optional[str] = None
     ):
         """
@@ -110,7 +110,19 @@ class TradingEnv(gym.Env):
             raise ValueError("No valid OHLCV DataFrames found after validation.")
 
         self.initial_capital = initial_capital
-        self._max_episode_steps = max_steps
+        
+        # --- START: FIX for TypeError ---
+        # Defensively handle the case where max_steps might be None.
+        if max_steps is None:
+            logger.warning(
+                f"max_steps was not provided to TradingEnv constructor. "
+                f"Using fallback value from rl_config: {rl_config.MAX_STEPS_PER_EPISODE_FALLBACK}."
+            )
+            self._max_episode_steps = rl_config.MAX_STEPS_PER_EPISODE_FALLBACK
+        else:
+            self._max_episode_steps = max_steps
+        # --- END: FIX for TypeError ---
+
 
         self.action_space = spaces.Box(
             low=rl_config.ACTION_LOW,

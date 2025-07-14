@@ -317,8 +317,10 @@ async def load_and_split_data(
     min_data_points: int = 100 # Minimum *trades* required per token
 ) -> Optional[Tuple[Dict[str, Dict[str, pd.DataFrame]], Dict[str, Dict[str, datetime]], Dict[str, pd.DataFrame]]]:
     """
-    [MODIFIED] Loads historical data, lifespans, and DexScreener snapshots, then splits
-    tokens chronologically into training, validation, and test sets.
+    [MODIFIED] Loads historical data for tokens active within a time window.
+    1. Identifies tokens created or traded within the specified time window.
+    2. For these identified tokens, it fetches their *entire* historical data.
+    3. Splits the list of tokens chronologically for training, validation, and testing.
 
     Returns:
         A tuple containing:
@@ -338,61 +340,68 @@ async def load_and_split_data(
              logger.error(f"Invalid date range: Start={start_date}, End={end_date}.")
              return None
 
-        logger.info(f"Loading & splitting data. Overall Period: {start_date.isoformat()} to {end_date.isoformat()}")
+        logger.info(f"Loading & splitting data. Identifying tokens in window: {start_date.isoformat()} to {end_date.isoformat()}")
 
-        # --- Step 1: Fetch candidate mints and their lifespans (No change here) ---
-        # (This part of the logic remains the same as the previous version)
+        # --- Step 1: Fetch candidate mints active in the window and their full lifespans ---
         query_mints_lifespans = """
-            WITH RankedTrades AS (
-                SELECT
-                    mint,
-                    timestamp,
-                    ROW_NUMBER() OVER (PARTITION BY mint ORDER BY timestamp ASC) as rn_asc,
-                    ROW_NUMBER() OVER (PARTITION BY mint ORDER BY timestamp DESC) as rn_desc
-                FROM v_trades
+            WITH MintsInWindow AS (
+                -- Select unique mints with trades in the window
+                SELECT mint FROM v_trades
+                WHERE timestamp >= $1 AND timestamp < $2
+                UNION
+                -- Select unique mints created in the window
+                SELECT mint FROM v_tokens
                 WHERE timestamp >= $1 AND timestamp < $2
             ),
-            MintCounts AS (
-                SELECT mint, COUNT(*) as trade_count
-                FROM v_trades
-                WHERE timestamp >= $1 AND timestamp < $2
-                GROUP BY mint
-                HAVING COUNT(*) >= $3
+            -- For these candidates, get their full stats (all-time trades)
+            TokenStats AS (
+                SELECT
+                    m.mint,
+                    MIN(t.timestamp) as first_trade_ts,
+                    MAX(t.timestamp) as last_trade_ts,
+                    COUNT(t.signature) as trade_count
+                FROM MintsInWindow m
+                JOIN v_trades t ON m.mint = t.mint
+                GROUP BY m.mint
             )
             SELECT
-                mc.mint,
-                MIN(rt.timestamp) FILTER (WHERE rt.rn_asc = 1) as first_trade_ts,
-                MAX(rt.timestamp) FILTER (WHERE rt.rn_desc = 1) as last_trade_ts,
-                mc.trade_count
-            FROM MintCounts mc
-            JOIN RankedTrades rt ON mc.mint = rt.mint
-            LEFT JOIN v_tokens AS vt ON mc.mint = vt.mint
-            WHERE (rt.rn_asc = 1 OR rt.rn_desc = 1)
-                AND (vt.backup_reason = 'rugged_dead' OR vt.backup_reason = '')
-            GROUP BY mc.mint, mc.trade_count;
+                ts.mint,
+                ts.first_trade_ts,
+                ts.last_trade_ts,
+                ts.trade_count
+            FROM TokenStats ts
+            LEFT JOIN v_tokens AS vt ON ts.mint = vt.mint
+            WHERE ts.trade_count >= $3 -- Filter by min_data_points
+              AND (vt.backup_reason = 'rugged_dead' OR vt.backup_reason = '' OR vt.backup_reason IS NULL);
         """
         candidate_records = await db_client.pool.fetch(query_mints_lifespans, start_date, end_date, min_data_points)
+        
         if not candidate_records:
-            logger.error(f"No tokens found with at least {min_data_points} trades in the specified period.")
+            logger.error(f"No tokens found that were active in the window and met the minimum trade count of {min_data_points}.")
             return None
+            
         token_lifespans_map = {r['mint']: {'start_ts': r['first_trade_ts'], 'end_ts': r['last_trade_ts']} for r in candidate_records if r['mint'] and r['first_trade_ts'] and r['last_trade_ts']}
         mints_to_load = list(token_lifespans_map.keys())
-        if not mints_to_load: return None
-        logger.info(f"Found {len(mints_to_load)} candidate mints. Fetching detailed data...")
+        
+        if not mints_to_load: 
+            logger.error("No valid mints with lifespans found after filtering.")
+            return None
+        
+        logger.info(f"Found {len(mints_to_load)} candidate mints. Fetching their full historical data...")
 
 
-        # --- Step 2: Fetch OHLCV data and DexScreener snapshot data concurrently ---
+        # --- Step 2: Fetch ALL historical data for the selected mints ---
         dexscreener_snapshot_query = """
             SELECT
                 mint_address as mint, timestamp, liquidity_usd, buys_m5, sells_m5
             FROM v_dexscreener_data
             WHERE mint_address = ANY($1::text[])
-            AND timestamp >= $2 AND timestamp < $3
             ORDER BY mint_address, timestamp;
         """
+        # Call with None for dates to fetch all data for the mints
         all_historical_data, dexscreener_snapshot_records = await asyncio.gather(
-            db_client.get_historical_data_for_backtesting(mints_to_load, start_date, end_date),
-            db_client.pool.fetch(dexscreener_snapshot_query, mints_to_load, start_date, end_date)
+            db_client.get_historical_data_for_backtesting(mints_to_load, start_date=None, end_date=None),
+            db_client.pool.fetch(dexscreener_snapshot_query, mints_to_load) # Fetch all snapshots for these mints
         )
 
         if not all_historical_data:
@@ -408,7 +417,7 @@ async def load_and_split_data(
                 dexscreener_snapshots[mint] = group.set_index('timestamp').sort_index()
         logger.info(f"Fetched DexScreener snapshots for {len(dexscreener_snapshots)} migrated tokens.")
 
-        # --- Step 3: Filter and Split (No change here) ---
+        # --- Step 3: Filter and Split tokens chronologically ---
         final_token_lifespans = {}
         for mint, df in all_historical_data.items():
             if mint in token_lifespans_map:
