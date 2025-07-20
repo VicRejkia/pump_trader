@@ -23,7 +23,8 @@ import json
 import numpy as np
 import pandas as pd
 from datetime import datetime
-from typing import Dict, Optional, Union, Tuple
+import argparse # Import argparse
+from typing import Dict, Optional, Union, Tuple, Callable # Import Callable
 import warnings
 
 # --- Stable Baselines3 Imports ---
@@ -64,6 +65,16 @@ from utils import load_and_split_data, calculate_volatility, export_to_csv, NpEn
 # --- Global Variables ---
 db_client_global: Optional[DatabaseClient] = None
 
+# --- Helper function for hyperparameter schedules ---
+def get_schedule_fn(value: Union[float, int]) -> Callable[[float], Union[float, int]]:
+    """
+    Returns a schedule function that returns a constant value.
+    This is used to wrap fixed hyperparameter values so they can be
+    treated as a callable schedule by Stable Baselines3.
+    """
+    def func(_progress_remaining: float) -> Union[float, int]:
+        return value
+    return func
 
 # --- Custom Callback ---
 class TensorboardCallback(BaseCallback):
@@ -155,8 +166,7 @@ def analyze_feature_importance(model, env, num_samples=1000):
     # --- START: Fix for FutureWarning ---
     # Create a modern NumPy random number generator instance for reproducibility.
     # This avoids the deprecated global `np.random.seed`.
-    # rng = np.random.default_rng(42)
-    rng = 42
+    rng = np.random.default_rng(42)
     # --- END: Fix for FutureWarning ---
 
     result = permutation_importance(
@@ -236,13 +246,13 @@ def make_env_func(
     return _init
 
 # --- Main Training Function ---
-async def train_rl_agent(render_mode: Optional[str] = None):
+async def train_rl_agent(render_mode: Optional[str] = None, continue_from_model: Optional[str] = None):
     """
     Sets up the RL environment, agent, callbacks, and starts training.
 
     Args:
-        render_mode: The render mode for the training environment (e.g., 'human', 'ansi').
-                     Set to None to disable rendering.
+        render_mode: The render mode for the training environment.
+        continue_from_model: Path to a saved model to continue training from.
     """
     global db_client_global
     setup_logging(logger_name="rl_trainer") # Initialize logger for this module
@@ -377,11 +387,27 @@ async def train_rl_agent(render_mode: Optional[str] = None):
              eval_env_raw = None
 
         # --- Apply VecNormalize ---
-        normalize_kwargs = {'norm_obs': True, 'norm_reward': False, 'gamma': 0.99}
-        train_env = VecNormalize(train_env_raw, **normalize_kwargs)
+        # If continuing, load stats. Otherwise, create new.
+        if continue_from_model:
+            vec_normalize_path = continue_from_model.replace(".zip", "_vecnormalize.pkl")
+            if not os.path.exists(vec_normalize_path):
+                 # Handle case where best model is in a subdirectory
+                 base_dir = os.path.dirname(continue_from_model)
+                 vec_normalize_path = os.path.join(base_dir, "best_vecnormalize.pkl")
+
+            if os.path.exists(vec_normalize_path):
+                logger.info(f"Loading VecNormalize stats from {vec_normalize_path}")
+                train_env = VecNormalize.load(vec_normalize_path, train_env_raw)
+            else:
+                logger.warning(f"VecNormalize stats not found at {vec_normalize_path}. Creating new stats.")
+                train_env = VecNormalize(train_env_raw, norm_obs=True, norm_reward=False, gamma=0.99)
+        else:
+            train_env = VecNormalize(train_env_raw, norm_obs=True, norm_reward=False, gamma=0.99)
+        
         logger.info("Applied VecNormalize to training environment.")
+
         if eval_env_raw:
-            eval_env = VecNormalize(eval_env_raw, training=False, **normalize_kwargs)
+            eval_env = VecNormalize(eval_env_raw, training=False, norm_obs=True, norm_reward=False, gamma=0.99)
             eval_env.obs_rms = train_env.obs_rms
             eval_env.ret_rms = train_env.ret_rms
             eval_env.clip_obs = train_env.clip_obs
@@ -425,36 +451,47 @@ async def train_rl_agent(render_mode: Optional[str] = None):
     device = 'cpu'
     logger.info(f"Using device: {device}")
 
-    # --- START: Hyperparameter Tuning for Stability ---
-    # These parameters are adjusted to promote more stable learning and
-    # prevent the exploding gradients that caused the NaN error.
-    agent_params = dict(
-        policy="MlpPolicy",
-        env=train_env,
-        policy_kwargs=rl_config.POLICY_KWARGS,
-        verbose=1,
-        device=device,
-        seed=42
-    )
-    if rl_config.RL_ALGORITHM == "PPO":
-        agent_params.update(dict(
-            n_steps=2048,
-            batch_size=64,
-            n_epochs=10,
-            gamma=0.99,
-            gae_lambda=0.95,
-            clip_range=0.2,
-            ent_coef=0.005,  #0.1 Lowered entropy coefficient to reduce randomness
-            vf_coef=0.5,
-            learning_rate=3e-5, #3e-4 Lowered learning rate for smaller, more stable updates
-            max_grad_norm=0.5,
-            use_sde=False,
-            sde_sample_freq=-1
-        ))
-        # Add SAC/TD3 params if needed
-    # --- END: Hyperparameter Tuning ---
+    # --- Load or Create Model ---
+    if continue_from_model:
+        logger.info(f"Continuing training from model: {continue_from_model}")
+        model = AgentClass.load(
+            continue_from_model,
+            env=train_env,
+            device=device
+        )
+        
+        # --- START: APPLY FINE-TUNING HYPERPARAMETERS TO LOADED MODEL ---
+        # Get hyperparameters from the config file
+        params = rl_config.PPO_HYPERPARAMS
+        
+        # Wrap tunable parameters in schedule functions to prevent 'float is not callable' TypeError
+        model.learning_rate = get_schedule_fn(params["learning_rate"])
+        model.clip_range = get_schedule_fn(params["clip_range"])
+        
+        # Directly set other tunable parameters
+        model.gae_lambda = params["gae_lambda"]
+        model.gamma = params["gamma"]
+        model.ent_coef = params["ent_coef"]
+        model.vf_coef = params["vf_coef"]
+        model.max_grad_norm = params["max_grad_norm"]
+        
+        logger.info(f"Applied fine-tuning parameters to loaded model (gae_lambda={model.gae_lambda}, clip_range={params['clip_range']}, etc.).")
+        # --- END: APPLY FINE-TUNING ---
 
-    model = AgentClass(**agent_params)
+    else:
+        logger.info("Creating a new model for training.")
+        # Combine base parameters with PPO-specific hyperparameters from config
+        agent_params = {
+            "policy": "MlpPolicy",
+            "env": train_env,
+            "policy_kwargs": rl_config.POLICY_KWARGS, # Use from config
+            "verbose": 1,
+            "device": device,
+            "seed": 42,
+            **rl_config.PPO_HYPERPARAMS # Unpack all PPO hyperparameters
+        }
+        model = AgentClass(**agent_params)
+    
     model.set_logger(sb3_file_logger)
 
     # --- Setup Callbacks ---
@@ -469,7 +506,6 @@ async def train_rl_agent(render_mode: Optional[str] = None):
     )
     callbacks.append(checkpoint_callback)
 
-    # Evaluation callback
     if eval_env:
         save_vec_normalize_callback = SaveVecNormalizeCallback(
             save_path=os.path.join(best_model_save_dir, "best_vecnormalize.pkl")
@@ -481,7 +517,7 @@ async def train_rl_agent(render_mode: Optional[str] = None):
             eval_freq=max(rl_config.EVAL_FREQ // rl_config.N_ENVS, 1),
             n_eval_episodes=rl_config.N_EVAL_EPISODES,
             deterministic=True,
-            render=True,
+            render=False, # Disable render during eval to speed it up
             verbose=1,
             callback_on_new_best=save_vec_normalize_callback
         )
@@ -489,7 +525,6 @@ async def train_rl_agent(render_mode: Optional[str] = None):
     else:
         logger.warning("EvalCallback disabled as evaluation environment is not available.")
 
-    # Custom TensorBoard callback
     callbacks.append(TensorboardCallback())
 
     # --- Start Training ---
@@ -501,7 +536,7 @@ async def train_rl_agent(render_mode: Optional[str] = None):
             total_timesteps=rl_config.TOTAL_TIMESTEPS,
             callback=callbacks,
             log_interval=10,
-            reset_num_timesteps=True
+            reset_num_timesteps=False if continue_from_model else True # Continue timestep count if loading model
         )
         training_successful = True
     except KeyboardInterrupt:
@@ -533,7 +568,7 @@ async def train_rl_agent(render_mode: Optional[str] = None):
         except Exception as save_err:
              logger.error(f"Failed to save final model or VecNormalize stats: {save_err}")
 
-        if training_successful:
+        if training_successful and not continue_from_model: # Only run on a full new run
             logger.info("Performing post-training feature importance analysis...")
             analyze_feature_importance(model, train_env)
 
@@ -551,13 +586,22 @@ async def train_rl_agent(render_mode: Optional[str] = None):
 
 # --- Entry Point Guard ---
 if __name__ == "__main__":
+    # --- Add Argument Parser ---
+    parser = argparse.ArgumentParser(description="RL Agent Trainer")
+    parser.add_argument(
+        "--continue-from-model",
+        type=str,
+        default=None,
+        help="Path to a saved .zip model file to continue training from."
+    )
+    args = parser.parse_args()
+    # --- End Argument Parser ---
+
     if os.name == 'nt':
          from multiprocessing import freeze_support
          freeze_support()
 
     try:
-        # To enable rendering during debugging, change render_mode to 'human' or 'ansi'
-        # Be aware that rendering can significantly slow down training, especially with N_ENVS > 1.
-        asyncio.run(train_rl_agent(render_mode=None)) # Set render_mode here for training envs
+        asyncio.run(train_rl_agent(render_mode=None, continue_from_model=args.continue_from_model))
     except Exception as main_err:
          logger.critical(f"Critical error in RL trainer entry point: {main_err}", exc_info=True)

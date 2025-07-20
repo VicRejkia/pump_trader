@@ -16,7 +16,7 @@ from typing import List, Dict, Any, Tuple, Union
 # NOTE: THESE DATES ARE EXAMPLES - ADJUST TO YOUR ACTUAL DATA RANGE
 # Use the same extended range as GA for consistency?
 RL_HISTORICAL_DATA_START_TS: datetime = datetime(2025, 6, 26, 0, 0, 0, tzinfo=timezone.utc)
-RL_HISTORICAL_DATA_END_TS: datetime = datetime(2025, 7, 12, 23, 59, 0, tzinfo=timezone.utc)
+RL_HISTORICAL_DATA_END_TS: datetime = datetime(2025, 6, 26, 23, 59, 0, tzinfo=timezone.utc)
 
 # --- Environment Configuration ---
 DATA_SET_KEY_TRAIN: str = 'train'       # Data used for agent training episodes.
@@ -146,12 +146,6 @@ APPLY_TREND_REVERSAL_ON_SELL_REASONS = ["🛑 Stop Loss", "🆘 Emergency SL (MC
 
 VOLATILITY_WINDOW: int = 120 # Window size (steps) for volatility calculation in env
 
-# --- RL Agent & Training Configuration (Stable Baselines3) ---
-RL_ALGORITHM: str = "PPO" # PPO is robust; SAC/TD3 are alternatives
-
-# Policy network architecture. Adjust hidden layer sizes as needed.
-POLICY_KWARGS: Dict[str, Any] = dict(net_arch=dict(pi=[128, 128], vf=[128, 128]))
-
 # Total training timesteps. Needs significant increase for real training.
 TOTAL_TIMESTEPS: int = 10_000_000 #1_000_000 # Increase for more thorough training (e.g., 1M+)
 
@@ -177,6 +171,68 @@ DATA_SPLIT_RL: Dict[str, float] = {
     "validation": 0.2,
     "test": 0.2
 }
+
+# --- START: Centralized PPO Hyperparameters ---
+
+# --- RL Agent & Training Configuration (Stable Baselines3) ---
+RL_ALGORITHM: str = "PPO" # PPO is robust; SAC/TD3 are alternatives
+
+# Defines the neural network architecture.
+# CHANGEABLE FOR: New models only. Cannot be changed when fine-tuning.
+POLICY_KWARGS: Dict[str, Any] = dict(net_arch=dict(pi=[128, 128], vf=[128, 128]))
+
+# PPO-specific hyperparameters.
+PPO_HYPERPARAMS: Dict[str, Any] = {
+    # Number of steps to run for each environment per update.
+    # CHANGEABLE FOR: New models only.
+    "n_steps": 2048,
+    
+    # The number of training epochs to run per update.
+    # CHANGEABLE FOR: New models and fine-tuning.
+    "n_epochs": 10,
+
+    # Minibatch size for each epoch.
+    # CHANGEABLE FOR: New models only.
+    "batch_size": 64,
+
+    # Discount factor for future rewards.
+    # CHANGEABLE FOR: New models and fine-tuning.
+    "gamma": 0.99,
+
+    # Factor for trade-off of bias vs. variance in Advantage function.
+    # Recommendation: Lower to 0.9 for less variance and more focus on immediate rewards.
+    # CHANGEABLE FOR: New models and fine-tuning.
+    "gae_lambda": 0.9,
+
+    # Clipping parameter for the policy update.
+    # Recommendation: Lower to 0.15 for more stable, smaller policy updates.
+    # CHANGEABLE FOR: New models and fine-tuning.
+    "clip_range": 0.15,
+
+    # Entropy coefficient to encourage exploration.
+    # Recommendation: 0.005 to encourage slight exploration around the learned policy.
+    # CHANGEABLE FOR: New models and fine-tuning.
+    "ent_coef": 0.01,
+
+    # Value function coefficient for the loss calculation.
+    # CHANGEABLE FOR: New models and fine-tuning.
+    "vf_coef": 0.7,
+
+    # The learning rate for the Adam optimizer.
+    # CHANGEABLE FOR: New models only. Changing this during fine-tuning is not recommended.
+    "learning_rate": 3e-5,
+
+    # The maximum value for the gradient clipping.
+    # CHANGEABLE FOR: New models and fine-tuning.
+    "max_grad_norm": 0.5,
+
+    # Whether to use State-Dependent Exploration (SDE).
+    # CHANGEABLE FOR: New models only.
+    "use_sde": False,
+    "sde_sample_freq": -1,
+}
+# --- END: Centralized PPO Hyperparameters ---
+
 
 # --- Live Agent Configuration (for deployment) ---
 # How often the live bot queries the trained agent for new parameters (seconds).

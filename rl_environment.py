@@ -67,7 +67,7 @@ class TradingEnv(gym.Env):
         if not historical_data_dict:
             raise ValueError("Historical OHLCV data dictionary cannot be empty.")
         if not token_lifespans:
-             raise ValueError("Token lifespans dictionary cannot be empty.")
+            raise ValueError("Token lifespans dictionary cannot be empty.")
 
         # --- Validate and Store OHLCV Data ---
         self.historical_data_dict = {}
@@ -111,7 +111,6 @@ class TradingEnv(gym.Env):
 
         self.initial_capital = initial_capital
         
-        # --- START: FIX for TypeError ---
         # Defensively handle the case where max_steps might be None.
         if max_steps is None:
             logger.warning(
@@ -121,7 +120,6 @@ class TradingEnv(gym.Env):
             self._max_episode_steps = rl_config.MAX_STEPS_PER_EPISODE_FALLBACK
         else:
             self._max_episode_steps = max_steps
-        # --- END: FIX for TypeError ---
 
 
         self.action_space = spaces.Box(
