@@ -4,6 +4,7 @@ import os
 import httpx # Using httpx for async requests
 import base64
 import time
+import asyncio
 from dotenv import load_dotenv
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction

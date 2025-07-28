@@ -2153,6 +2153,68 @@ class DatabaseClient:
 
         return results_dict
 
+    # --- NEW METHOD FOR RL FEEDBACK LOOP ---
+    async def log_completed_trade(
+        self,
+        token_address: str,
+        side: str,
+        amount_in_sol: float,
+        amount_out_tokens: float,
+        fill_price: float,
+        market_cap_at_trade: Optional[float],
+        tx_fee_sol: Optional[float],
+        tip_sol: Optional[float],
+        slippage_percent: Optional[float],
+        trade_context: Optional[Dict[str, Any]],
+        conn=None
+    ):
+        """
+        Logs a detailed record of a completed trade to the `completed_trades` table.
+        This serves as the foundational feedback loop for the RL agent's learning process.
+
+        Args:
+            token_address (str): The mint address of the token traded.
+            side (str): The side of the trade, must be 'buy' or 'sell'.
+            amount_in_sol (float): The amount of SOL involved in the trade.
+            amount_out_tokens (float): The amount of tokens involved in the trade.
+            fill_price (float): The actual executed price of the trade in SOL per token.
+            market_cap_at_trade (Optional[float]): The market cap in SOL at the time of the trade.
+            tx_fee_sol (Optional[float]): The base network fee for the transaction in SOL.
+            tip_sol (Optional[float]): The priority fee (Jito tip) for the transaction in SOL.
+            slippage_percent (Optional[float]): The slippage percentage experienced.
+            trade_context (Optional[Dict[str, Any]]): A JSONB field for storing other metadata.
+            conn: An optional existing database connection or transaction.
+        """
+        if side not in ('buy', 'sell'):
+            raise ValueError("The 'side' parameter must be either 'buy' or 'sell'.")
+
+        query = """
+            INSERT INTO completed_trades (
+                token_address, side, amount_in_sol, amount_out_tokens, fill_price,
+                market_cap_at_trade, tx_fee_sol, tip_sol, slippage_percent, trade_context
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);
+        """
+        
+        # Convert trade_context dict to a JSON string if it exists
+        trade_context_json = json.dumps(trade_context) if trade_context else None
+        
+        connection = conn or await self.pool.acquire()
+        try:
+            await connection.execute(
+                query, token_address, side, amount_in_sol, amount_out_tokens, fill_price,
+                market_cap_at_trade, tx_fee_sol, tip_sol, slippage_percent, trade_context_json
+            )
+            logger.debug(f"Logged completed '{side}' trade for {token_address} to feedback table.")
+        except Exception as e:
+            logger.error(f"Failed to log completed trade for {token_address}: {e}", exc_info=True)
+            # Re-raise if not using an external transaction, so the caller can handle it.
+            if not conn:
+                raise
+        finally:
+            # Release connection only if it was acquired here
+            if not conn and connection:
+                await self.pool.release(connection)
+
 # Helper function moved outside class for potential reuse (optional)
 async def get_token_lifespan(db_client: DatabaseClient, mint: str) -> Optional[Dict[str, datetime]]:
     """

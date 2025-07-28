@@ -1,11 +1,13 @@
-# FILE: rl_config.py (Added Death Penalty)
+# FILE: rl_config.py (Refactored for Aggregate State)
 
 """
 Configuration for the Reinforcement Learning (RL) agent and environment.
 
 Defines the structure of the observation and action spaces, reward function
 components, hyperparameters for the RL algorithm, training settings,
-and data configurations.
+and data configurations. This version is refactored to use an aggregate
+observation space, allowing the agent to manage a portfolio of multiple,
+dynamic tokens.
 """
 
 from datetime import datetime, timezone
@@ -13,8 +15,6 @@ import numpy as np
 from typing import List, Dict, Any, Tuple, Union
 
 # --- General Configuration ---
-# NOTE: THESE DATES ARE EXAMPLES - ADJUST TO YOUR ACTUAL DATA RANGE
-# Use the same extended range as GA for consistency?
 RL_HISTORICAL_DATA_START_TS: datetime = datetime(2025, 6, 26, 0, 0, 0, tzinfo=timezone.utc)
 RL_HISTORICAL_DATA_END_TS: datetime = datetime(2025, 6, 26, 23, 59, 0, tzinfo=timezone.utc)
 
@@ -23,56 +23,35 @@ DATA_SET_KEY_TRAIN: str = 'train'       # Data used for agent training episodes.
 DATA_SET_KEY_EVAL: str = 'validation'   # Data used for periodic evaluation during training.
 
 RL_INITIAL_CAPITAL: float = 100.0 # In SOL
+MAX_STEPS_PER_EPISODE: int = 720 # e.g., 720 steps of 1 minute = 12 hours of trading simulation
 
-# --- START: Modified MAX_STEPS_PER_EPISODE ---
-# This value is now calculated dynamically in rl_trainer.py based on the
-# percentile of token lifespans in the training dataset.
-# A fallback value can be set here if the calculation fails.
-MAX_STEPS_PER_EPISODE: Union[int, None] = None # Set to None to indicate dynamic calculation
-MAX_STEPS_PERCENTILE: float = 95.0 # The percentile of token lifespans to use as the max step limit.
-MAX_STEPS_PER_EPISODE_FALLBACK: int = 2880 # Fallback if dynamic calculation fails or None is passed
-# --- END: Modified MAX_STEPS_PER_EPISODE ---
-
-# --- Observation Space Configuration ---
-# Features observed at each step. Normalization is crucial.
-OBSERVATION_PRICE_HISTORY_LENGTH: int = 15 # Steps of price history for features like log returns
-
+# --- Observation Space Configuration (Global Aggregate State) ---
+# Features observed at each step, representing the entire portfolio and market.
 OBSERVATION_FEATURES: List[str] = [
-    # Price Change Features (Normalized Log Returns)
-    'price_change_1',  # Log return over 1 step (~5s)
-    'price_change_5',  # Log return over 5 steps (~25s)
-    'price_change_10', # Log return over 10 steps (~50s)
+    # Portfolio State Features
+    'sol_balance_norm',             # Current SOL balance, normalized (0-1 relative to initial capital * factor)
+    'portfolio_pnl_unrealized_total', # Sum of unrealized PnL for all open positions, normalized
+    'num_active_positions',         # Raw count of open trades
+    'avg_time_holding_norm',        # Average holding duration for open positions, normalized
+    'portfolio_value_norm',         # Total portfolio value (SOL balance + value of holdings), normalized
 
-    # Market Indicators (Normalized)
-    'volatility',           # Rolling volatility (e.g., normalized 0-1)
-    'live_market_cap_sol_norm',  # Normalized LIVE SOL market cap
-    'live_market_cap_usd_norm',  # Normalized LIVE USD market cap
-    'volume_sol_norm',      # Trade volume in SOL (e.g., log-normalized)
-    'rugcheck_score_norm',  # RugCheck score (normalized 0-1, where 1=low risk)
-    'socials_score_norm',   # Socials score (normalized 0-1, where 1=low risk)
-    'time_since_creation_norm', # Time since token creation (normalized 0-1)
-
-    # Portfolio State Features (Normalized)
-    'is_holding',           # Binary flag (0 or 1)
-    'position_pnl_norm',    # Unrealized PnL of current position, normalized (-1 to N)
-    'time_holding_norm',    # Time the current position has been held, normalized (0-1)
-    'sol_balance_norm',     # Current SOL balance, normalized (0-1 relative to initial capital * factor)
+    # Aggregate Market Features (Normalized)
+    'market_volatility_avg',        # Average volatility of actively traded tokens
+    'market_volume_sol_avg',        # Average volume in SOL of actively traded tokens
+    'new_tokens_last_hour',         # Count of new tokens created in the last simulated hour
+    'active_tokens_rug_score_avg',  # Average rugcheck score of tokens with recent activity
+    'active_tokens_social_score_avg',# Average socials score of tokens with recent activity
 
     # Time Features (Normalized)
-    'weekday',              # Day of the week (e.g., normalized 0-1 or one-hot)
-    'daytime'               # Time of day (e.g., normalized 0-1 or cyclical)
+    'weekday',                      # Day of the week (e.g., normalized 0-1 or one-hot)
+    'daytime'                       # Time of day (e.g., normalized 0-1 or cyclical)
 ]
 OBSERVATION_SPACE_DIM: int = len(OBSERVATION_FEATURES)
+OBSERVATION_LOW: float = -np.inf
+OBSERVATION_HIGH: float = np.inf
 
-# Note: Observation normalization is handled by Stable Baselines3's VecNormalize.
-# The bounds defined here are the *expected* range after normalization,
-# but the Box space itself is defined by the shape only.
-OBSERVATION_LOW: float = -np.inf 
-OBSERVATION_HIGH: float = np.inf 
-
-# --- Action Space Configuration (Continuous Parameter Tuning) ---
-# Parameters controlled by the RL agent.
-# Format: (parameter_name, low_bound, high_bound, type)
+# --- Action Space Configuration (Parameter Tuning) ---
+# These are the parameters the RL agent will dynamically tune for the bot's trading logic.
 RL_TUNABLE_PARAMETERS: List[Tuple[str, float, float, type]] = [
     # Sell-side parameters
     ('INITIAL_STOP_LOSS_PERCENT', 5.0, 70.0, float),
@@ -80,31 +59,31 @@ RL_TUNABLE_PARAMETERS: List[Tuple[str, float, float, type]] = [
     ('TRAILING_STOP_LOSS_PERCENT', 5.0, 50.0, float),
     ('FIRST_SELL_PROFIT_MARGIN', 10.0, 200.0, float),
     ('SECOND_TAKE_PROFIT_PERCENT', 100.0, 1000.0, float),
-    
+
     # Buy condition thresholds
     ('DEFAULT_VOLUME_THRESHOLD', 1000, 50000, int),
     ('DEFAULT_MARKETCAP_THRESHOLD', 10000, 100000, int),
     ('MIN_VOLATILITY', 0.01, 3.0, float),
     ('DEFAULT_RUGCHECK_SCORE_THRESHOLD', 1, 1002, int),
-    ('DEFAULT_SOCIAL_SCORE_THRESHOLD', 100, 100, int),
+    ('DEFAULT_SOCIAL_SCORE_THRESHOLD', 100, 100, int), # Note: max is 100, so this is fixed
     ('SOL_TO_BUY', 0.1, 0.5, float),
-    
+
     # Emergency & Re-buy parameters
-    ('MC_DROP_THRESHOLD_RL', 1.0, 20.0, float),
-    ('USE_TREND_REVERSAL_CONFIRMATION', 0.0, 1.0, float),
-    ('STOP_LOSS_COOLDOWN_MINUTES', 0.0, 60.0, int),
-    
+    ('MC_DROP_THRESHOLD', 1.0, 20.0, float), # Note: Renamed from MC_DROP_THRESHOLD_RL for consistency
+    ('USE_TREND_REVERSAL_CONFIRMATION', 0.0, 1.0, float), # Interpreted as bool ( > 0.5)
+    ('STOP_LOSS_COOLDOWN_MINUTES', 0.0, 60.0, float), # Use float for continuous action space
+
     # PUMP.FUN Trend Reversal Parameters
-    ('TREND_REVERSAL_RECENCY_HOURS', 0.25, 12.0, int),
+    ('TREND_REVERSAL_RECENCY_HOURS', 0.25, 12.0, float),
     ('TREND_REVERSAL_RSI_NEUTRAL_LEVEL', 30.0, 60.0, float),
-    ('INDICATOR_LOOKBACK_HOURS', 0.25, 6.0, int),
+    ('INDICATOR_LOOKBACK_HOURS', 0.25, 6.0, float),
     ('RSI_PERIOD', 4.0, 50.0, int),
     ('BBANDS_PERIOD', 10.0, 30.0, int),
     ('BBANDS_STD_DEV', 1.0, 2.5, float),
     ('FAST_EMA_PERIOD', 5.0, 20.0, int),
     ('SLOW_EMA_PERIOD', 15.0, 80.0, int),
 
-    # [NEW] DEXSCREENER Trend Reversal Parameters
+    # DEXSCREENER Trend Reversal Parameters
     ('DEX_REVERSAL_LOOKBACK_MINUTES', 15.0, 60.0, int),
     ('DEX_REVERSAL_MIN_SNAPSHOTS', 3.0, 10.0, int),
     ('DEX_REVERSAL_MIN_LIQUIDITY_USD', 1000.0, 10000.0, int),
@@ -112,128 +91,42 @@ RL_TUNABLE_PARAMETERS: List[Tuple[str, float, float, type]] = [
     ('DEX_REVERSAL_MIN_CONFIRMATIONS', 1.0, 5.0, int),
 ]
 ACTION_SPACE_DIM: int = len(RL_TUNABLE_PARAMETERS)
-
 ACTION_LOW: np.ndarray = np.array([p[1] for p in RL_TUNABLE_PARAMETERS], dtype=np.float32)
 ACTION_HIGH: np.ndarray = np.array([p[2] for p in RL_TUNABLE_PARAMETERS], dtype=np.float32)
 
 # --- Reward Function Configuration ---
-# Weights for different reward components. Tuning is critical.
+REWARD_PNL_MULTIPLIER: float = 1.0  # Scale realized PnL from completed trades
+REWARD_DEATH_PENALTY: float = -RL_INITIAL_CAPITAL * 0.1 # Penalty for holding a token when its data ends
+REWARD_HOLDING_PENALTY: float = -0.0001 # Small penalty per step per open position to discourage inaction
 
-# Primary Reward: Based on realized profit/loss from completed trades (sells).
-REWARD_PNL_MULTIPLIER: float = 1.0 # Scale realized PnL
-
-# Penalty for holding a position when the token dies (end of data).
-# Make this substantial, e.g., equivalent to losing the initial investment.
-REWARD_DEATH_PENALTY: float = -RL_INITIAL_CAPITAL * 0.5 # Example: Penalize half the initial capital
-
-# Reward Shaping (Optional): Intermediate rewards/penalties.
-REWARD_SL_HIT_PENALTY: float = -0.5 # Penalty for hitting initial or trailing stop loss
-REWARD_TP_HIT_BONUS: float = 0.5  # Bonus for hitting first or second take profit (0.2)
-REWARD_HOLDING_PENALTY: float = -0.001 # Small penalty per step while holding (discourages inaction)
-# REWARD_UNREALIZED_PNL_CHANGE: float = 0.05 # Small bonus for increasing unrealized PnL (optional, can be noisy)
-
-# --- Default Simulation Parameters (Fixed for RL Env) ---
-# Non-optimized parameters used during simulation. Match main config where applicable.
-DEFAULT_BUY_FEE: float = 0.001
-DEFAULT_BUY_TIP: float = 0.001
-DEFAULT_SELL_FEE: float = 0.001
-DEFAULT_SELL_TIP: float = 0.001
-
-MIN_MARKET_CAP_USD_FALLBACK: int = 4000
-
-MIN_CANDLE_DATA_FOR_INDICATORS: int = 30
-APPLY_TREND_REVERSAL_ON_SELL_REASONS = ["🛑 Stop Loss", "🆘 Emergency SL (MCap)", "↘️ Trailing SL", "🛡️ Breakeven SL", "manual_override"]
-
-VOLATILITY_WINDOW: int = 120 # Window size (steps) for volatility calculation in env
-
-# Total training timesteps. Needs significant increase for real training.
-TOTAL_TIMESTEPS: int = 10_000_000 #1_000_000 # Increase for more thorough training (e.g., 1M+)
-
-# Number of parallel environments. Adjust based on CPU cores.
-N_ENVS: int = 8 # Example: Use 8 parallel environments if CPU allows
-
+# --- Training Configuration ---
+TOTAL_TIMESTEPS: int = 1_000_000
+N_ENVS: int = 8
 TENSORBOARD_LOG_DIR: str = "./rl_tensorboard_logs/"
 MODEL_SAVE_DIR: str = "./rl_trained_models/"
-
-# Evaluation frequency (in total agent steps across all envs).
-EVAL_FREQ: int = 100000 #50000 # Evaluate every 50k total steps
-
-# Number of episodes for each evaluation run.
-N_EVAL_EPISODES: int = 120 #60 # More episodes for better evaluation stability
-
-# Checkpoint saving frequency (in total agent steps).
-CHECKPOINT_FREQ: int = 500000 # Save every 100k total steps
+EVAL_FREQ: int = 50000
+N_EVAL_EPISODES: int = 20
+CHECKPOINT_FREQ: int = 100000
 
 # --- Data Settings ---
-# Same split as GA for consistency when reusing load_and_split_data
-DATA_SPLIT_RL: Dict[str, float] = {
-    "training": 0.6,
-    "validation": 0.2,
-    "test": 0.2
-}
+DATA_SPLIT_RL: Dict[str, float] = {"training": 0.7, "validation": 0.3, "test": 0.0}
 
-# --- START: Centralized PPO Hyperparameters ---
-
-# --- RL Agent & Training Configuration (Stable Baselines3) ---
-RL_ALGORITHM: str = "PPO" # PPO is robust; SAC/TD3 are alternatives
-
-# Defines the neural network architecture.
-# CHANGEABLE FOR: New models only. Cannot be changed when fine-tuning.
+# --- PPO Hyperparameters ---
+RL_ALGORITHM: str = "PPO"
 POLICY_KWARGS: Dict[str, Any] = dict(net_arch=dict(pi=[128, 128], vf=[128, 128]))
-
-# PPO-specific hyperparameters.
 PPO_HYPERPARAMS: Dict[str, Any] = {
-    # Number of steps to run for each environment per update.
-    # CHANGEABLE FOR: New models only.
     "n_steps": 2048,
-    
-    # The number of training epochs to run per update.
-    # CHANGEABLE FOR: New models and fine-tuning.
     "n_epochs": 10,
-
-    # Minibatch size for each epoch.
-    # CHANGEABLE FOR: New models only.
     "batch_size": 64,
-
-    # Discount factor for future rewards.
-    # CHANGEABLE FOR: New models and fine-tuning.
     "gamma": 0.99,
-
-    # Factor for trade-off of bias vs. variance in Advantage function.
-    # Recommendation: Lower to 0.9 for less variance and more focus on immediate rewards.
-    # CHANGEABLE FOR: New models and fine-tuning.
-    "gae_lambda": 0.9,
-
-    # Clipping parameter for the policy update.
-    # Recommendation: Lower to 0.15 for more stable, smaller policy updates.
-    # CHANGEABLE FOR: New models and fine-tuning.
-    "clip_range": 0.15,
-
-    # Entropy coefficient to encourage exploration.
-    # Recommendation: 0.005 to encourage slight exploration around the learned policy.
-    # CHANGEABLE FOR: New models and fine-tuning.
+    "gae_lambda": 0.95,
+    "clip_range": 0.2,
     "ent_coef": 0.01,
-
-    # Value function coefficient for the loss calculation.
-    # CHANGEABLE FOR: New models and fine-tuning.
-    "vf_coef": 0.7,
-
-    # The learning rate for the Adam optimizer.
-    # CHANGEABLE FOR: New models only. Changing this during fine-tuning is not recommended.
-    "learning_rate": 3e-5,
-
-    # The maximum value for the gradient clipping.
-    # CHANGEABLE FOR: New models and fine-tuning.
+    "vf_coef": 0.5,
+    "learning_rate": 3e-4,
     "max_grad_norm": 0.5,
-
-    # Whether to use State-Dependent Exploration (SDE).
-    # CHANGEABLE FOR: New models only.
-    "use_sde": False,
-    "sde_sample_freq": -1,
+    "use_sde": False
 }
-# --- END: Centralized PPO Hyperparameters ---
 
-
-# --- Live Agent Configuration (for deployment) ---
-# How often the live bot queries the trained agent for new parameters (seconds).
-AGENT_ACTION_INTERVAL_SECONDS: int = 15 # Update parameters every minute
+# --- Live Agent Configuration ---
+AGENT_ACTION_INTERVAL_SECONDS: int = 60 # How often the live bot queries the agent for new parameters

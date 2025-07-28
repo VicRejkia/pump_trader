@@ -318,6 +318,18 @@ class TradingManager:
                             initial_tp_price=initial_tp1_price_calc, second_tp_price=second_tp_price_calc,
                             timestamp=datetime.now(timezone.utc), settings=sim_buy_settings, conn=conn_sim
                         )
+                        await self.db.log_completed_trade(
+                            token_address=mint,
+                            side='buy',
+                            amount_in_sol=sol_to_spend_on_tokens,
+                            amount_out_tokens=tokens_bought_calculated,
+                            fill_price=trigger_price,
+                            market_cap_at_trade=market_cap_sol_at_trigger,
+                            tx_fee_sol=sim_buy_fee, # Simulated fee
+                            tip_sol=sim_buy_tip,     # Simulated tip
+                            slippage_percent=0,      # Slippage is 0 in simulation
+                            trade_context=sim_buy_settings
+                        )
                         await self.state.update_sol_balance(-sim_total_investment)
                         
                         token_name_row = await self.db.get_token_name(mint, conn_sim)
@@ -407,6 +419,18 @@ class TradingManager:
                             initial_tp_price=initial_tp1_price_live, second_tp_price=second_tp_price_live,
                             timestamp=datetime.now(timezone.utc), settings=live_buy_settings, conn=conn_live
                         )
+                        await self.db.log_completed_trade(
+                            token_address=mint,
+                            side='buy',
+                            amount_in_sol=sol_to_spend_on_tokens,
+                            amount_out_tokens=tokens_bought_actual,
+                            fill_price=executed_price,
+                            market_cap_at_trade=market_cap_sol_at_trigger,
+                            tx_fee_sol=0, # The Jupiter API response would be needed for the exact fee
+                            tip_sol=api_priority_fee,
+                            slippage_percent=trade_result.get("slippage"), # Assuming API returns this
+                            trade_context=live_buy_settings
+                        )
                         await self.state.update_sol_balance(-total_sol_outflow_for_pnl)
                         
                         token_name_row = await self.db.get_token_name(mint, conn_live)
@@ -487,6 +511,18 @@ class TradingManager:
                     net_sol_received=sim_net_sol_received, sol_price_usd=sol_price_usd if sol_price_usd else 0.0,
                     tokens_sold=tokens_to_sell_on_trigger, sell_fee=sim_sell_fee, sell_tip=sim_sell_tip, profit=sim_profit,
                     reason=reason, timestamp=datetime.now(timezone.utc), settings=sim_sell_settings, conn=conn
+                )
+                await self.db.log_completed_trade(
+                    token_address=mint,
+                    side='sell',
+                    amount_in_sol=sim_net_sol_received,
+                    amount_out_tokens=tokens_to_sell_on_trigger,
+                    fill_price=trigger_price,
+                    market_cap_at_trade=market_cap_sol_at_trigger,
+                    tx_fee_sol=sim_sell_fee,
+                    tip_sol=sim_sell_tip,
+                    slippage_percent=0,
+                    trade_context=sim_sell_settings
                 )
                 await self.state.update_sol_balance(sim_net_sol_received)
                 
@@ -581,6 +617,18 @@ class TradingManager:
                                 sell_fee=0, sell_tip=api_priority_fee, 
                                 profit=profit_live,
                                 reason=reason, timestamp=datetime.now(timezone.utc), settings=live_sell_settings, conn=conn_live_sell
+                            )
+                            await self.db.log_completed_trade(
+                                token_address=mint,
+                                side='sell',
+                                amount_in_sol=sol_received_from_api,
+                                amount_out_tokens=tokens_to_sell_on_trigger,
+                                fill_price=executed_price_live,
+                                market_cap_at_trade=market_cap_sol_at_trigger,
+                                tx_fee_sol=0, # The Jupiter API response would be needed for the exact fee
+                                tip_sol=api_priority_fee,
+                                slippage_percent=trade_result.get("slippage"),
+                                trade_context=live_sell_settings
                             )
                             await self.state.update_sol_balance(sol_received_from_api)
                             
