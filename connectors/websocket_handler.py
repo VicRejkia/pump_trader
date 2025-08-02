@@ -11,7 +11,7 @@ from typing import Optional
 import websockets
 
 # Assuming these are in your project structure
-from config import _PUMPPORTAL_WS, _WEBSOCKET_SUBSCRIPTION_REFRESH_ENABLED, _WEBSOCKET_SUBSCRIPTION_REFRESH_INTERVAL_MINUTES
+from config.config import _PUMPPORTAL_WS, _WEBSOCKET_SUBSCRIPTION_REFRESH_ENABLED, _WEBSOCKET_SUBSCRIPTION_REFRESH_INTERVAL_MINUTES
 from database_handler import DatabaseClient
 from bot_logger import logger
 from state_manager import GlobalState

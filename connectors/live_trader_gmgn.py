@@ -15,7 +15,7 @@ from solders.transaction import VersionedTransaction
 
 from bot_logger import logger
 # Import your main config module to access TRADING_MODE and other settings
-import config as bot_config # Use an alias
+import config.config as bot_config # Use an alias
 
 load_dotenv()
 

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from bot_logger import logger
 from state_manager import GlobalState
 from utils import calculate_market_cap 
-from config import _TOTAL_SUPPLY # Import TOTAL_SUPPLY from config
+from config.config import _TOTAL_SUPPLY # Import TOTAL_SUPPLY from config
 
 async def trade_worker():
     """Processes trade messages from queue and writes them in batches to the database."""

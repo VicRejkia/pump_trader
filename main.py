@@ -7,7 +7,7 @@ import time
 import json
 from datetime import datetime, timezone
 from bot_logger import setup_logging, rotate_log_file, log_info, log_debug, log_error, log_warning, log_critical
-from config import TELEGRAM_INTERACTION
+from config.config import TELEGRAM_INTERACTION
 
 # --- Project Setup ---
 CURRENT_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))

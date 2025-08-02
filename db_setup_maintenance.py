@@ -17,7 +17,7 @@ if PROJECT_ROOT_DIR not in sys.path:
     sys.path.append(PROJECT_ROOT_DIR)
 
 from database_handler import DatabaseClient
-import config as base_config_module
+import config.config as base_config_module
 
 # --- Basic Logger Setup for this script ---
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')

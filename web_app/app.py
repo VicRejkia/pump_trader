@@ -15,7 +15,7 @@ if PROJECT_ROOT not in sys.path:
 try:
     from database_handler import DatabaseClient
     from bot_logger import logger
-    import config as bot_config_module
+    import config.config as bot_config_module
 except ImportError as e:
     print(f"CRITICAL ERROR: Could not import necessary modules: {e}")
     sys.exit(1)

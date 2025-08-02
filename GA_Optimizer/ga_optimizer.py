@@ -25,7 +25,7 @@ import copy
 
 # --- Project Modules ---
 from bot_logger import logger, setup_logging
-from ga_config import (
+from GA_Optimizer.ga_config import (
     OPTIMIZABLE_PARAMETERS, POPULATION_SIZE, NUM_GENERATIONS,
     CROSSOVER_PROBABILITY, MUTATION_PROBABILITY, FITNESS_METRIC, FITNESS_GOAL,
     DATA_SPLIT, BACKTEST_INITIAL_CAPITAL, RESULTS_DIR,
@@ -34,7 +34,7 @@ from ga_config import (
     GA_FITNESS_SAMPLE_SIZE
 )
 from database_handler import DatabaseClient
-from ga_backtester import run_backtest_sync
+from GA_Optimizer.ga_backtester import run_backtest_sync
 from utils import load_and_split_data, NpEncoder
 
 

@@ -14,7 +14,7 @@ from utils import (
     play_buy_opportunity_sound, play_sell_sl_sound_async, play_sell_tp_sound_async,
     format_buy_order_log, format_sell_order_log, calculate_trend_indicators
 )
-from live_trader_pumpportal import execute_live_pumpportal_trade # Import the live trading function
+from connectors.live_trader_pumpportal import execute_live_pumpportal_trade # Import the live trading function
 from telegram_interface import send_telegram_message # If you use it
 
 class TradingManager:

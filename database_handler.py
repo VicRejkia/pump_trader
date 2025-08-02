@@ -15,8 +15,8 @@ import json
 import pandas as pd
 from dotenv import load_dotenv
 from bot_logger import logger
-from config import _TOTAL_SUPPLY
-import config as base_config_module
+from config.config import _TOTAL_SUPPLY
+import config.config as base_config_module
 from state_manager import GlobalState
 import pandas as pd
 import numpy as np

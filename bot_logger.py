@@ -7,7 +7,7 @@ import logging
 from functools import wraps
 from rich.logging import RichHandler
 from rich.console import Console
-from config import _LOGGER_NAME, _LOG_LEVEL_CONSOLE, _LOG_LEVEL_FILE, _LOG_STORAGE_PATH
+from config.config import _LOGGER_NAME, _LOG_LEVEL_CONSOLE, _LOG_LEVEL_FILE, _LOG_STORAGE_PATH
 import os
 
 # --- RICH COMPONENT IMPORTS AND RE-EXPORTS ---

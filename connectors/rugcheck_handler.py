@@ -15,14 +15,14 @@ from aiolimiter import AsyncLimiter
 from decimal import Decimal
 from solders.keypair import Keypair # type: ignore
 
-from config import (
+from config.config import (
     _RUGCHECK_AUTH_API, _RUGCHECK_RATE_LIMIT, _RUGCHECK_API, _RUGCHECK_INTERVAL,
     RUGCHECK_SCORE_THRESHOLD
 )
 from database_handler import DatabaseClient
 from bot_logger import logger
 from state_manager import GlobalState
-from websocket_handler import WebSocketHandler
+from connectors.websocket_handler import WebSocketHandler
 from socials_processor import SocialsProcessor
 
 # --- Configuration for Retries & Maintenance ---

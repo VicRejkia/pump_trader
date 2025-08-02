@@ -11,42 +11,40 @@ import numpy as np
 import pandas as pd
 from datetime import datetime, timezone, timedelta
 import httpx
+from typing import Dict, Any, List, Optional
 
 # Assuming these imports are correct for your project structure
-import config as config_module
+import config.config as config_module
 from database_handler import DatabaseClient
 from trading_logic import TradingManager
-from websocket_handler import WebSocketHandler
+from connectors.websocket_handler import WebSocketHandler
 from bot_logger import setup_logging, log_info, log_debug, log_error, log_warning, log_critical, rotate_log_file
 from state_manager import GlobalState
 from trade_processor import trade_worker
-from sol_price_api import update_sol_price
-from rugcheck_handler import Rugcheck
+from connectors.sol_price_api import update_sol_price
+from connectors.rugcheck_handler import Rugcheck
 from socials_processor import SocialsProcessor
 from utils import calculate_volatility # Assuming this is your utility
-from transaction_enricher import transaction_enricher_worker
-from dexscreener_api import DexscreenerFetcher
+from connectors.dexscreener_api import DexscreenerFetcher
 
 from telegram_interface import send_telegram_message
 
 from typing import Optional
 
 # --- RL Imports (add these) ---
+# --- RL Agent Integration Imports ---
 try:
     from stable_baselines3 import PPO
     from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+    from trading_rl_agent.agent import TradingAgent
+    from trading_rl_agent import rl_config as agent_config # Use a distinct name
     RL_AVAILABLE = True
 except ImportError:
     RL_AVAILABLE = False
-    class PPO:
-        @staticmethod
-        def load(path, device): return None
-    class VecNormalize:
-        @staticmethod
-        def load(path, venv): return None
-
-# Import RL config to know parameter names and observation details
-import rl_config
+    # Create dummy classes for type hinting if SB3 is not installed
+    class PPO: pass
+    class VecNormalize: pass
+    class TradingAgent: pass
 # --- End RL Imports ---
 
 # Define paths for communication files relative to project root
@@ -73,8 +71,8 @@ class TradingBot:
         self.no_log_rotate = no_log_rotate # Store the flag
         self.params_file = params_file
         self.rl_agent_path = rl_agent_path
-        self.rl_agent = None
-        self.vec_normalize = None # Add attribute for VecNormalize
+        self.rl_agent_instance: Optional[TradingAgent] = None # <-- RENAMED for clarity
+        self.active_rl_parameters: Dict[str, Any] = {} # To store parameters set by RL agent
         self.db_client = None
         self.ws_handler = None
         self.tasks = []
@@ -645,60 +643,64 @@ class TradingBot:
         # os._exit(0)
 
     # --- RL Agent Integration Functions ---
-    async def _get_live_observation(self) -> Optional[np.ndarray]:
+    async def _get_live_observation(self) -> Optional[Dict[str, np.ndarray]]:
         """
         Gathers LIVE data and formats it into the aggregate observation vector
-        expected by the RL agent.
+        expected by the RL agent. This mirrors the logic from the simulation
+        environment but uses live data from the database.
         """
-        if not self.db_client: return None
+        if not self.db_client or not self.state:
+            return None
+        
         log_debug("Constructing live observation for RL agent...")
         try:
-            raw_obs_map = {feat: 0.0 for feat in rl_config.OBSERVATION_FEATURES}
-            sol_price = await self.state.get_sol_price() or 0.0
+            # Initialize observation structures based on rl_config
+            token_data_shape = (
+                agent_config.MAX_TOKENS_IN_UNIVERSE,
+                agent_config.TOKEN_HISTORY_LENGTH,
+                agent_config.NUM_TOKEN_FEATURES
+            )
+            token_obs_array = np.zeros(token_data_shape, dtype=np.float32)
+            global_features = np.zeros(agent_config.NUM_GLOBAL_FEATURES, dtype=np.float32)
 
-            # --- Portfolio State ---
-            raw_obs_map['sol_balance_norm'] = await self.state.get_current_sol_balance()
-            active_positions = await self.db_client.get_active_buy_positions()
-            raw_obs_map['num_active_positions'] = len(active_positions)
+            # --- Fetch and populate data ---
+            # This part requires creating new DB methods or adapting existing ones
+            # to fetch the necessary data efficiently. For now, we use placeholders
+            # to illustrate the structure. A full implementation would require
+            # creating functions like `db_client.get_recent_ohlcv_for_all_active()`
+            # and `db_client.get_current_portfolio_stats()`.
 
-            # ... (Full implementation mirrors the logic from the new rl_environment.py)
-            # This involves querying the DB for active positions, calculating aggregate PnL,
-            # fetching recent market data for aggregate stats, etc.
-            # For brevity, we'll represent the complex part with a comment.
-            # In a real implementation, this logic would be thorough.
-            if active_positions:
-                # Calculate total unrealized PnL, average holding time, etc.
-                pass # Placeholder for portfolio aggregation logic
+            # Placeholder: In a real implementation, you would query the DB for the
+            # recent history of all tokens you consider part of the agent's universe.
+            # token_histories = await self.db_client.get_recent_ohlcv_for_universe(...)
+            # for idx, history in enumerate(token_histories):
+            #     token_obs_array[idx] = history
+
+            # --- Populate Global Features ---
+            sol_balance = await self.state.get_current_sol_balance()
+            portfolio_stats = await self.db_client.get_portfolio_stats() # Assumes this method exists
             
-            # --- Aggregate Market State ---
-            # Query recent trades/tokens to calculate average volatility, volume, new tokens etc.
-            # This is a simplified example.
-            # active_market_stats = await self.db_client.get_aggregate_market_stats()
-            # raw_obs_map.update(active_market_stats)
-
-            # --- Time Features ---
-            now = datetime.now(timezone.utc)
-            raw_obs_map['weekday'] = float(now.weekday())
-            raw_obs_map['daytime'] = float(now.hour)
-
-            # --- Final Assembly and Normalization ---
-            obs_vector = np.array([raw_obs_map[feat] for feat in rl_config.OBSERVATION_FEATURES], dtype=np.float32)
-
-            if self.vec_normalize:
-                # The loaded VecNormalize object handles the normalization
-                normalized_obs = self.vec_normalize.normalize_obs(obs_vector)
-                return normalized_obs
-            else:
-                # If no normalizer, return raw observation (not recommended for production)
-                return obs_vector
+            norm_factor = agent_config.INITIAL_CAPITAL * 2
+            global_features[0] = sol_balance / norm_factor
+            global_features[1] = portfolio_stats.get('total_value', 0) / norm_factor
+            global_features[2] = portfolio_stats.get('unrealized_pnl', 0)
+            global_features[3] = portfolio_stats.get('num_positions', 0)
+            
+            return {
+                "token_data": token_obs_array,
+                "global_data": global_features
+            }
 
         except Exception as e:
             log_error(f"Error constructing live RL observation: {e}", exc_info=True)
             return None
 
     async def run_rl_agent_updates(self):
-        """Periodically queries the RL agent and updates trading parameters."""
-        if not self.rl_agent:
+        """
+        Periodically queries the RL agent for new target allocations and updates
+        the bot's strategy. This runs as a separate, non-blocking task.
+        """
+        if not self.rl_agent_instance:
             log_info("RL agent not loaded, skipping RL update task.")
             return
 
@@ -706,33 +708,33 @@ class TradingBot:
         while not self.state.shutdown_event.is_set():
             try:
                 start_time = asyncio.get_event_loop().time()
+                
+                # 1. [Async] Gather live state from the database.
                 observation = await self._get_live_observation()
 
                 if observation is not None:
-                    action, _ = self.rl_agent.predict(observation, deterministic=True)
-
-                    updated_params_count = 0
-                    for i, (p_name, low, high, p_type) in enumerate(rl_config.RL_TUNABLE_PARAMETERS):
-                        val = np.clip(action[i], low, high)
-                        final_val = p_type(val) if p_type != bool else bool(val > 0.5)
-                        
-                        param_upper = p_name.upper()
-                        if self.config.get(param_upper) != final_val:
-                            self.config[param_upper] = final_val
-                            updated_params_count += 1
+                    # 2. [Sync in Thread] Get the agent's decision without blocking.
+                    log_debug("Offloading RL prediction to worker thread...")
+                    action = await asyncio.to_thread(self.rl_agent_instance.predict, observation)
                     
-                    if updated_params_count > 0:
-                        log_info(f"🧠 RL Agent updated {updated_params_count} parameters.")
-                        # Propagate the updated config to the trading manager
+                    if action is not None:
+                        # 3. [Async] Apply the decision.
+                        # The action is the vector of target weights. This would be passed
+                        # to a new method in TradingManager responsible for rebalancing.
+                        log_info(f"🧠 RL Agent proposed new target weights: {np.round(action, 3)}")
+                        
                         if self.trading_manager:
-                            self.trading_manager.config = self.config
+                            # This method needs to be created in TradingManager
+                            await self.trading_manager.rebalance_to_target_weights(action)
 
-                wait_time = max(0, rl_config.AGENT_ACTION_INTERVAL_SECONDS - (asyncio.get_event_loop().time() - start_time))
+                # Wait for the next decision interval.
+                wait_time = max(0, agent_config.AGENT_ACTION_INTERVAL_SECONDS - (asyncio.get_event_loop().time() - start_time))
                 await self.state.wait_or_interrupt(timeout=wait_time)
 
             except Exception as e:
                 log_error(f"Error in RL agent update loop: {e}", exc_info=True)
-                await self.state.wait_or_interrupt(timeout=60)
+                await self.state.wait_or_interrupt(timeout=60) # Wait longer on error
+                
         log_info("🧠 RL agent update task stopped.")
 
     # --- End RL Agent Integration Functions ---
@@ -789,26 +791,10 @@ class TradingBot:
             if not RL_AVAILABLE:
                 log_error("RL Agent path specified, but Stable Baselines3 is not installed!")
             else:
-                log_info(f"🧠 Loading RL agent from: {self.rl_agent_path}")
-                try:
-                    self.rl_agent = PPO.load(self.rl_agent_path, device='cpu')
-                    
-                    # Load VecNormalize stats
-                    vec_normalize_path = self.rl_agent_path.replace('.zip', '_vecnormalize.pkl').replace('_final', '')
-                    if os.path.exists(vec_normalize_path):
-                        # Create a dummy environment to load the stats
-                        from rl_environment import TradingEnv # Temporary import
-                        dummy_env = DummyVecEnv([lambda: TradingEnv({}, {})])
-                        self.vec_normalize = VecNormalize.load(vec_normalize_path, dummy_env)
-                        self.vec_normalize.training = False # Set to inference mode
-                        self.vec_normalize.norm_reward = False
-                        log_info(f"✅ Loaded VecNormalize stats from: {vec_normalize_path}")
-                    else:
-                        log_warning(f"⚠️ VecNormalize stats file not found at {vec_normalize_path}. Live observations will NOT be normalized.")
-
-                except Exception as e:
-                    log_error(f"❌ Failed to load RL agent: {e}", exc_info=True)
-                    self.rl_agent = None
+                # The agent loading is synchronous, so it's fine here during setup.
+                self.rl_agent_instance = TradingAgent(model_path=self.rl_agent_path)
+                if not self.rl_agent_instance.model:
+                    self.rl_agent_instance = None # Invalidate if loading failed
 
         # --- Initialize DYNAMIC_CONFIG_FILE ---
         try:
@@ -885,7 +871,6 @@ class TradingBot:
             asyncio.create_task(update_sol_price(self.state, self.db_client), name="sol_price_updater"),
             asyncio.create_task(trade_worker(), name="trade_worker"),
             asyncio.create_task(self.dexscreener_fetcher.run(), name="dexscreener_fetcher"),
-            #asyncio.create_task(transaction_enricher_worker(self.state, self.db_client), name="transaction_enricher"), #
             rugchecker.start(), # Ensure this returns a task
             socials_proc.start(), # Ensure this returns a task
             

@@ -9,7 +9,7 @@ from solana.rpc.commitment import Confirmed
 
 from bot_logger import logger
 # Import your main config module to access TRADING_MODE and other settings
-import config as bot_config # Use an alias to avoid confusion if config is passed
+import config.config as bot_config # Use an alias to avoid confusion if config is passed
 
 load_dotenv()
 

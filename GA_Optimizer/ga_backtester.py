@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Any
 
 from bot_logger import logger
 import utils # For calculate_trend_indicators
-import config as config_module # To access fixed configurations like APPLY_TREND_REVERSAL_ON_SELL_REASONS
+import config.config as config_module # To access fixed configurations like APPLY_TREND_REVERSAL_ON_SELL_REASONS
 
 # --- Performance Metrics Calculation ---
 def calculate_performance_metrics(
@@ -676,7 +676,7 @@ async def main_test():
     # This requires DB connection and data fetching setup similar to ga_optimizer
     # Ensure the data fetched by get_historical_data_for_backtesting is used
     from database_handler import DatabaseClient, get_token_lifespan
-    from ga_config import OPTIMIZABLE_PARAMETERS, BACKTEST_INITIAL_CAPITAL, HISTORICAL_DATA_START_TS, HISTORICAL_DATA_END_TS
+    from GA_Optimizer.ga_config import OPTIMIZABLE_PARAMETERS, BACKTEST_INITIAL_CAPITAL, HISTORICAL_DATA_START_TS, HISTORICAL_DATA_END_TS
     import random
     from bot_logger import setup_logging
 
