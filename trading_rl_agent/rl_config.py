@@ -28,9 +28,9 @@ DATA_SET_KEY_EVAL: str = 'validation'
 # Initial capital for each training/evaluation episode in SOL.
 INITIAL_CAPITAL: float = 100.0
 # Max number of decision steps per episode (e.g., 288 steps of 5 mins = 1 day).
-MAX_STEPS_PER_EPISODE: int = 288 
+MAX_STEPS_PER_EPISODE: int = 1000 # 288 
 # The frequency of the Meta-Controller's decisions.
-DECISION_FREQUENCY: str = '5min'
+DECISION_FREQUENCY: str = '2min'
 
 # --- Observation Space (Meta-Controller) ---
 # Defines what the high-level agent sees at each step.
@@ -52,7 +52,7 @@ GLOBAL_FEATURES: List[str] = [
     'unrealized_pnl',               # Total unrealized profit/loss across all positions
     'num_active_positions',         # Raw count of tokens currently held
     'avg_holding_period',           # Average time (in steps) positions have been held
-    'market_trend_短期',            # A simple metric for recent market trend (e.g., avg % change)
+    'market_trend',                 # A simple metric for recent market trend (e.g., avg % change)
     'market_volatility_avg'         # Average volatility across all active tokens
 ]
 NUM_GLOBAL_FEATURES: int = len(GLOBAL_FEATURES)
@@ -69,14 +69,14 @@ ACTION_SPACE_DIM: int = MAX_TOKENS_IN_UNIVERSE + 1
 # --- Reward Function Configuration ---
 # Weights for the composite reward function.
 REWARD_PNL_WEIGHT: float = 1.0          # For realized profit/loss from sells
-REWARD_SHARPE_WEIGHT: float = 0.05      # For risk-adjusted returns (encourages smooth equity curve)
-REWARD_DRAWDOWN_PENALTY: float = 0.1    # Penalty for peak-to-trough losses
+REWARD_SHARPE_WEIGHT: float = 0.20      # For risk-adjusted returns (encourages smooth equity curve)
+REWARD_DRAWDOWN_PENALTY: float = 0.3    # Penalty for peak-to-trough losses
 REWARD_TURNOVER_PENALTY: float = 0.01   # Penalty for excessive trading (to control transaction costs)
 REWARD_HOLDING_PENALTY: float = 0.001   # Small penalty for holding positions to encourage closing them eventually
 
 # --- Training Configuration ---
 TOTAL_TIMESTEPS: int = 1_000_000
-N_ENVS: int = 4 # Number of parallel environments for training
+N_ENVS: int = 6 # Number of parallel environments for training
 TENSORBOARD_LOG_DIR: str = "./rl_tensorboard_logs/"
 MODEL_SAVE_DIR: str = "./rl_models/"
 EVAL_FREQ: int = 20000
@@ -98,16 +98,16 @@ POLICY_KWARGS: Dict[str, Any] = dict(
 )
 PPO_HYPERPARAMS: Dict[str, Any] = {
     "n_steps": 1024,
-    "batch_size": 64,
+    "batch_size": 128,
     "n_epochs": 10,
     "gamma": 0.99,
     "gae_lambda": 0.95,
-    "clip_range": 0.2,
-    "ent_coef": 0.005,
+    "clip_range": 0.3,
+    "ent_coef": 0.01,
     "vf_coef": 0.5,
-    "learning_rate": 3e-5, # Lower learning rate for more stable learning
+    "learning_rate": 1e-4, # Lower learning rate for more stable learning
     "max_grad_norm": 0.5,
-    "use_sde": False # State-Dependent Exploration, can be useful but start with False
+    "use_sde": True # State-Dependent Exploration, can be useful but start with False
 }
 
 # --- Live Agent Configuration ---

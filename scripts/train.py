@@ -1,6 +1,7 @@
 # FILE: scripts/train.py
 
 import os
+import argparse
 from datetime import datetime
 import stable_baselines3 as sb3
 from stable_baselines3.common.env_util import make_vec_env
@@ -17,7 +18,7 @@ from trading_rl_agent.policies.custom_nets import CustomCombinedExtractor
 from scripts.data_utils import load_processed_data
 from bot_logger import setup_logging, logger
 
-def train_agent():
+def train_agent(continue_from_id: str = None):
     """
     Main function to set up and run the RL agent training process.
     """
@@ -57,22 +58,55 @@ def train_agent():
     # --- Configure Agent & Callbacks ---
     os.makedirs(rl_config.TENSORBOARD_LOG_DIR, exist_ok=True)
     os.makedirs(rl_config.MODEL_SAVE_DIR, exist_ok=True)
-    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    model_prefix = f"{rl_config.RL_ALGORITHM}_{run_timestamp}"
 
-    # Set up the custom policy with the feature extractor
-    policy_kwargs = rl_config.POLICY_KWARGS
-    policy_kwargs['features_extractor_class'] = CustomCombinedExtractor
-    
-    model = sb3.PPO(
-        rl_config.POLICY_NAME,
-        train_env,
-        policy_kwargs=policy_kwargs,
-        verbose=1,
-        tensorboard_log=rl_config.TENSORBOARD_LOG_DIR,
-        **rl_config.PPO_HYPERPARAMS
-    )
-    
+    model = None
+
+    # Loading logic based on the ID
+    if continue_from_id:
+        logger.info(f"--- Attempting to continue training from ID: {continue_from_id} ---")
+        
+        # Construct paths automatically
+        model_path = os.path.join(rl_config.MODEL_SAVE_DIR, f"{continue_from_id}_final.zip")
+        stats_path = os.path.join(rl_config.MODEL_SAVE_DIR, f"{continue_from_id}_vecnormalize.pkl")
+
+        # Verify that both required files exist
+        if not os.path.exists(model_path) or not os.path.exists(stats_path):
+            logger.critical(f"Could not find model/stats files for ID '{continue_from_id}'. Searched for:")
+            logger.critical(f"  - Model: {model_path}")
+            logger.critical(f"  - Stats: {stats_path}")
+            return
+        
+        # Load the existing model, pointing it to the correct environment
+        model = sb3.PPO.load(
+            model_path,
+            env=train_env,
+            tensorboard_log=rl_config.TENSORBOARD_LOG_DIR,
+            learning_rate=rl_config.PPO_HYPERPARAMS.get("learning_rate") # Use new LR from config
+        )
+        
+        # Load and apply the normalization stats to the environment
+        train_env = VecNormalize.load(stats_path, train_env)
+        logger.info("Successfully loaded model and normalization stats.")
+        
+        run_timestamp = f"continued_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    else:
+        logger.info("--- Starting New Training Session ---")
+        policy_kwargs = rl_config.POLICY_KWARGS
+        policy_kwargs['features_extractor_class'] = CustomCombinedExtractor
+        
+        model = sb3.PPO(
+            rl_config.POLICY_NAME,
+            train_env,
+            policy_kwargs=policy_kwargs,
+            verbose=1,
+            tensorboard_log=rl_config.TENSORBOARD_LOG_DIR,
+            **rl_config.PPO_HYPERPARAMS
+        )
+        run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    model_prefix = f"{rl_config.RL_ALGORITHM}_{run_timestamp}"
+        
     callbacks = []
     if eval_env_instance:
         eval_callback = EvalCallback(
@@ -115,5 +149,15 @@ def train_agent():
 if __name__ == "__main__":
     if os.name == 'nt':
         from multiprocessing import freeze_support
-        freeze_support() # Necessary for multiprocessing on Windows
-    train_agent()
+        freeze_support()
+    
+    # 4. Update the parser to use the new, simpler argument
+    parser = argparse.ArgumentParser(description="Train an RL Agent.")
+    parser.add_argument(
+        "--continue-from-id", 
+        type=str, 
+        help="The ID (prefix) of the model to continue training from (e.g., 'PPO_20250801_153000')."
+    )
+    args = parser.parse_args()
+
+    train_agent(continue_from_id=args.continue_from_id)

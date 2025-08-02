@@ -226,7 +226,7 @@ def run_backtest(model_path: str, n_splits: int = 4):
     console.print(table)
 
     # --- Save QuantStats HTML Report ---
-    report_filename = f"tensorboard_logs/backtest_report_{os.path.basename(model_dir)}.html"
+    report_filename = f"rl_tensorboard_logs/backtest_report_{os.path.basename(model_dir)}.html"
     qs.reports.html(aligned_agent, benchmark=aligned_benchmark, output=report_filename, title=f"RL Agent vs. Benchmark")
     logger.info(f"✅ Detailed HTML report saved to: {report_filename}")
 
