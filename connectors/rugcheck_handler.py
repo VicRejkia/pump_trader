@@ -166,48 +166,6 @@ class Rugcheck:
             logger.info("✅ RugCheck API maintenance mode appears to have ended.")
             self.maintenance_mode_active = False
 
-
-    # async def _refresh_queue(self):
-    #     try:
-    #         # (Existing refresh queue logic - seems okay, respects MAX_FETCH_ATTEMPTS)
-    #         # ... (ensure it's the same as in the provided code)
-    #         sol_price = await self.state.get_sol_price()
-    #         if sol_price is None:
-    #             logger.warning("⚠ SOL_PRICE not updated yet; skipping RugCheck queue refresh.")
-    #             return False
-
-    #         while not self.queue.empty():
-    #             try:
-    #                 self.queue.get_nowait()
-    #                 self.queue.task_done()
-    #             except asyncio.QueueEmpty: break
-    #             except Exception as e: logger.error(f"Error clearing rugcheck queue item: {e}")
-
-    #         async with self.db_client.pool.acquire() as conn:
-    #             rows = await conn.fetch("""
-    #                 SELECT t.mint, COALESCE(SUM(tr.sol_amount), 0) AS volume
-    #                 FROM tokens t
-    #                 LEFT JOIN rugcheck r ON t.mint = r.mint
-    #                 LEFT JOIN trades tr ON t.mint = tr.mint AND tr.timestamp >= NOW() - INTERVAL '15 minutes'
-    #                 WHERE t.is_active = TRUE AND r.mint IS NULL
-    #                 GROUP BY t.mint
-    #                 ORDER BY volume DESC
-    #             """)
-    #             logger.debug(f"🔍 Found {len(rows)} active tokens missing RugCheck data for refresh.")
-    #             if rows:
-    #                 tokens_added = 0
-    #                 for row in rows:
-    #                     mint, volume = row["mint"], row["volume"] or Decimal(0)
-    #                     priority = -float(volume)
-    #                     current_attempts = self.fetch_attempts.get(mint, 0)
-    #                     if current_attempts < MAX_FETCH_ATTEMPTS: # Respect MAX_FETCH_ATTEMPTS for high priority
-    #                          await self.queue.put((priority, mint))
-    #                          tokens_added += 1
-    #                 logger.debug(f"🔄 Refreshed RugCheck queue. Added {tokens_added} tokens (current size: {self.queue.qsize()}).")
-    #         return True
-    #     except Exception as e:
-    #         logger.error(f"❌ Critical error in _refresh_queue: {e}", exc_info=True)
-    #         return False
     async def _refresh_queue(self):
         try:
             sol_price = await self.state.get_sol_price()

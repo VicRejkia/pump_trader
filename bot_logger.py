@@ -1,4 +1,4 @@
-# logger.py
+# bot_logger.py
 import os
 import queue
 import inspect

@@ -30,7 +30,7 @@ INITIAL_CAPITAL: float = 100.0
 # Max number of decision steps per episode (e.g., 288 steps of 5 mins = 1 day).
 MAX_STEPS_PER_EPISODE: int = 1000 # 288 
 # The frequency of the Meta-Controller's decisions.
-DECISION_FREQUENCY: str = '2min'
+DECISION_FREQUENCY: str = '2min' 
 
 # --- Observation Space (Meta-Controller) ---
 # Defines what the high-level agent sees at each step.
@@ -69,14 +69,14 @@ ACTION_SPACE_DIM: int = MAX_TOKENS_IN_UNIVERSE + 1
 # --- Reward Function Configuration ---
 # Weights for the composite reward function.
 REWARD_PNL_WEIGHT: float = 1.0          # For realized profit/loss from sells
-REWARD_SHARPE_WEIGHT: float = 0.20      # For risk-adjusted returns (encourages smooth equity curve)
-REWARD_DRAWDOWN_PENALTY: float = 0.3    # Penalty for peak-to-trough losses
-REWARD_TURNOVER_PENALTY: float = 0.01   # Penalty for excessive trading (to control transaction costs)
+REWARD_SHARPE_WEIGHT: float = 0.50      # For risk-adjusted returns (encourages smooth equity curve)
+REWARD_DRAWDOWN_PENALTY: float = 0.15    # Penalty for peak-to-trough losses
+REWARD_TURNOVER_PENALTY: float = 0.005   # Penalty for excessive trading (to control transaction costs)
 REWARD_HOLDING_PENALTY: float = 0.001   # Small penalty for holding positions to encourage closing them eventually
 
 # --- Training Configuration ---
-TOTAL_TIMESTEPS: int = 1_000_000
-N_ENVS: int = 6 # Number of parallel environments for training
+TOTAL_TIMESTEPS: int = 2_000_000
+N_ENVS: int = 8 # Number of parallel environments for training
 TENSORBOARD_LOG_DIR: str = "./rl_tensorboard_logs/"
 MODEL_SAVE_DIR: str = "./rl_models/"
 EVAL_FREQ: int = 20000
@@ -97,17 +97,17 @@ POLICY_KWARGS: Dict[str, Any] = dict(
     )
 )
 PPO_HYPERPARAMS: Dict[str, Any] = {
-    "n_steps": 1024,
-    "batch_size": 128,
+    "n_steps": 2048,
+    "batch_size": 256,
     "n_epochs": 10,
     "gamma": 0.99,
     "gae_lambda": 0.95,
-    "clip_range": 0.3,
-    "ent_coef": 0.01,
+    "clip_range": 0.2,
+    "ent_coef": 0.005,
     "vf_coef": 0.5,
-    "learning_rate": 1e-4, # Lower learning rate for more stable learning
+    "learning_rate": 5e-5, # Lower learning rate for more stable learning
     "max_grad_norm": 0.5,
-    "use_sde": True # State-Dependent Exploration, can be useful but start with False
+    "use_sde": False # State-Dependent Exploration, can be useful but start with False
 }
 
 # --- Live Agent Configuration ---
