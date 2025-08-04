@@ -183,5 +183,23 @@ async def main():
     finally:
         await db_client.close()
 
+def load_prepared_data_for_training():
+    """Loads the processed decision data and OHLCV files for training."""
+    if not os.path.exists(cfg.PROCESSED_DATA_PATH):
+        logger.error(f"Processed data file not found: {cfg.PROCESSED_DATA_PATH}")
+        return None, None
+        
+    decision_df = pd.read_csv(cfg.PROCESSED_DATA_PATH, parse_dates=['timestamp'])
+    
+    ohlcv_dir = os.path.join(os.path.dirname(cfg.PROCESSED_DATA_PATH), "ohlcv_data")
+    all_token_data = {}
+    if os.path.exists(ohlcv_dir):
+        for filename in tqdm(os.listdir(ohlcv_dir), desc="Loading OHLCV Data"):
+            if filename.endswith(".parquet"):
+                mint = filename.replace(".parquet", "")
+                all_token_data[mint] = pd.read_parquet(os.path.join(ohlcv_dir, filename))
+            
+    return decision_df, all_token_data
+
 if __name__ == "__main__":
     asyncio.run(main())
