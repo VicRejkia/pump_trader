@@ -10,7 +10,7 @@ from bot_logger import logger
 from typing import Optional
 
 # A dummy env is needed to load VecNormalize stats, it's not used for steps.
-from trading_rl_agent.environments.solana_env import SolanaPortfolioEnv
+from trading_rl_agent.environments.solana_decision_env import SolanaPortfolioEnv
 
 class TradingAgent:
     """

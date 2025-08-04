@@ -1,0 +1,120 @@
+# FILE: trading_rl_agent/environments/solana_decision_env.py (NEW)
+
+import gymnasium as gym
+from gymnasium import spaces
+import numpy as np
+import pandas as pd
+from typing import Dict, Optional
+
+from trading_rl_agent import rl_config as cfg
+
+class SolanaDecisionEnv(gym.Env):
+    """
+    An environment where the agent makes a single 'BUY' or 'IGNORE' decision
+    for a given token opportunity. An episode simulates the entire lifecycle
+    of that single trade.
+    """
+    def __init__(self, df: pd.DataFrame, full_token_data: Dict[str, pd.DataFrame]):
+        super().__init__()
+        self.df = df # This is the dataframe of decision points
+        self.full_token_data = full_token_data # OHLCV data for all tokens
+
+        # The observation space is a flat vector of token features
+        self.observation_space = spaces.Box(
+            low=-np.inf, high=np.inf,
+            shape=(cfg.OBSERVATION_SPACE_DIM,),
+            dtype=np.float32
+        )
+        # The action space is a discrete choice: 0 for IGNORE, 1 for BUY
+        self.action_space = spaces.Discrete(cfg.ACTION_SPACE_DIM)
+
+        self._current_decision_idx = 0
+        self._token_ohlcv = None
+        self._simulation_step = 0
+
+    def _get_observation(self) -> np.ndarray:
+        """Extracts the features for the current decision point from the dataframe."""
+        obs_series = self.df.iloc[self._current_decision_idx][cfg.OBSERVATION_FEATURES]
+        return obs_series.to_numpy(dtype=np.float32)
+
+    def reset(self, *, seed: Optional[int] = None, options: Optional[Dict] = None) -> tuple:
+        super().reset(seed=seed)
+        # Move to a random decision point in the dataset for the start of a new episode
+        self._current_decision_idx = self.np_random.integers(0, len(self.df))
+        self.current_decision_info = self.df.iloc[self._current_decision_idx]
+        
+        # Load the full OHLCV data for the token in this decision
+        mint = self.current_decision_info['mint']
+        self._token_ohlcv = self.full_token_data.get(mint)
+
+        self._simulation_step = 0
+        return self._get_observation(), {}
+
+    def step(self, action: int) -> tuple:
+        """
+        Executes the chosen action. The episode terminates immediately with a
+        reward based on the trade's outcome.
+        """
+        terminated = True # Every episode is a single step from the agent's perspective
+
+        # Case 1: Agent chose to IGNORE
+        if action == 0 or self._token_ohlcv is None or self._token_ohlcv.empty:
+            return self._get_observation(), 0.0, terminated, False, {}
+
+        # Case 2: Agent chose to BUY - run the simulation
+        reward = self._simulate_trade()
+        return self._get_observation(), reward, terminated, False, {}
+
+    def _simulate_trade(self) -> float:
+        """
+        Simulates a trade based on the bot's existing SL/TP logic.
+        Returns the final realized PnL.
+        """
+        # Get the price data starting from the decision point
+        decision_timestamp = self.current_decision_info['timestamp']
+        trade_data = self._token_ohlcv[self._token_ohlcv.index >= decision_timestamp]
+
+        if len(trade_data) < 2:
+            return -cfg.INITIAL_CAPITAL # Immediate loss if no data to trade on
+
+        buy_price = trade_data['Close'].iloc[0]
+        if buy_price <= 0:
+            return -cfg.INITIAL_CAPITAL
+
+        # Set SL/TP levels based on config
+        stop_loss_price = buy_price * (1 - cfg.SIM_INITIAL_STOP_LOSS_PERCENT / 100.0)
+        first_tp_price = buy_price * (1 + cfg.SIM_FIRST_SELL_PROFIT_MARGIN / 100.0) # Simplified for now
+        second_tp_price = buy_price * (1 + cfg.SIM_SECOND_TAKE_PROFIT_PERCENT / 100.0)
+        
+        highest_price = buy_price
+        first_tp_hit = False
+        
+        # Iterate through the token's price history from the point of buying
+        for i in range(1, min(len(trade_data), cfg.MAX_STEPS_PER_EPISODE)):
+            self._simulation_step = i
+            current_price = trade_data['Close'].iloc[i]
+            highest_price = max(highest_price, current_price)
+
+            # Check sell conditions in order of priority
+            if current_price <= stop_loss_price:
+                return (current_price - buy_price) / buy_price # Return PnL as percentage
+
+            if current_price >= second_tp_price:
+                return (current_price - buy_price) / buy_price
+
+            if not first_tp_hit and current_price >= first_tp_price:
+                # Simulate selling a portion and updating SL to breakeven
+                first_tp_hit = True
+                stop_loss_price = buy_price # Breakeven
+                # For simplicity, we assume the rest is held. A more complex sim could track partial profits.
+
+            if first_tp_hit:
+                trailing_sl = highest_price * (1 - cfg.SIM_TRAILING_STOP_LOSS_PERCENT / 100.0)
+                if current_price <= trailing_sl:
+                     return (current_price - buy_price) / buy_price
+        
+        # If the episode ends due to max steps (timeout), close the position at the last price
+        last_price = trade_data['Close'].iloc[-1]
+        pnl = (last_price - buy_price) / buy_price
+        time_penalty = self._simulation_step * cfg.TIME_PENALTY_PER_STEP
+        return pnl - time_penalty

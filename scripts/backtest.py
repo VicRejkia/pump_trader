@@ -17,8 +17,8 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from trading_rl_agent import rl_config
-from trading_rl_agent.environments.solana_env import SolanaPortfolioEnv
-from trading_rl_agent.policies.custom_nets import CustomCombinedExtractor
+from trading_rl_agent.environments.solana_decision_env import SolanaPortfolioEnv
+
 from scripts.data_utils import load_processed_data
 from bot_logger import setup_logging, logger
 

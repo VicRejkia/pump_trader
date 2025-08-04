@@ -227,25 +227,158 @@ def ensure_datetime(dt):
         return None
     raise TypeError(f"Unsupported date type: {type(dt)}")
 
+# async def load_and_split_data(
+#     db_client: 'DatabaseClient',
+#     start_date_dt: datetime,
+#     end_date_dt: datetime,
+#     data_split_config: dict,
+#     min_data_points: int # = 100 # Minimum *trades* required per token
+# ) -> Optional[Tuple[Dict[str, Dict[str, pd.DataFrame]], Dict[str, Dict[str, datetime]], Dict[str, pd.DataFrame]]]:
+#     """
+#     [MODIFIED] Loads historical data for tokens active within a time window.
+#     1. Identifies tokens created or traded within the specified time window.
+#     2. For these identified tokens, it fetches their *entire* historical data.
+#     3. Splits the list of tokens chronologically for training, validation, and testing.
+
+#     Returns:
+#         A tuple containing:
+#         - historical_data_sets (dict): {'train': {mint: ohlcv_df}, ...}
+#         - token_lifespans (dict): {mint: {'start_ts': dt, 'end_ts': dt}}
+#         - dexscreener_snapshots (dict): {mint: snapshot_df} for migrated tokens.
+#         Returns None if loading or splitting fails.
+#     """
+#     if not db_client or not db_client.pool:
+#         logger.error("Database client not initialized or connected.")
+#         return None
+
+#     try:
+#         start_date = ensure_datetime(start_date_dt)
+#         end_date = ensure_datetime(end_date_dt)
+#         if not start_date or not end_date or start_date >= end_date:
+#              logger.error(f"Invalid date range: Start={start_date}, End={end_date}.")
+#              return None
+
+#         logger.info(f"Loading & splitting data. Identifying tokens in window: {start_date.isoformat()} to {end_date.isoformat()}")
+
+#         # --- Step 1: Fetch candidate mints active in the window and their full lifespans ---
+#         query_mints_lifespans = """
+#             WITH MintsInWindow AS (
+#                 -- Select unique mints with trades in the window
+#                 SELECT mint FROM v_trades
+#                 WHERE timestamp >= $1 AND timestamp < $2
+#                 UNION
+#                 -- Select unique mints created in the window
+#                 SELECT mint FROM v_tokens
+#                 WHERE timestamp >= $1 AND timestamp < $2
+#             ),
+#             -- For these candidates, get their full stats (all-time trades)
+#             TokenStats AS (
+#                 SELECT
+#                     m.mint,
+#                     MIN(t.timestamp) as first_trade_ts,
+#                     MAX(t.timestamp) as last_trade_ts,
+#                     COUNT(t.signature) as trade_count
+#                 FROM MintsInWindow m
+#                 JOIN v_trades t ON m.mint = t.mint
+#                 GROUP BY m.mint
+#             )
+#             SELECT
+#                 ts.mint,
+#                 ts.first_trade_ts,
+#                 ts.last_trade_ts,
+#                 ts.trade_count
+#             FROM TokenStats ts
+#             LEFT JOIN v_tokens AS vt ON ts.mint = vt.mint
+#             WHERE ts.trade_count >= $3 -- Filter by min_data_points
+#               AND (vt.backup_reason = 'rugged_dead' OR vt.backup_reason = '' OR vt.backup_reason IS NULL);
+#         """
+#         candidate_records = await db_client.pool.fetch(query_mints_lifespans, start_date, end_date, min_data_points)
+        
+#         if not candidate_records:
+#             logger.error(f"No tokens found that were active in the window and met the minimum trade count of {min_data_points}.")
+#             return None
+            
+#         token_lifespans_map = {r['mint']: {'start_ts': r['first_trade_ts'], 'end_ts': r['last_trade_ts']} for r in candidate_records if r['mint'] and r['first_trade_ts'] and r['last_trade_ts']}
+#         mints_to_load = list(token_lifespans_map.keys())
+        
+#         if not mints_to_load: 
+#             logger.error("No valid mints with lifespans found after filtering.")
+#             return None
+        
+#         logger.info(f"Found {len(mints_to_load)} candidate mints. Fetching their full historical data...")
+
+
+#         # --- Step 2: Fetch ALL historical data for the selected mints ---
+#         dexscreener_snapshot_query = """
+#             SELECT
+#                 mint_address as mint, timestamp, liquidity_usd, buys_m5, sells_m5
+#             FROM v_dexscreener_data
+#             WHERE mint_address = ANY($1::text[])
+#             ORDER BY mint_address, timestamp;
+#         """
+#         # Call with None for dates to fetch all data for the mints
+#         all_historical_data, dexscreener_snapshot_records = await asyncio.gather(
+#             db_client.get_historical_data_for_backtesting(mints_to_load, start_date=None, end_date=None),
+#             db_client.pool.fetch(dexscreener_snapshot_query, mints_to_load) # Fetch all snapshots for these mints
+#         )
+
+#         if not all_historical_data:
+#             logger.error("Failed to fetch any historical OHLCV data for the candidate mints.")
+#             return None
+
+#         # Process DexScreener snapshots into a dictionary of DataFrames
+#         dexscreener_snapshots = {}
+#         if dexscreener_snapshot_records:
+#             df_snapshots = pd.DataFrame([dict(r) for r in dexscreener_snapshot_records])
+#             df_snapshots['timestamp'] = pd.to_datetime(df_snapshots['timestamp'], utc=True)
+#             for mint, group in df_snapshots.groupby('mint'):
+#                 dexscreener_snapshots[mint] = group.set_index('timestamp').sort_index()
+#         logger.info(f"Fetched DexScreener snapshots for {len(dexscreener_snapshots)} migrated tokens.")
+
+#         # --- Step 3: Filter and Split tokens chronologically ---
+#         final_token_lifespans = {}
+#         for mint, df in all_historical_data.items():
+#             if mint in token_lifespans_map:
+#                 final_token_lifespans[mint] = token_lifespans_map[mint]
+        
+#         sorted_mints = sorted(final_token_lifespans.keys(), key=lambda m: final_token_lifespans[m]['start_ts'])
+#         n_tokens = len(sorted_mints)
+#         n_train = int(n_tokens * data_split_config['training'])
+#         n_val = int(n_tokens * data_split_config['validation'])
+#         historical_data_sets = {'train': {}, 'validation': {}, 'test': {}}
+#         for i, mint in enumerate(sorted_mints):
+#             if mint in all_historical_data:
+#                 if i < n_train:
+#                     historical_data_sets['train'][mint] = all_historical_data[mint]
+#                 elif i < n_train + n_val:
+#                     historical_data_sets['validation'][mint] = all_historical_data[mint]
+#                 else:
+#                     historical_data_sets['test'][mint] = all_historical_data[mint]
+        
+#         logger.info(f"Data split complete. Training tokens: {len(historical_data_sets['train'])}, Validation tokens: {len(historical_data_sets['validation'])}, Test tokens: {len(historical_data_sets['test'])}")
+#         if not historical_data_sets['train']:
+#              logger.error("Training set is empty after chronological splitting!")
+#              return None
+
+#         # Return all three data dictionaries
+#         return historical_data_sets, final_token_lifespans, dexscreener_snapshots
+
+#     except Exception as e:
+#         logger.exception(f"Unexpected error during data loading/splitting: {e}")
+#         return None
+
 async def load_and_split_data(
     db_client: 'DatabaseClient',
     start_date_dt: datetime,
     end_date_dt: datetime,
     data_split_config: dict,
-    min_data_points: int = 100 # Minimum *trades* required per token
+    min_data_points: int = 100 # Default value for backward compatibility
 ) -> Optional[Tuple[Dict[str, Dict[str, pd.DataFrame]], Dict[str, Dict[str, datetime]], Dict[str, pd.DataFrame]]]:
     """
     [MODIFIED] Loads historical data for tokens active within a time window.
-    1. Identifies tokens created or traded within the specified time window.
-    2. For these identified tokens, it fetches their *entire* historical data.
-    3. Splits the list of tokens chronologically for training, validation, and testing.
-
-    Returns:
-        A tuple containing:
-        - historical_data_sets (dict): {'train': {mint: ohlcv_df}, ...}
-        - token_lifespans (dict): {mint: {'start_ts': dt, 'end_ts': dt}}
-        - dexscreener_snapshots (dict): {mint: snapshot_df} for migrated tokens.
-        Returns None if loading or splitting fails.
+    Supports two modes:
+    1. Splitting tokens into train/validation/test sets.
+    2. Loading all tokens into a single dataset (e.g., for RL data prep).
     """
     if not db_client or not db_client.pool:
         logger.error("Database client not initialized or connected.")
@@ -260,37 +393,19 @@ async def load_and_split_data(
 
         logger.info(f"Loading & splitting data. Identifying tokens in window: {start_date.isoformat()} to {end_date.isoformat()}")
 
-        # --- Step 1: Fetch candidate mints active in the window and their full lifespans ---
         query_mints_lifespans = """
             WITH MintsInWindow AS (
-                -- Select unique mints with trades in the window
-                SELECT mint FROM v_trades
-                WHERE timestamp >= $1 AND timestamp < $2
+                SELECT mint FROM v_trades WHERE timestamp >= $1 AND timestamp < $2
                 UNION
-                -- Select unique mints created in the window
-                SELECT mint FROM v_tokens
-                WHERE timestamp >= $1 AND timestamp < $2
+                SELECT mint FROM v_tokens WHERE timestamp >= $1 AND timestamp < $2
             ),
-            -- For these candidates, get their full stats (all-time trades)
             TokenStats AS (
-                SELECT
-                    m.mint,
-                    MIN(t.timestamp) as first_trade_ts,
-                    MAX(t.timestamp) as last_trade_ts,
-                    COUNT(t.signature) as trade_count
-                FROM MintsInWindow m
-                JOIN v_trades t ON m.mint = t.mint
-                GROUP BY m.mint
+                SELECT m.mint, MIN(t.timestamp) as first_trade_ts, MAX(t.timestamp) as last_trade_ts, COUNT(t.signature) as trade_count
+                FROM MintsInWindow m JOIN v_trades t ON m.mint = t.mint GROUP BY m.mint
             )
-            SELECT
-                ts.mint,
-                ts.first_trade_ts,
-                ts.last_trade_ts,
-                ts.trade_count
-            FROM TokenStats ts
-            LEFT JOIN v_tokens AS vt ON ts.mint = vt.mint
-            WHERE ts.trade_count >= $3 -- Filter by min_data_points
-              AND (vt.backup_reason = 'rugged_dead' OR vt.backup_reason = '' OR vt.backup_reason IS NULL);
+            SELECT ts.mint, ts.first_trade_ts, ts.last_trade_ts, ts.trade_count
+            FROM TokenStats ts LEFT JOIN v_tokens AS vt ON ts.mint = vt.mint
+            WHERE ts.trade_count >= $3 AND (vt.backup_reason = 'rugged_dead' OR vt.backup_reason = '' OR vt.backup_reason IS NULL);
         """
         candidate_records = await db_client.pool.fetch(query_mints_lifespans, start_date, end_date, min_data_points)
         
@@ -307,26 +422,15 @@ async def load_and_split_data(
         
         logger.info(f"Found {len(mints_to_load)} candidate mints. Fetching their full historical data...")
 
-
-        # --- Step 2: Fetch ALL historical data for the selected mints ---
-        dexscreener_snapshot_query = """
-            SELECT
-                mint_address as mint, timestamp, liquidity_usd, buys_m5, sells_m5
-            FROM v_dexscreener_data
-            WHERE mint_address = ANY($1::text[])
-            ORDER BY mint_address, timestamp;
-        """
-        # Call with None for dates to fetch all data for the mints
+        # Fetch both OHLCV and DexScreener data concurrently
         all_historical_data, dexscreener_snapshot_records = await asyncio.gather(
             db_client.get_historical_data_for_backtesting(mints_to_load, start_date=None, end_date=None),
-            db_client.pool.fetch(dexscreener_snapshot_query, mints_to_load) # Fetch all snapshots for these mints
+            db_client.pool.fetch(
+                "SELECT mint_address as mint, timestamp, liquidity_usd, buys_m5, sells_m5, volume_m5, price_change_m5 FROM v_dexscreener_data WHERE mint_address = ANY($1::text[]) ORDER BY mint_address, timestamp;",
+                mints_to_load
+            )
         )
 
-        if not all_historical_data:
-            logger.error("Failed to fetch any historical OHLCV data for the candidate mints.")
-            return None
-
-        # Process DexScreener snapshots into a dictionary of DataFrames
         dexscreener_snapshots = {}
         if dexscreener_snapshot_records:
             df_snapshots = pd.DataFrame([dict(r) for r in dexscreener_snapshot_records])
@@ -335,32 +439,36 @@ async def load_and_split_data(
                 dexscreener_snapshots[mint] = group.set_index('timestamp').sort_index()
         logger.info(f"Fetched DexScreener snapshots for {len(dexscreener_snapshots)} migrated tokens.")
 
-        # --- Step 3: Filter and Split tokens chronologically ---
-        final_token_lifespans = {}
-        for mint, df in all_historical_data.items():
-            if mint in token_lifespans_map:
-                final_token_lifespans[mint] = token_lifespans_map[mint]
-        
-        sorted_mints = sorted(final_token_lifespans.keys(), key=lambda m: final_token_lifespans[m]['start_ts'])
-        n_tokens = len(sorted_mints)
-        n_train = int(n_tokens * data_split_config['training'])
-        n_val = int(n_tokens * data_split_config['validation'])
-        historical_data_sets = {'train': {}, 'validation': {}, 'test': {}}
-        for i, mint in enumerate(sorted_mints):
-            if mint in all_historical_data:
-                if i < n_train:
-                    historical_data_sets['train'][mint] = all_historical_data[mint]
-                elif i < n_train + n_val:
-                    historical_data_sets['validation'][mint] = all_historical_data[mint]
-                else:
-                    historical_data_sets['test'][mint] = all_historical_data[mint]
-        
-        logger.info(f"Data split complete. Training tokens: {len(historical_data_sets['train'])}, Validation tokens: {len(historical_data_sets['validation'])}, Test tokens: {len(historical_data_sets['test'])}")
-        if not historical_data_sets['train']:
-             logger.error("Training set is empty after chronological splitting!")
-             return None
+        if not all_historical_data:
+            logger.error("Failed to fetch any historical OHLCV data for the candidate mints.")
+            return None
 
-        # Return all three data dictionaries
+        final_token_lifespans = {mint: token_lifespans_map[mint] for mint, df in all_historical_data.items() if mint in token_lifespans_map}
+        sorted_mints = sorted(final_token_lifespans.keys(), key=lambda m: final_token_lifespans[m]['start_ts'])
+        
+        historical_data_sets = {}
+
+        # --- THIS IS THE FIX ---
+        if 'all_data' in data_split_config:
+            dataset_key = list(data_split_config.keys())[0]
+            historical_data_sets[dataset_key] = {mint: all_historical_data[mint] for mint in sorted_mints if mint in all_historical_data}
+            logger.info(f"Data loaded into a single set '{dataset_key}' with {len(historical_data_sets[dataset_key])} tokens.")
+        else:
+            n_tokens = len(sorted_mints)
+            n_train = int(n_tokens * data_split_config.get('training', 0.0))
+            n_val = int(n_tokens * data_split_config.get('validation', 0.0))
+            historical_data_sets = {'train': {}, 'validation': {}, 'test': {}}
+            for i, mint in enumerate(sorted_mints):
+                if mint in all_historical_data:
+                    if i < n_train:
+                        historical_data_sets['train'][mint] = all_historical_data[mint]
+                    elif i < n_train + n_val:
+                        historical_data_sets['validation'][mint] = all_historical_data[mint]
+                    else:
+                        historical_data_sets['test'][mint] = all_historical_data[mint]
+            logger.info(f"Data split complete. Training: {len(historical_data_sets['train'])}, Validation: {len(historical_data_sets['validation'])}, Test: {len(historical_data_sets['test'])}")
+        # --- END OF FIX ---
+
         return historical_data_sets, final_token_lifespans, dexscreener_snapshots
 
     except Exception as e:

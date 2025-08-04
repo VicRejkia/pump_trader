@@ -2152,6 +2152,74 @@ class DatabaseClient:
                 return {}
 
         return results_dict
+    
+    async def get_raw_data_for_rl(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        min_trade_count: int
+    ) -> Optional[Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]]:
+        """
+        [NEW & OPTIMIZED] Fetches all the necessary raw, time-series data for the RL
+        feature engineering script. It does not perform any calculations and cleanly
+        separates Pump.fun trades from DexScreener data.
+        """
+        if not self.pool:
+            logger.error("Database pool not initialized.")
+            return None
+
+        mints_query = """
+            SELECT mint FROM (
+                SELECT mint, COUNT(signature) as trade_count
+                FROM v_trades
+                WHERE timestamp >= $1 AND timestamp < $2
+                GROUP BY mint
+            ) AS trade_counts
+            WHERE trade_count >= $3;
+        """
+        
+        try:
+            eligible_mint_records = await self.pool.fetch(mints_query, start_date, end_date, min_trade_count)
+            if not eligible_mint_records:
+                logger.warning(f"No tokens found in the date range with at least {min_trade_count} trades.")
+                return None
+            
+            mints = [r['mint'] for r in eligible_mint_records]
+            logger.info(f"Found {len(mints)} eligible tokens. Fetching their full raw data...")
+
+            # --- THIS IS THE FIX ---
+            # Query v_trades for Pump.fun data, not the unified view.
+            # We also calculate volume_usd directly here.
+            trade_query = """
+                SELECT 
+                    t.mint, t.timestamp, t.price AS price_sol, t.marketCapSol AS market_cap_sol,
+                    (t.sol_amount * t.sol_price_usd) AS volume_usd
+                FROM v_trades t
+                WHERE t.mint = ANY($1::text[]);
+            """
+            # --- END OF FIX ---
+            
+            rugcheck_query = "SELECT mint, last_checked AS timestamp, score AS rugcheck_score FROM v_rugcheck WHERE mint = ANY($1::text[]) ORDER BY timestamp;"
+            token_info_query = "SELECT mint, socials_score, socials_last_checked, timestamp AS token_creation_time FROM v_tokens WHERE mint = ANY($1::text[]);"
+            dexscreener_query = "SELECT mint_address as mint, timestamp, liquidity_usd, buys_m5, sells_m5, volume_m5, price_change_m5 FROM v_dexscreener_data WHERE mint_address = ANY($1::text[]) ORDER BY timestamp;"
+
+            results = await asyncio.gather(
+                self.pool.fetch(trade_query, mints),
+                self.pool.fetch(rugcheck_query, mints),
+                self.pool.fetch(token_info_query, mints),
+                self.pool.fetch(dexscreener_query, mints)
+            )
+
+            trades_df = pd.DataFrame([dict(r) for r in results[0]])
+            rugcheck_df = pd.DataFrame([dict(r) for r in results[1]])
+            token_info_df = pd.DataFrame([dict(r) for r in results[2]])
+            dexscreener_df = pd.DataFrame([dict(r) for r in results[3]])
+
+            return trades_df, rugcheck_df, token_info_df, dexscreener_df
+
+        except Exception as e:
+            logger.error(f"Error fetching raw data for RL: {e}", exc_info=True)
+            return None
 
     # --- NEW METHOD FOR RL FEEDBACK LOOP ---
     async def log_completed_trade(
