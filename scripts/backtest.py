@@ -1,4 +1,4 @@
-# FILE: scripts/backtest.py
+# FILE: scripts/backtest.py (REFACTORED)
 
 import argparse
 import os
@@ -7,79 +7,47 @@ import numpy as np
 import quantstats as qs
 from rich.console import Console
 from rich.table import Table
+from tqdm import tqdm
 
 import stable_baselines3 as sb3
-from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 # Add the project root to the Python path to resolve imports
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from trading_rl_agent import rl_config
-from trading_rl_agent.environments.solana_decision_env import SolanaPortfolioEnv
-
-from scripts.data_utils import load_processed_data
+from trading_rl_agent import rl_config as cfg
+# Import the new environment, which contains the simulation logic we need
+from trading_rl_agent.environments.solana_decision_env import SolanaDecisionEnv
+from scripts.data_utils import load_prepared_data_for_training
 from bot_logger import setup_logging, logger
 
-def calculate_performance_metrics(portfolio_returns: pd.Series, benchmark_returns: pd.Series) -> dict:
-    """Calculates key performance metrics using quantstats."""
-    metrics = {
-        "Cumulative Return": qs.stats.comp(portfolio_returns),
-        "Annualized Return": qs.stats.avg_return(portfolio_returns),
-        "Annualized Volatility": qs.stats.volatility(portfolio_returns),
-        "Sharpe Ratio": qs.stats.sharpe(portfolio_returns),
-        "Sortino Ratio": qs.stats.sortino(portfolio_returns),
-        "Max Drawdown": qs.stats.max_drawdown(portfolio_returns),
-        "Calmar Ratio": qs.stats.calmar(portfolio_returns),
-    }
+def calculate_performance_metrics(trade_returns: pd.Series, title: str) -> dict:
+    """Calculates key performance metrics for a series of trade returns."""
+    if trade_returns.empty:
+        return {f"{title} Total Trades": 0}
 
-    benchmark_metrics = {
-        "Benchmark Cumulative Return": qs.stats.comp(benchmark_returns),
-        "Benchmark Annualized Return": qs.stats.avg_return(benchmark_returns),
-        "Benchmark Volatility": qs.stats.volatility(benchmark_returns),
-        "Benchmark Sharpe Ratio": qs.stats.sharpe(benchmark_returns),
-    }
+    # --- THIS IS THE FIX for Total Return and Max Drawdown ---
+    # We simulate an equity curve by starting with a capital of 1 and summing
+    # the percentage returns of each independent trade. This is more representative
+    # than compounding them with cumprod.
+    initial_capital = 1.0
+    equity_curve = initial_capital + trade_returns.cumsum()
+    # --- END OF FIX ---
     
-    metrics.update(benchmark_metrics)
+    metrics = {
+        f"{title} Total Trades": len(trade_returns),
+        f"{title} Win Rate": (trade_returns > 0).mean(),
+        f"{title} Average Return": trade_returns.mean(),
+        f"{title} Total Return": equity_curve.iloc[-1] - initial_capital,
+        f"{title} Sharpe Ratio": qs.stats.sharpe(trade_returns, periods=252*288), # Annualize for 5-min periods
+        f"{title} Max Drawdown": qs.stats.max_drawdown(equity_curve),
+    }
     return metrics
 
-def run_episode(env, model) -> pd.Series:
-    """Runs a single episode in the environment and returns portfolio values."""
-    obs = env.reset()
-    if not isinstance(obs, dict):
-        error_msg = f"env.reset() returned an object of type {type(obs)}, but a dictionary was expected. Value: {obs}"
-        logger.critical(error_msg)
-        raise TypeError(error_msg)
-        
-    is_done = False
-    portfolio_values = [env.get_attr('portfolio_value')[0]]
-    
-    while not is_done:
-        unbatched_obs = {key: value[0] for key, value in obs.items()}
-        action, _ = model.predict(unbatched_obs, deterministic=True)
-        
-        action = action.reshape(1, -1)
-        
-        obs, reward, done, info = env.step(action)
-        
-        is_done = done[0]
-        portfolio_values.append(info[0]['portfolio_value'])
-        
-    start_time = env.get_attr('min_ts')[0]
-    freq = env.get_attr('decision_freq')[0]
-    index = pd.to_datetime([start_time + i * freq for i in range(len(portfolio_values))])
-    
-    portfolio_series = pd.Series(portfolio_values, index=index)
-    
-    # Remove duplicate timestamps before returning
-    portfolio_series = portfolio_series.loc[~portfolio_series.index.duplicated(keep='last')]
-    
-    return portfolio_series
-
-def run_backtest(model_path: str, n_splits: int = 4):
+def run_backtest(model_path: str):
     """
-    Performs walk-forward validation on a trained RL agent.
+    Performs a backtest of the trained 'Decision Gate' agent on the test dataset.
     """
     logger.info(f"--- Starting Backtest for Model: {model_path} ---")
     
@@ -90,158 +58,117 @@ def run_backtest(model_path: str, n_splits: int = 4):
 
     model = sb3.PPO.load(model_path, device='cpu')
     
-    model_dir = ""
-    vec_normalize_path = ""
-    
-    if os.path.basename(model_path) == 'best_model.zip':
+    # Robustly find the vec_normalize stats path
+    model_base_dir = ""
+    model_prefix = ""
+    if 'best_model.zip' in model_path:
         model_dir = os.path.dirname(model_path)
-        parent_dir = os.path.dirname(model_dir)
+        model_base_dir = os.path.dirname(model_dir)
         model_prefix = os.path.basename(model_dir).replace('_best', '')
-        vec_normalize_path = os.path.join(parent_dir, f"{model_prefix}_vecnormalize.pkl")
     else:
-        model_dir = os.path.dirname(model_path)
+        model_base_dir = os.path.dirname(model_path)
         model_filename = os.path.basename(model_path)
-        model_prefix = os.path.splitext(model_filename)[0].replace('_final', '')
-        vec_normalize_path = os.path.join(parent_dir, f"{model_prefix}_vecnormalize.pkl")
+        model_prefix = model_filename.replace('_final.zip', '')
+    
+    vec_normalize_path = os.path.join(model_base_dir, f"{model_prefix}_vecnormalize.pkl")
 
     if not os.path.exists(vec_normalize_path):
-        logger.critical(f"VecNormalize stats not found. Constructed path was: {vec_normalize_path}")
+        logger.critical(f"VecNormalize stats not found at: {vec_normalize_path}. Cannot run backtest.")
         return
 
-    # --- Load and Combine All Available Data for Splitting ---
-    train_data = load_processed_data('train')
-    val_data = load_processed_data('validation')
-    if not train_data or not val_data:
-        logger.critical("Could not load processed train/validation data.")
+    # --- Load Test Data ---
+    decision_df, all_token_data = load_prepared_data_for_training()
+    if decision_df is None or not all_token_data:
+        logger.critical("Could not load processed data. Run data_utils.py first.")
         return
         
-    all_data = {**train_data, **val_data}
-    sorted_mints = sorted(all_data.keys(), key=lambda m: all_data[m].index.min())
+    # Create the test set (the 20% of data the agent has never seen)
+    train_df = decision_df.sample(frac=0.8, random_state=42)
+    test_df = decision_df.drop(train_df.index).reset_index(drop=True)
+    
+    logger.info(f"Backtesting on {len(test_df)} decision points.")
 
-    # --- Walk-Forward Validation Loop ---
-    max_tokens_per_split = rl_config.MAX_TOKENS_IN_UNIVERSE
-    n_splits = len(sorted_mints) // max_tokens_per_split
-    if n_splits == 0:
-        n_splits = 1 
+    # --- Create a Dummy Environment to load normalization stats ---
+    dummy_env = DummyVecEnv([lambda: SolanaDecisionEnv(df=test_df, full_token_data=all_token_data)])
+    vec_env = VecNormalize.load(vec_normalize_path, dummy_env)
+    vec_env.training = False
+    vec_env.norm_reward = False
 
-    logger.info(f"Adjusting to {n_splits} splits to respect MAX_TOKENS_IN_UNIVERSE ({max_tokens_per_split}).")
-    split_size = len(sorted_mints) // n_splits
+    # --- Backtesting Loop ---
+    agent_trade_returns = []
+    benchmark_trade_returns = []
+    
+    sim_env = SolanaDecisionEnv(df=test_df, full_token_data=all_token_data)
 
-    all_portfolio_returns = []
-    all_benchmark_returns = []
+    for i in tqdm(range(len(test_df)), desc="Backtesting Agent Decisions"):
+        sim_env.reset()
+        sim_env._current_decision_idx = i
+        sim_env.current_decision_info = test_df.iloc[i]
+        mint = sim_env.current_decision_info['mint']
+        sim_env._token_ohlcv = all_token_data.get(mint)
 
-    for i in range(n_splits):
-        logger.info(f"\n--- Running Walk-Forward Split {i+1}/{n_splits} ---")
-        test_start_index = i * split_size
-        test_end_index = (i + 1) * split_size
-        test_mints = sorted_mints[test_start_index:test_end_index]
+        obs = sim_env._get_observation()
+        normalized_obs = vec_env.normalize_obs(obs)
+
+        action, _ = model.predict(normalized_obs, deterministic=True)
         
-        if not test_mints:
-            logger.warning(f"No tokens for split {i+1}, skipping.")
-            continue
-            
-        test_data_map = {m: all_data[m] for m in test_mints}
+        benchmark_pnl = sim_env._simulate_trade()
+        benchmark_trade_returns.append({'timestamp': test_df.iloc[i]['timestamp'], 'pnl': benchmark_pnl})
         
-        # --- Create Test Environment ---
-        env_kwargs = {'token_data_map': test_data_map}
-        test_env = make_vec_env(SolanaPortfolioEnv, n_envs=1, env_kwargs=env_kwargs)
-        test_env = VecNormalize.load(vec_normalize_path, test_env)
-        test_env.training = False
-        test_env.norm_reward = False
+        if action == 1:
+            agent_trade_returns.append({'timestamp': test_df.iloc[i]['timestamp'], 'pnl': benchmark_pnl})
 
-        # --- Run Agent Episode ---
-        portfolio_values = run_episode(test_env, model)
-        agent_returns = portfolio_values.pct_change().dropna()
-        all_portfolio_returns.append(agent_returns)
-        logger.info(f"Agent finished split {i+1}. Final Portfolio Value: {portfolio_values.iloc[-1]:.2f} SOL")
+    # --- Aggregate Results & Generate Report ---
+    agent_returns_series = pd.DataFrame(agent_trade_returns).set_index('timestamp')['pnl'].sort_index()
+    benchmark_returns_series = pd.DataFrame(benchmark_trade_returns).set_index('timestamp')['pnl'].sort_index()
 
-        # --- Run Benchmark (Equal-Weight Buy & Hold) ---
-        combined_returns_for_split = pd.concat(
-            [df['Close'].pct_change().dropna() for df in test_data_map.values()]
-        )
-        benchmark_returns = combined_returns_for_split.groupby(combined_returns_for_split.index).mean()
-        all_benchmark_returns.append(benchmark_returns)
-        
-        test_env.close()
-
-    if not all_portfolio_returns:
-        logger.error("Backtest failed to produce any results.")
-        return
-
-    # - Aggregate Results & Generate Report -
-    final_agent_returns = pd.concat(all_portfolio_returns).sort_index()
-    combined_benchmark_returns = pd.concat(all_benchmark_returns).sort_index()
-
-    # CRITICAL FIX: Handle timestamp precision issues and ensure uniqueness
-    # 1. Round timestamps to the nearest minute (or your data frequency)
-    final_agent_returns.index = final_agent_returns.index.floor('min')
-    combined_benchmark_returns.index = combined_benchmark_returns.index.floor('min')
-
-    # 2. Properly de-duplicate using groupby (more reliable than duplicated())
-    final_agent_returns = final_agent_returns.groupby(final_agent_returns.index).last()
-    final_benchmark_returns = combined_benchmark_returns.groupby(combined_benchmark_returns.index).mean()
-
-    # 3. Ensure timezone-naive indices (completing the previous fix)
-    if hasattr(final_agent_returns.index, 'tz') and final_agent_returns.index.tz is not None:
-        final_agent_returns.index = final_agent_returns.index.tz_localize(None)
-    if hasattr(final_benchmark_returns.index, 'tz') and final_benchmark_returns.index.tz is not None:
-        final_benchmark_returns.index = final_benchmark_returns.index.tz_localize(None)
-
-    # 4. Align the indices
-    common_index = final_agent_returns.index.intersection(final_benchmark_returns.index)
-    aligned_agent = final_agent_returns.loc[common_index]
-    aligned_benchmark = final_benchmark_returns.loc[common_index]
-
-    # 5. Reindex the benchmark to the agent's timeline
-    aligned_benchmark = aligned_benchmark.reindex(aligned_agent.index, method='ffill').fillna(0)
-
-    # 6. CRITICAL: Verify uniqueness before passing to quantstats
-    if aligned_agent.index.has_duplicates:
-        logger.warning("Agent returns still have duplicate timestamps after cleanup!")
-        aligned_agent = aligned_agent[~aligned_agent.index.duplicated(keep='last')]
-    if aligned_benchmark.index.has_duplicates:
-        logger.warning("Benchmark returns still have duplicate timestamps after cleanup!")
-        aligned_benchmark = aligned_benchmark[~aligned_benchmark.index.duplicated(keep='last')]
-
-    # 7. Final sanity check
-    assert not aligned_agent.index.has_duplicates, "Agent returns still have duplicate timestamps"
-    assert not aligned_benchmark.index.has_duplicates, "Benchmark returns still have duplicate timestamps"
-
-    metrics = calculate_performance_metrics(aligned_agent, aligned_benchmark)
+    agent_metrics = calculate_performance_metrics(agent_returns_series, "Agent")
+    benchmark_metrics = calculate_performance_metrics(benchmark_returns_series, "Benchmark")
 
     # --- Display Rich Table in Console ---
     console = Console()
-    table = Table(title=f"Walk-Forward Backtest Results: {os.path.basename(model_path)}", show_header=True, header_style="bold magenta")
+    table = Table(title=f"Backtest Results: {os.path.basename(model_path)}", show_header=True, header_style="bold magenta")
     table.add_column("Metric", style="cyan")
     table.add_column("RL Agent", justify="right")
-    table.add_column("Benchmark (Equal B&H)", justify="right")
+    table.add_column("Benchmark (Buy All)", justify="right")
 
-    table.add_row("Cumulative Return", f"{metrics['Cumulative Return']:.2%}", f"{metrics['Benchmark Cumulative Return']:.2%}")
-    table.add_row("Annualized Return", f"{metrics['Annualized Return']:.2%}", f"{metrics['Benchmark Annualized Return']:.2%}")
-    table.add_row("Annualized Volatility", f"{metrics['Annualized Volatility']:.2%}", f"{metrics['Benchmark Volatility']:.2%}")
-    table.add_row("Sharpe Ratio", f"{metrics['Sharpe Ratio']:.2f}", f"{metrics['Benchmark Sharpe Ratio']:.2f}")
-    table.add_row("Sortino Ratio", f"{metrics['Sortino Ratio']:.2f}", "-")
-    table.add_row("Max Drawdown", f"{metrics['Max Drawdown']:.2%}", "-")
-    table.add_row("Calmar Ratio", f"{metrics['Calmar Ratio']:.2f}", "-")
+    table.add_row("Total Trades", f"{agent_metrics.get('Agent Total Trades', 0)}", f"{benchmark_metrics.get('Benchmark Total Trades', 0)}")
+    table.add_row("Win Rate", f"{agent_metrics.get('Agent Win Rate', 0):.2%}", f"{benchmark_metrics.get('Benchmark Win Rate', 0):.2%}")
+    table.add_row("Average Return / Trade", f"{agent_metrics.get('Agent Average Return', 0):.4f}", f"{benchmark_metrics.get('Benchmark Average Return', 0):.4f}")
+    table.add_row("Total Return", f"{agent_metrics.get('Agent Total Return', 0):.2%}", f"{benchmark_metrics.get('Benchmark Total Return', 0):.2%}")
+    table.add_row("Sharpe Ratio (Annualized)", f"{agent_metrics.get('Agent Sharpe Ratio', 0):.2f}", f"{benchmark_metrics.get('Benchmark Sharpe Ratio', 0):.2f}")
+    table.add_row("Max Drawdown", f"{agent_metrics.get('Agent Max Drawdown', 0):.2%}", f"{benchmark_metrics.get('Benchmark Max Drawdown', 0):.2%}")
     console.print(table)
 
     # --- Save QuantStats HTML Report ---
-    report_filename = f"rl_tensorboard_logs/backtest_report_{os.path.basename(model_dir)}.html"
-    qs.reports.html(aligned_agent, benchmark=aligned_benchmark, output=report_filename, title=f"RL Agent vs. Benchmark")
+    report_filename = os.path.join(model_base_dir, f"backtest_report_{model_prefix}.html")
+    
+    # Create equity curves for reporting
+    agent_equity = (1 + agent_returns_series).cumprod() if not agent_returns_series.empty else pd.Series()
+    benchmark_equity = (1 + benchmark_returns_series).cumprod() if not benchmark_returns_series.empty else pd.Series()
+
+    # --- THIS IS THE FIX for the TypeError ---
+    # Convert timezone-aware index to timezone-naive before passing to quantstats
+    if not agent_equity.empty:
+        agent_equity.index = agent_equity.index.tz_localize(None)
+    if not benchmark_equity.empty:
+        benchmark_equity.index = benchmark_equity.index.tz_localize(None)
+    # --- END OF FIX ---
+    
+    qs.reports.html(agent_equity, benchmark=benchmark_equity, output=report_filename, title=f"RL Agent vs. Benchmark")
     logger.info(f"✅ Detailed HTML report saved to: {report_filename}")
 
 if __name__ == "__main__":
     setup_logging(logger_name="rl_backtester")
-    parser = argparse.ArgumentParser(description="Walk-Forward Backtest for RL Trading Agent")
+    parser = argparse.ArgumentParser(description="Backtest for RL Trading Agent")
     parser.add_argument(
         "--model-path",
         type=str,
         required=True,
-        help="Path to the trained .zip model file."
+        help="Path to the trained .zip model file (e.g., best_model.zip)."
     )
     args = parser.parse_args()
     
-    # Suppress UserWarning from pandas_ta in quantstats
     import warnings
     warnings.filterwarnings("ignore", category=UserWarning)
 

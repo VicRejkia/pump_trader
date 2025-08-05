@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 # --- General & Data Configuration ---
 DATA_WINDOW_START_TS: datetime = datetime(2025, 6, 26, 0, 0, 0, tzinfo=timezone.utc)
-DATA_WINDOW_END_TS: datetime = datetime(2025, 6, 26, 23, 59, 0, tzinfo=timezone.utc)
+DATA_WINDOW_END_TS: datetime = datetime(2025, 7, 19, 23, 59, 0, tzinfo=timezone.utc)
 MIN_TRADES_FOR_TRAINING: int = 20
 PROCESSED_DATA_PATH: str = "data/rl_processed_data/training_decisions.csv"
 
@@ -53,7 +53,7 @@ SIM_TRAILING_STOP_LOSS_PERCENT: float = 10.0
 SIM_SECOND_TAKE_PROFIT_PERCENT: float = 450.0
 
 # --- Training Configuration ---
-TOTAL_TIMESTEPS: int = 1_500_000
+TOTAL_TIMESTEPS: int = 500_000
 N_ENVS: int = 8
 TENSORBOARD_LOG_DIR: str = "./rl_tensorboard_logs/"
 MODEL_SAVE_DIR: str = "./rl_models/"
@@ -72,6 +72,6 @@ PPO_HYPERPARAMS: dict[str, any] = {
     "clip_range": 0.2,
     "ent_coef": 0.01,
     "vf_coef": 0.5,
-    "learning_rate": 3e-4,
+    "learning_rate": 3e-5,
     "max_grad_norm": 0.5,
 }
