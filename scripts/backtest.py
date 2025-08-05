@@ -22,26 +22,21 @@ from trading_rl_agent.environments.solana_decision_env import SolanaDecisionEnv
 from scripts.data_utils import load_prepared_data_for_training
 from bot_logger import setup_logging, logger
 
-def calculate_performance_metrics(trade_returns: pd.Series, title: str) -> dict:
-    """Calculates key performance metrics for a series of trade returns."""
-    if trade_returns.empty:
+def calculate_performance_metrics(daily_returns: pd.Series, title: str, all_trades: pd.Series) -> dict:
+    """
+    Calculates key performance metrics for a series of daily trade returns,
+    plus metrics from the raw trade data.
+    """
+    if daily_returns.empty or all_trades.empty:
         return {f"{title} Total Trades": 0}
 
-    # --- THIS IS THE FIX for Total Return and Max Drawdown ---
-    # We simulate an equity curve by starting with a capital of 1 and summing
-    # the percentage returns of each independent trade. This is more representative
-    # than compounding them with cumprod.
-    initial_capital = 1.0
-    equity_curve = initial_capital + trade_returns.cumsum()
-    # --- END OF FIX ---
-    
     metrics = {
-        f"{title} Total Trades": len(trade_returns),
-        f"{title} Win Rate": (trade_returns > 0).mean(),
-        f"{title} Average Return": trade_returns.mean(),
-        f"{title} Total Return": equity_curve.iloc[-1] - initial_capital,
-        f"{title} Sharpe Ratio": qs.stats.sharpe(trade_returns, periods=252*288), # Annualize for 5-min periods
-        f"{title} Max Drawdown": qs.stats.max_drawdown(equity_curve),
+        f"{title} Total Trades": len(all_trades),
+        f"{title} Win Rate": (all_trades > 0).mean(),
+        f"{title} Average Return / Trade": all_trades.mean(),
+        f"{title} Total Return": qs.stats.comp(daily_returns),
+        f"{title} Sharpe Ratio": qs.stats.sharpe(daily_returns),
+        f"{title} Max Drawdown": qs.stats.max_drawdown(daily_returns),
     }
     return metrics
 
@@ -122,8 +117,13 @@ def run_backtest(model_path: str):
     agent_returns_series = pd.DataFrame(agent_trade_returns).set_index('timestamp')['pnl'].sort_index()
     benchmark_returns_series = pd.DataFrame(benchmark_trade_returns).set_index('timestamp')['pnl'].sort_index()
 
-    agent_metrics = calculate_performance_metrics(agent_returns_series, "Agent")
-    benchmark_metrics = calculate_performance_metrics(benchmark_returns_series, "Benchmark")
+    # --- THIS IS THE FIX: Resample to daily returns for stable metrics ---
+    agent_daily_returns = agent_returns_series.resample('D').sum()
+    benchmark_daily_returns = benchmark_returns_series.resample('D').sum()
+    # --- END OF FIX ---
+
+    agent_metrics = calculate_performance_metrics(agent_daily_returns, "Agent", agent_returns_series)
+    benchmark_metrics = calculate_performance_metrics(benchmark_daily_returns, "Benchmark", benchmark_returns_series)
 
     # --- Display Rich Table in Console ---
     console = Console()
@@ -135,27 +135,21 @@ def run_backtest(model_path: str):
     table.add_row("Total Trades", f"{agent_metrics.get('Agent Total Trades', 0)}", f"{benchmark_metrics.get('Benchmark Total Trades', 0)}")
     table.add_row("Win Rate", f"{agent_metrics.get('Agent Win Rate', 0):.2%}", f"{benchmark_metrics.get('Benchmark Win Rate', 0):.2%}")
     table.add_row("Average Return / Trade", f"{agent_metrics.get('Agent Average Return', 0):.4f}", f"{benchmark_metrics.get('Benchmark Average Return', 0):.4f}")
-    table.add_row("Total Return", f"{agent_metrics.get('Agent Total Return', 0):.2%}", f"{benchmark_metrics.get('Benchmark Total Return', 0):.2%}")
-    table.add_row("Sharpe Ratio (Annualized)", f"{agent_metrics.get('Agent Sharpe Ratio', 0):.2f}", f"{benchmark_metrics.get('Benchmark Sharpe Ratio', 0):.2f}")
+    table.add_row("Total Compounded Return", f"{agent_metrics.get('Agent Total Return', 0):.2%}", f"{benchmark_metrics.get('Benchmark Total Return', 0):.2%}")
+    table.add_row("Sharpe Ratio", f"{agent_metrics.get('Agent Sharpe Ratio', 0):.2f}", f"{benchmark_metrics.get('Benchmark Sharpe Ratio', 0):.2f}")
     table.add_row("Max Drawdown", f"{agent_metrics.get('Agent Max Drawdown', 0):.2%}", f"{benchmark_metrics.get('Benchmark Max Drawdown', 0):.2%}")
     console.print(table)
 
     # --- Save QuantStats HTML Report ---
     report_filename = os.path.join(model_base_dir, f"backtest_report_{model_prefix}.html")
     
-    # Create equity curves for reporting
-    agent_equity = (1 + agent_returns_series).cumprod() if not agent_returns_series.empty else pd.Series()
-    benchmark_equity = (1 + benchmark_returns_series).cumprod() if not benchmark_returns_series.empty else pd.Series()
-
-    # --- THIS IS THE FIX for the TypeError ---
     # Convert timezone-aware index to timezone-naive before passing to quantstats
-    if not agent_equity.empty:
-        agent_equity.index = agent_equity.index.tz_localize(None)
-    if not benchmark_equity.empty:
-        benchmark_equity.index = benchmark_equity.index.tz_localize(None)
-    # --- END OF FIX ---
+    if not agent_daily_returns.empty:
+        agent_daily_returns.index = agent_daily_returns.index.tz_localize(None)
+    if not benchmark_daily_returns.empty:
+        benchmark_daily_returns.index = benchmark_daily_returns.index.tz_localize(None)
     
-    qs.reports.html(agent_equity, benchmark=benchmark_equity, output=report_filename, title=f"RL Agent vs. Benchmark")
+    qs.reports.html(agent_daily_returns, benchmark=benchmark_daily_returns, output=report_filename, title=f"RL Agent vs. Benchmark")
     logger.info(f"✅ Detailed HTML report saved to: {report_filename}")
 
 if __name__ == "__main__":
