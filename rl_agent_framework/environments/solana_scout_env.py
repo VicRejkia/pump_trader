@@ -1,4 +1,4 @@
-# trading_rl_agent/environments/solana_decision_env.py
+# trading_rl_agent/environments/solana_scout_env.py
 """
 Gymnasium environment for the Scout (Decision Gate) agent.
 

@@ -11,7 +11,7 @@ from typing import List
 # ==============================================================================
 # Defines the time window from which to pull historical data for training/backtesting.
 DATA_WINDOW_START_TS: datetime = datetime(2025, 6, 26, 0, 0, 0, tzinfo=timezone.utc)
-DATA_WINDOW_END_TS: datetime = datetime(2025, 7, 20, 23, 59, 0, tzinfo=timezone.utc)
+DATA_WINDOW_END_TS: datetime = datetime(2025, 6, 26, 23, 59, 0, tzinfo=timezone.utc)
 
 # Minimum number of trades a token must have within the window to be included.
 MIN_TRADES_FOR_TRAINING: int = 50
@@ -95,7 +95,7 @@ class ManagerConfig:
     """Settings for the Manager Agent, responsible for deciding when to 'HOLD' or 'SELL' an open position."""
 
     # --- Environment ---
-    MANAGER_DATA_EXTENSION_MINUTES: int = 120
+    MANAGER_DATA_EXTENSION_MINUTES: int = 180
 
     # --- Observation Space ---
     OBSERVATION_SPACE_DIM: int = 5

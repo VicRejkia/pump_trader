@@ -21,6 +21,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from config import rl_config as cfg
 from bot_logger import setup_logging, logger
 from database_handler import DatabaseClient
+from rl_tools.cache_utils import CacheManager
 
 async def generate_feature_rich_ohlcv(
     mint: str,
@@ -88,7 +89,7 @@ async def prepare_scout_data():
         )
         if raw_data is None:
             logger.critical("Failed to fetch raw data. Exiting.")
-            return
+            return None, None
 
         trades_df, rugcheck_df, token_info_df, dexscreener_df = raw_data
         
@@ -171,39 +172,31 @@ async def prepare_scout_data():
 
         if not decision_points:
             logger.critical("No decision points could be generated.")
-            return
+            return None, None
         
         decision_df = pd.DataFrame(decision_points)
-        os.makedirs(os.path.dirname(cfg.SCOUT_PROCESSED_DATA_PATH), exist_ok=True)
-        decision_df.to_csv(cfg.SCOUT_PROCESSED_DATA_PATH, index=False)
-        
-        ohlcv_dir = os.path.join(os.path.dirname(cfg.SCOUT_PROCESSED_DATA_PATH), "ohlcv_data")
-        os.makedirs(ohlcv_dir, exist_ok=True)
-        for mint, df in all_feature_rich_data.items():
-            df.to_parquet(os.path.join(ohlcv_dir, f"{mint}.parquet"))
 
         logger.info(f"--- Scout data preparation complete. Generated {len(decision_df)} decision points. ---")
+
+        return decision_df, all_feature_rich_data
 
     finally:
         await db_client.close()
 
 def load_prepared_scout_data():
-    """Loads the processed decision data and OHLCV files for Scout training."""
-    if not os.path.exists(cfg.SCOUT_PROCESSED_DATA_PATH):
-        logger.error(f"Processed data file not found: {cfg.SCOUT_PROCESSED_DATA_PATH}")
-        return None, None
-        
-    decision_df = pd.read_csv(cfg.SCOUT_PROCESSED_DATA_PATH, parse_dates=['timestamp'])
+    """
+    Loads the processed decision data and OHLCV files for Scout training
+    from the managed cache.
+    """
+    # --- MODIFICATION: Use CacheManager to load data ---
+    cache_manager = CacheManager('scout', db_client=None) # DB client not needed for loading
     
-    ohlcv_dir = os.path.join(os.path.dirname(cfg.SCOUT_PROCESSED_DATA_PATH), "ohlcv_data")
-    all_token_data = {}
-    if os.path.exists(ohlcv_dir):
-        for filename in tqdm(os.listdir(ohlcv_dir), desc="Loading OHLCV Data"):
-            if filename.endswith(".parquet"):
-                mint = filename.replace(".parquet", "")
-                all_token_data[mint] = pd.read_parquet(os.path.join(ohlcv_dir, filename))
-            
-    return decision_df, all_token_data
+    if not os.path.exists(cache_manager.manifest_path):
+        logger.error(f"Processed scout data cache not found. Please run the training pipeline first.")
+        return None, None
+
+    cached_data = cache_manager.load_cache()
+    return cached_data.get('decision_df'), cached_data.get('all_token_data')
 
 if __name__ == "__main__":
     asyncio.run(prepare_scout_data())

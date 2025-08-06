@@ -36,7 +36,7 @@ from typing import Optional
 try:
     from stable_baselines3 import PPO
     from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
-    from trading_rl_agent.agent import TradingAgent
+    from rl_agent_framework.agent import TradingAgent
     from trading_rl_agent import rl_config as agent_config # Use a distinct name
     RL_AVAILABLE = True
 except ImportError:

@@ -28,6 +28,7 @@ from bot_logger import setup_logging, logger
 from config import rl_config as cfg
 # Import the Scout's data loader to get the full OHLCV data
 from rl_tools.scout_data_preparation import load_prepared_scout_data
+from rl_tools.cache_utils import CacheManager
 
 def simulate_scout_trades(decision_df: pd.DataFrame, all_token_data: Dict[str, pd.DataFrame]) -> List[Dict]:
     """
@@ -105,24 +106,24 @@ def simulate_scout_trades(decision_df: pd.DataFrame, all_token_data: Dict[str, p
     return completed_trades
 
 async def prepare_manager_data():
-    """Main function to run the data preparation pipeline for the Manager agent."""
+    """
+    Main function to run the data preparation pipeline for the Manager agent.
+    Returns the processed data instead of saving it directly.
+    """
     setup_logging(logger_name="rl_manager_data_prep")
     logger.info("--- Starting Data Preparation for RL Manager Environment ---")
 
-    # 1. Load the Scout's data
     logger.info("Loading Scout agent's processed decision and OHLCV data...")
     decision_df, all_token_data = load_prepared_scout_data()
     if decision_df is None or not all_token_data:
         logger.critical("Could not load Scout's processed data. Run scout_data_preparation.py first.")
-        return
+        return None
 
     logger.info(f"Found {len(decision_df)} potential trade entry points from Scout's data.")
 
-    # 2. Simulate trades to find their exit points
     scout_trades = simulate_scout_trades(decision_df, all_token_data)
     logger.info(f"Simulated {len(scout_trades)} trade lifecycles based on Scout's fixed rules.")
 
-    # 3. Extract the time-series data for each trade lifecycle
     trade_lifecycles_data = {}
     for i, trade in enumerate(tqdm(scout_trades, desc="Extracting Trade Lifecycles")):
         mint = trade['mint']
@@ -145,24 +146,20 @@ async def prepare_manager_data():
     if cfg.ManagerConfig.MANAGER_DATA_EXTENSION_MINUTES > 0:
         logger.info(f"Data was extended by up to {cfg.ManagerConfig.MANAGER_DATA_EXTENSION_MINUTES} minutes per trade.")
 
-    # 4. Save the processed data
-    if trade_lifecycles_data:
-        os.makedirs(os.path.dirname(cfg.MANAGER_PROCESSED_DATA_PATH), exist_ok=True)
-        with open(cfg.MANAGER_PROCESSED_DATA_PATH, 'wb') as f:
-            pickle.dump(trade_lifecycles_data, f)
-        logger.info(f"✅ Manager agent training data saved to: {cfg.MANAGER_PROCESSED_DATA_PATH}")
-    else:
-        logger.warning("No trade lifecycle data was generated. The output file was not created.")
+    # Return the processed data ---
+    return trade_lifecycles_data
 
 def load_prepared_manager_data():
-    """Loads the processed trade lifecycle data for the Manager agent."""
-    if not os.path.exists(cfg.MANAGER_PROCESSED_DATA_PATH):
-        logger.error(f"Processed manager data file not found: {cfg.MANAGER_PROCESSED_DATA_PATH}")
-        return None
+    """Loads the processed trade lifecycle data for the Manager agent from the cache."""
+    # --- MODIFICATION: Use CacheManager to load data ---
+    cache_manager = CacheManager('manager', db_client=None)
     
-    with open(cfg.MANAGER_PROCESSED_DATA_PATH, 'rb') as f:
-        data = pickle.load(f)
-    return data
+    if not os.path.exists(cache_manager.manifest_path):
+        logger.error(f"Processed manager data cache not found. Please run the training pipeline first.")
+        return None
+        
+    cached_data = cache_manager.load_cache()
+    return cached_data.get('trade_lifecycles')
 
 if __name__ == "__main__":
     asyncio.run(prepare_manager_data())

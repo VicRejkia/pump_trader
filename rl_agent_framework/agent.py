@@ -18,7 +18,7 @@ from typing import Optional
 
 # A dummy env is needed to load VecNormalize stats, it's not used for steps.
 # This import path is now updated to the new structure.
-from trading_rl_agent.environments.solana_decision_env import SolanaDecisionEnv
+from rl_agent_framework.environments.solana_scout_env import SolanaDecisionEnv
 
 class TradingAgent:
     """

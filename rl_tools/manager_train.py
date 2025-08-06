@@ -22,7 +22,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from bot_logger import setup_logging, logger
 # Import from the new centralized config
 from config import rl_config as cfg
-from trading_rl_agent.environments.solana_management_env import SolanaManagementEnv
+from rl_agent_framework.environments.solana_management_env import SolanaManagementEnv
 from rl_tools.manager_data_preparation import load_prepared_manager_data
 
 def train_manager_agent(continue_from_model: str = None, fine_tune: bool = False):

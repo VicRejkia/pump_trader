@@ -21,7 +21,7 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from config import rl_config as cfg
-from trading_rl_agent.environments.solana_decision_env import SolanaDecisionEnv
+from rl_agent_framework.environments.solana_scout_env import SolanaDecisionEnv
 from rl_tools.scout_data_preparation import load_prepared_scout_data
 from bot_logger import setup_logging, logger
 
@@ -98,7 +98,7 @@ def train_scout_agent(continue_from_model: str = None, fine_tune: bool = False):
     eval_env = VecNormalize(eval_env_raw, training=False, norm_obs=True, norm_reward=False, clip_obs=10.)
     eval_env.obs_rms = train_env.obs_rms
 
-    model_prefix = f"{cfg.ScoutConfig.RL_ALGORITHM}_{run_timestamp}"
+    model_prefix = f"{cfg.ScoutConfig.RL_ALGORITHM}_Scout_{run_timestamp}"
     best_model_save_path = os.path.join(cfg.ScoutConfig.MODEL_SAVE_DIR, f"{model_prefix}_best")
     
     eval_callback = EvalCallback(
