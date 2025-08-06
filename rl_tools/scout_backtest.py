@@ -49,13 +49,17 @@ def calculate_performance_metrics(daily_returns: pd.Series, title: str, all_trad
     }
     return metrics
 
-def simulate_portfolio(trade_returns: pd.Series, initial_capital: float = 10000.0, capital_per_trade: float = 100.0) -> pd.Series:
+def simulate_portfolio(trade_returns: pd.Series) -> pd.Series:
     """
     Simulates portfolio performance to generate a realistic daily return series.
     Prevents portfolio value from dropping below zero.
     """
     if trade_returns.empty:
         return pd.Series(dtype=np.float64)
+    
+    # Use parameters from the config file instead of hardcoded values
+    initial_capital = cfg.PORTFOLIO_STARTING_CAPITAL
+    capital_per_trade = cfg.PORTFOLIO_CAPITAL_PER_TRADE
 
     # Assume a fixed capital allocation for each trade to calculate profit in dollars
     daily_profit = (trade_returns * capital_per_trade).resample('D').sum()
@@ -156,8 +160,8 @@ def run_backtest(model_path: str):
     agent_returns_series = pd.DataFrame(agent_trade_returns).set_index('timestamp')['pnl'].sort_index()
     benchmark_returns_series = pd.DataFrame(benchmark_trade_returns).set_index('timestamp')['pnl'].sort_index()
 
-    agent_daily_returns = simulate_portfolio(agent_returns_series, initial_capital=cfg.PORTFOLIO_STARTING_CAPITAL, capital_per_trade=cfg.PORTFOLIO_CAPITAL_PER_TRADE)
-    benchmark_daily_returns = simulate_portfolio(benchmark_returns_series, initial_capital=cfg.PORTFOLIO_STARTING_CAPITAL, capital_per_trade=cfg.PORTFOLIO_CAPITAL_PER_TRADE)
+    agent_daily_returns = simulate_portfolio(agent_returns_series)
+    benchmark_daily_returns = simulate_portfolio(benchmark_returns_series)
 
     agent_metrics = calculate_performance_metrics(agent_daily_returns, "Agent", agent_returns_series)
     benchmark_metrics = calculate_performance_metrics(benchmark_daily_returns, "Benchmark", benchmark_returns_series)

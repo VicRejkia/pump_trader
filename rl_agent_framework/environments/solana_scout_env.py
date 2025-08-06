@@ -90,11 +90,11 @@ class SolanaDecisionEnv(gym.Env):
         trade_data = self._token_ohlcv[self._token_ohlcv.index >= decision_timestamp]
 
         if len(trade_data) < 2:
-            return -cfg.ScoutConfig.INITIAL_CAPITAL # Immediate loss if no data to trade on
+            return -cfg.ScoutConfig.SIMULATION_FAILURE_PENALTY # Immediate loss if no data to trade on
 
         buy_price = trade_data['Close'].iloc[0]
         if buy_price <= 0:
-            return -cfg.ScoutConfig.INITIAL_CAPITAL
+            return -cfg.ScoutConfig.SIMULATION_FAILURE_PENALTY 
 
         # Set SL/TP levels based on config
         stop_loss_price = buy_price * (1 - cfg.ScoutConfig.SIM_INITIAL_STOP_LOSS_PERCENT / 100.0)

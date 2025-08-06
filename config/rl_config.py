@@ -11,19 +11,22 @@ from typing import List
 # ==============================================================================
 # Defines the time window from which to pull historical data for training/backtesting.
 DATA_WINDOW_START_TS: datetime = datetime(2025, 6, 26, 0, 0, 0, tzinfo=timezone.utc)
-DATA_WINDOW_END_TS: datetime = datetime(2025, 6, 26, 23, 59, 0, tzinfo=timezone.utc)
+DATA_WINDOW_END_TS: datetime = datetime(2025, 7, 19, 23, 59, 0, tzinfo=timezone.utc)
 
 # Minimum number of trades a token must have within the window to be included.
-MIN_TRADES_FOR_TRAINING: int = 50
+MIN_TRADES_FOR_TRAINING: int = 25
 
 # Paths for storing processed data.
 PROCESSED_DATA_DIR: str = "data/rl_processed_data"
 SCOUT_PROCESSED_DATA_PATH: str = f"{PROCESSED_DATA_DIR}/scout_training_decisions.csv"
 MANAGER_PROCESSED_DATA_PATH: str = f"{PROCESSED_DATA_DIR}/manager_trade_lifecycles.pkl"
 
-# Portfolio management settings.
-PORTFOLIO_STARTING_CAPITAL: float = 1000.0 # Starting capital for the RL agents.
-PORTFOLIO_CAPITAL_PER_TRADE: float = 50.0  # Capital allocated per trade for the Scout agent.
+# ==============================================================================
+# --- Backtest Portfolio Configuration ---
+# ==============================================================================
+# These settings exclusively control the backtester's portfolio simulation.
+PORTFOLIO_STARTING_CAPITAL: float = 1000.0 # The total starting bankroll for a backtest.
+PORTFOLIO_CAPITAL_PER_TRADE: float = 50.0  # The fixed dollar amount allocated to each trade.
 
 
 # ==============================================================================
@@ -33,7 +36,9 @@ class ScoutConfig:
     """Settings for the Scout Agent, responsible for making 'BUY' or 'IGNORE' decisions."""
 
     # --- Environment ---
-    INITIAL_CAPITAL: float = 0.5  # Notional capital for reward calculation.
+    # This value is returned as a negative reward if a trade cannot be simulated (e.g., no price data).
+    # A value of 1.0 represents a -100% PnL.
+    SIMULATION_FAILURE_PENALTY: float = 1.0
     MAX_STEPS_PER_EPISODE: int = 720  # Max simulation steps for a single trade lifecycle.
     DECISION_FREQUENCY: str = '5s'  # Frequency of data points in the OHLCV data.
     # Defines the moments (in minutes after creation) to generate a decision point for the agent.
@@ -64,7 +69,7 @@ class ScoutConfig:
 
     # --- Training Hyperparameters ---
     TOTAL_TIMESTEPS: int = 1_000_000
-    N_ENVS: int = 8
+    N_ENVS: int = 24
     EVAL_FREQ: int = 10000
     N_EVAL_EPISODES: int = 50
     RL_ALGORITHM: str = "PPO"
@@ -122,7 +127,7 @@ class ManagerConfig:
         "clip_range": 0.2, 
         "ent_coef": 0.005, 
         "vf_coef": 0.5,
-        "learning_rate": 5e-4, 
+        "learning_rate": 1e-4, 
         "max_grad_norm": 0.5,
     }
     FINE_TUNE_LR: float = 1e-5

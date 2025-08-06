@@ -81,7 +81,8 @@ def train_scout_agent(continue_from_model: str = None, fine_tune: bool = False):
         model = sb3.PPO.load(
             continue_from_model, env=train_env,
             tensorboard_log=cfg.ScoutConfig.TENSORBOARD_LOG_DIR,
-            learning_rate=learning_rate
+            learning_rate=learning_rate,
+            device='cpu'
         )
         logger.info(f"Successfully loaded model and stats. New learning rate: {learning_rate}")
         run_timestamp = f"continued_{run_timestamp}"
@@ -92,6 +93,7 @@ def train_scout_agent(continue_from_model: str = None, fine_tune: bool = False):
         model = sb3.PPO(
             cfg.ScoutConfig.POLICY_NAME, train_env, verbose=1,
             tensorboard_log=cfg.ScoutConfig.TENSORBOARD_LOG_DIR,
+            device='cpu',
             **cfg.ScoutConfig.PPO_HYPERPARAMS
         )
 

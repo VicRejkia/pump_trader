@@ -35,9 +35,9 @@ FROM trades_backup;
 -- View for combined rugcheck and rugcheck_backup
 -- Note: Getting the *latest* score per mint will be handled in the query using this view.
 CREATE OR REPLACE VIEW v_rugcheck AS
-SELECT mint, score, token_supply, last_checked FROM rugcheck
+SELECT mint, score, token_supply, last_checked, timestamp FROM rugcheck
 UNION ALL
-SELECT mint, score, token_supply, last_checked FROM rugcheck_backup;
+SELECT mint, score, token_supply, last_checked, timestamp FROM rugcheck_backup;
 
 -- View for combined migrations and migrations_backup
 CREATE OR REPLACE VIEW v_migrations AS
