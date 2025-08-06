@@ -31,6 +31,97 @@ from trading_rl_agent.environments.solana_management_env import SolanaManagement
 from rl_tools.manager_data_preparation import load_prepared_manager_data
 from bot_logger import setup_logging, logger
 
+# --- FIX START: COPIED FROM SCOUT BACKTEST FOR REALISTIC PORTFOLIO SIMULATION ---
+def simulate_portfolio(trade_returns: pd.Series, initial_capital: float = 10000.0, capital_per_trade: float = 100.0) -> pd.Series:
+    """
+    Simulates portfolio performance to generate a realistic daily return series.
+    Prevents portfolio value from dropping below zero.
+    """
+    if trade_returns.empty:
+        return pd.Series(dtype=np.float64)
+
+    # Assume a fixed capital allocation for each trade to calculate profit in dollars
+    daily_profit = (trade_returns * capital_per_trade).resample('D').sum()
+
+    # Create a full date range to ensure we have a value for every day
+    full_date_range = pd.date_range(start=daily_profit.index.min(), end=daily_profit.index.max(), freq='D')
+    daily_profit = daily_profit.reindex(full_date_range, fill_value=0)
+
+    portfolio_value = pd.Series(index=daily_profit.index, dtype=np.float64)
+    current_capital = initial_capital
+    is_blown_up = False
+
+    for day, profit in daily_profit.items():
+        if is_blown_up:
+            portfolio_value[day] = 0
+            continue
+
+        portfolio_value[day] = current_capital
+        current_capital = max(0, current_capital + profit) # A portfolio cannot go below zero.
+
+        if current_capital == 0:
+            is_blown_up = True
+
+    # Calculate daily returns based on the changing portfolio value
+    daily_returns = portfolio_value.pct_change().fillna(0)
+    daily_returns[daily_returns < -1] = -1 # Cap any numerical noise
+    return daily_returns
+# --- FIX END ---
+
+# --- FIX START: RE-IMPLEMENTED BENCHMARK LOGIC FROM MANAGER DATA PREPARATION ---
+def simulate_benchmark_trade(trade_data: pd.DataFrame) -> float:
+    """
+    Simulates a trade using the original fixed SL/TP logic to get the correct
+    benchmark PnL. This logic is identical to the simulation in the Scout's
+    environment and the manager's data preparation script.
+
+    Returns:
+        The final realized PnL for the benchmark strategy.
+    """
+    if len(trade_data) < 2:
+        return -1.0  # Treat as a full loss if there's no data to trade on.
+
+    buy_price = trade_data['Close'].iloc[0]
+    if buy_price <= 0:
+        return -1.0
+
+    # Use the same simulation parameters as the Scout's environment for a fair benchmark
+    stop_loss_price = buy_price * (1 - cfg.ScoutConfig.SIM_INITIAL_STOP_LOSS_PERCENT / 100.0)
+    first_tp_price = buy_price * (1 + cfg.ScoutConfig.SIM_FIRST_SELL_PROFIT_MARGIN / 100.0)
+    second_tp_price = buy_price * (1 + cfg.ScoutConfig.SIM_SECOND_TAKE_PROFIT_PERCENT / 100.0)
+    
+    highest_price = buy_price
+    first_tp_hit = False
+    exit_price = None
+
+    for i in range(1, min(len(trade_data), cfg.ScoutConfig.MAX_STEPS_PER_EPISODE)):
+        current_price = trade_data['Close'].iloc[i]
+        highest_price = max(highest_price, current_price)
+
+        if current_price <= stop_loss_price:
+            exit_price = current_price
+            break
+        if current_price >= second_tp_price:
+            exit_price = current_price
+            break
+        if not first_tp_hit and current_price >= first_tp_price:
+            first_tp_hit = True
+            stop_loss_price = buy_price  # Adjust SL to breakeven
+        if first_tp_hit:
+            trailing_sl = highest_price * (1 - cfg.ScoutConfig.SIM_TRAILING_STOP_LOSS_PERCENT / 100.0)
+            if current_price <= trailing_sl:
+                exit_price = current_price
+                break
+    
+    if exit_price is None:
+        # If no exit condition was met, the trade timed out at the max episode steps
+        final_index = min(len(trade_data) - 1, cfg.ScoutConfig.MAX_STEPS_PER_EPISODE -1)
+        exit_price = trade_data['Close'].iloc[final_index]
+        
+    return (exit_price - buy_price) / buy_price
+# --- FIX END ---
+
+
 def calculate_performance_metrics(daily_returns: pd.Series, title: str, all_trades: pd.Series) -> dict:
     """Calculates key performance metrics for a series of daily trade returns."""
     if daily_returns.empty or all_trades.empty:
@@ -55,12 +146,13 @@ def run_backtest(model_path: str):
         return
 
     model = sb3.PPO.load(model_path, device='cpu')
-
     model_base_dir = os.path.dirname(model_path)
     model_filename = os.path.basename(model_path)
+    model_prefix = ""
     if 'best_model.zip' in model_filename:
-        model_base_dir = os.path.dirname(model_base_dir)
-        model_prefix = os.path.basename(os.path.dirname(model_path)).replace('_best', '')
+        model_dir = os.path.dirname(model_path)
+        model_base_dir = os.path.dirname(model_dir)
+        model_prefix = os.path.basename(model_dir).replace('_best', '')
     else:
         model_prefix = model_filename.replace('_final.zip', '')
         
@@ -82,46 +174,53 @@ def run_backtest(model_path: str):
     
     logger.info(f"Backtesting on {len(test_data)} trade lifecycles.")
 
-    dummy_env = DummyVecEnv([lambda: SolanaManagementEnv(trade_lifecycles=test_data)])
-    vec_env = VecNormalize.load(vec_normalize_path, dummy_env)
-    vec_env.training = False
-    vec_env.norm_reward = False
+    # --- FIX START: Refactor simulation loop to be cleaner and correct normalization ---
+    # 1. Create a single environment instance for running the simulation step-by-step.
+    sim_env = SolanaManagementEnv(trade_lifecycles=test_data)
+
+    # 2. Load the VecNormalize stats into a wrapper. We will only use this to normalize observations.
+    dummy_vec_env = DummyVecEnv([lambda: sim_env])
+    vec_norm_stats = VecNormalize.load(vec_normalize_path, dummy_vec_env)
+    vec_norm_stats.training = False
+    vec_norm_stats.norm_reward = False
+    # --- FIX END ---
 
     agent_trade_returns = []
     benchmark_trade_returns = []
 
     for trade_id, trade_df in tqdm(test_data.items(), desc="Backtesting Manager Decisions"):
+        entry_timestamp = trade_df.index[0]
+        
         # --- Simulate Agent ---
-        obs, _ = vec_env.reset()
-        # Force the environment to use the specific trade_id for this iteration
-        vec_env.envs[0].unwrapped._current_trade_id = trade_id
-        vec_env.envs[0].unwrapped._current_trade_data = trade_df
-        obs, _ = vec_env.envs[0].unwrapped.reset() # Reset internal state with the correct trade
+        # Force the simulation environment to the specific trade and reset it
+        sim_env.force_trade(trade_id, trade_df)
+        obs, _ = sim_env.reset() # Reset returns (obs, info) from the non-vectorized env
         
         done = False
+        final_reward = 0.0
         while not done:
-            action, _ = model.predict(vec_env.normalize_obs(obs), deterministic=True)
-            obs, reward, terminated, truncated, _ = vec_env.envs[0].unwrapped.step(action)
+            # Manually normalize the observation using the loaded stats
+            normalized_obs = vec_norm_stats.normalize_obs(obs)
+            action, _ = model.predict(normalized_obs, deterministic=True)
+            
+            # Step the single simulation environment forward
+            obs, reward, terminated, truncated, _ = sim_env.step(action)
+            final_reward = reward
             done = terminated or truncated
         
-        agent_pnl = reward # The final reward is the PnL
-        entry_timestamp = trade_df.index[0]
+        agent_pnl = final_reward
         agent_trade_returns.append({'timestamp': entry_timestamp, 'pnl': agent_pnl})
 
         # --- Simulate Benchmark (Fixed Rule) ---
-        buy_price = trade_df['Close'].iloc[0]
-        # This simulation is simplified; it assumes the fixed rule exit is within the data.
-        # A more robust benchmark would re-run the logic from `manager_data_preparation`.
-        # For now, we assume the last price is the exit price for the benchmark.
-        last_price = trade_df['Close'].iloc[-1]
-        benchmark_pnl = (last_price - buy_price) / buy_price if buy_price > 0 else 0
+        benchmark_pnl = simulate_benchmark_trade(trade_df)
         benchmark_trade_returns.append({'timestamp': entry_timestamp, 'pnl': benchmark_pnl})
 
     agent_returns_series = pd.DataFrame(agent_trade_returns).set_index('timestamp')['pnl'].sort_index()
     benchmark_returns_series = pd.DataFrame(benchmark_trade_returns).set_index('timestamp')['pnl'].sort_index()
     
-    agent_daily_returns = agent_returns_series.resample('D').sum()
-    benchmark_daily_returns = benchmark_returns_series.resample('D').sum()
+    # --- FIX: USE PORTFOLIO SIMULATION FOR CORRECT DAILY RETURNS ---
+    agent_daily_returns = simulate_portfolio(agent_returns_series, initial_capital=cfg.PORTFOLIO_STARTING_CAPITAL, capital_per_trade=cfg.PORTFOLIO_CAPITAL_PER_TRADE)
+    benchmark_daily_returns = simulate_portfolio(benchmark_returns_series, initial_capital=cfg.PORTFOLIO_STARTING_CAPITAL, capital_per_trade=cfg.PORTFOLIO_CAPITAL_PER_TRADE)
 
     agent_metrics = calculate_performance_metrics(agent_daily_returns, "Manager Agent", agent_returns_series)
     benchmark_metrics = calculate_performance_metrics(benchmark_daily_returns, "Benchmark", benchmark_returns_series)
@@ -142,12 +241,17 @@ def run_backtest(model_path: str):
 
     report_filename = os.path.join(model_base_dir, f"backtest_report_{model_prefix}.html")
     
-    if not agent_daily_returns.empty:
-        agent_daily_returns.index = agent_daily_returns.index.tz_localize(None)
-    if not benchmark_daily_returns.empty:
-        benchmark_daily_returns.index = benchmark_daily_returns.index.tz_localize(None)
+    agent_report_series = agent_daily_returns
+    agent_report_series.name = "RL Manager Agent" # Set the name
+    if not agent_report_series.empty and agent_report_series.index.tz is not None:
+        agent_report_series.index = agent_report_series.index.tz_localize(None)
+
+    benchmark_report_series = benchmark_daily_returns
+    benchmark_report_series.name = "Benchmark (Fixed Rule)" # Set the name
+    if not benchmark_report_series.empty and benchmark_report_series.index.tz is not None:
+        benchmark_report_series.index = benchmark_report_series.index.tz_localize(None)
     
-    qs.reports.html(agent_daily_returns, benchmark=benchmark_daily_returns, output=report_filename, title=f"RL Manager Agent vs. Benchmark")
+    qs.reports.html(agent_report_series, benchmark=benchmark_report_series, output=report_filename, title=f"RL Manager Agent vs. Benchmark")
     logger.info(f"✅ Detailed HTML report saved to: {report_filename}")
 
 if __name__ == "__main__":

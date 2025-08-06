@@ -29,7 +29,7 @@ class SolanaManagementEnv(gym.Env):
     def __init__(self, trade_lifecycles: Dict[str, pd.DataFrame]):
         super().__init__()
         self.trade_lifecycles = trade_lifecycles
-        self.trade_ids = list(self.trade_lifecycles.keys())
+        self.trade_ids = list(self.trade_lifecycles.keys()) if self.trade_lifecycles else []
 
         self.observation_space = spaces.Box(
             low=np.array([-1.0, 0, 0, -1.0, -1.0], dtype=np.float32),
@@ -47,6 +47,13 @@ class SolanaManagementEnv(gym.Env):
         self._buy_market_cap: float = 0.0
         self._highest_pnl: float = 0.0
         self._time_of_buy: Optional[pd.Timestamp] = None
+
+    # --- NEW METHOD FOR DETERMINISTIC BACKTESTING ---
+    def force_trade(self, trade_id: str, trade_df: pd.DataFrame):
+        """Forces the environment to use a specific trade for the next episode."""
+        self._current_trade_id = trade_id
+        self._current_trade_data = trade_df
+    # --- END NEW METHOD ---
 
     def _get_observation(self) -> np.ndarray:
         if self._current_trade_data is None or self._current_step >= len(self._current_trade_data):
@@ -69,14 +76,25 @@ class SolanaManagementEnv(gym.Env):
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[Dict] = None) -> tuple:
         super().reset(seed=seed)
-        self._current_trade_id = self.np_random.choice(self.trade_ids)
-        self._current_trade_data = self.trade_lifecycles[self._current_trade_id]
+        
+        # If a trade has not been forced by the backtester, pick one randomly for training
+        if self._current_trade_id is None or self._current_trade_id not in self.trade_lifecycles:
+            if not self.trade_ids: # Handle case where trade_lifecycles is empty
+                self._current_trade_data = None
+                return self._get_observation(), {}
+            self._current_trade_id = self.np_random.choice(self.trade_ids)
+            self._current_trade_data = self.trade_lifecycles[self._current_trade_id]
+
         self._current_step = 0
         initial_state = self._current_trade_data.iloc[0]
         self._buy_price = initial_state['Close']
         self._buy_market_cap = initial_state['marketCapSol']
         self._time_of_buy = self._current_trade_data.index[0]
         self._highest_pnl = 0.0
+        
+        # Reset forced trade ID after using it once
+        self._current_trade_id = None
+        
         return self._get_observation(), {}
 
     def step(self, action: int) -> tuple:
@@ -84,28 +102,22 @@ class SolanaManagementEnv(gym.Env):
         terminated = False
         truncated = False
         
+        if self._current_trade_data is None or self._current_step >= len(self._current_trade_data):
+            # Should not happen in normal operation, but as a safeguard
+            return np.zeros(self.observation_space.shape, dtype=np.float32), 0.0, True, False, {}
+
         current_price = self._current_trade_data.iloc[self._current_step]['Close']
         current_pnl = (current_price - self._buy_price) / self._buy_price if self._buy_price > 0 else 0.0
 
         if action == 1:  # SELL_NOW
             terminated = True
-            # The final reward is the realized PnL of the trade.
             reward = current_pnl
         else:  # HOLD
-            # --- MODIFIED REWARD LOGIC ---
-            # Provide step-by-step feedback.
-            if current_pnl > 0:
-                # Small reward for holding a profitable position.
-                reward = 0.0005
-            else:
-                # Larger penalty for holding a losing position.
-                reward = -0.001
-            # --- END MODIFICATION ---
-
+            reward = cfg.ManagerConfig.TIME_PENALTY_PER_STEP # Use configured time penalty
             self._current_step += 1
             if self._current_step >= len(self._current_trade_data):
                 truncated = True
-                # If truncated, the final reward is the PnL at the last known data point.
+                # Final reward is the PnL at the last available data point if truncated
                 reward = current_pnl
 
         return self._get_observation(), reward, terminated, truncated, {}

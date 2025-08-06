@@ -21,6 +21,10 @@ PROCESSED_DATA_DIR: str = "data/rl_processed_data"
 SCOUT_PROCESSED_DATA_PATH: str = f"{PROCESSED_DATA_DIR}/scout_training_decisions.csv"
 MANAGER_PROCESSED_DATA_PATH: str = f"{PROCESSED_DATA_DIR}/manager_trade_lifecycles.pkl"
 
+# Portfolio management settings.
+PORTFOLIO_STARTING_CAPITAL: float = 1000.0 # Starting capital for the RL agents.
+PORTFOLIO_CAPITAL_PER_TRADE: float = 50.0  # Capital allocated per trade for the Scout agent.
+
 
 # ==============================================================================
 # --- Scout Agent (Decision Gate) Configuration ---
@@ -52,14 +56,14 @@ class ScoutConfig:
     TIME_PENALTY_PER_STEP: float = 0.0001
 
     # --- Simulation Logic (for reward calculation) ---
-    SIM_INITIAL_STOP_LOSS_PERCENT: float = 40.0
-    SIM_FIRST_SELL_PERCENT: float = 35.0
-    SIM_FIRST_SELL_PROFIT_MARGIN: float = 70.0
-    SIM_TRAILING_STOP_LOSS_PERCENT: float = 10.0
-    SIM_SECOND_TAKE_PROFIT_PERCENT: float = 450.0
+    SIM_INITIAL_STOP_LOSS_PERCENT: float = 50.0
+    SIM_FIRST_SELL_PERCENT: float = 25.0
+    SIM_FIRST_SELL_PROFIT_MARGIN: float = 100.0
+    SIM_TRAILING_STOP_LOSS_PERCENT: float = 50.0
+    SIM_SECOND_TAKE_PROFIT_PERCENT: float = 500.0
 
     # --- Training Hyperparameters ---
-    TOTAL_TIMESTEPS: int = 500_000
+    TOTAL_TIMESTEPS: int = 1_000_000
     N_ENVS: int = 8
     EVAL_FREQ: int = 10000
     N_EVAL_EPISODES: int = 50
@@ -74,7 +78,7 @@ class ScoutConfig:
         "clip_range": 0.2, 
         "ent_coef": 0.01, 
         "vf_coef": 0.5,
-        "learning_rate": 3e-5, 
+        "learning_rate": 1e-4, 
         "max_grad_norm": 0.5,
     }
     FINE_TUNE_LR: float = 1e-5 # Lower learning rate for fine-tuning.

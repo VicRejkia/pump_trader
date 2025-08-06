@@ -36,7 +36,6 @@ def calculate_performance_metrics(daily_returns: pd.Series, title: str, all_trad
     if daily_returns.empty or all_trades.empty:
         return {f"{title} Total Trades": 0}
 
-    # --- FIX for RuntimeWarning ---
     # Ensure there are no NaN values before passing to quantstats
     daily_returns = daily_returns.fillna(0)
 
@@ -49,6 +48,46 @@ def calculate_performance_metrics(daily_returns: pd.Series, title: str, all_trad
         f"{title} Max Drawdown": qs.stats.max_drawdown(daily_returns),
     }
     return metrics
+
+def simulate_portfolio(trade_returns: pd.Series, initial_capital: float = 10000.0, capital_per_trade: float = 100.0) -> pd.Series:
+    """
+    Simulates portfolio performance to generate a realistic daily return series.
+    Prevents portfolio value from dropping below zero.
+    """
+    if trade_returns.empty:
+        return pd.Series(dtype=np.float64)
+
+    # Assume a fixed capital allocation for each trade to calculate profit in dollars
+    daily_profit = (trade_returns * capital_per_trade).resample('D').sum()
+
+    # Create a full date range to ensure we have a value for every day
+    full_date_range = pd.date_range(start=daily_profit.index.min(), end=daily_profit.index.max(), freq='D')
+    daily_profit = daily_profit.reindex(full_date_range, fill_value=0)
+
+    portfolio_value = pd.Series(index=daily_profit.index, dtype=np.float64)
+    current_capital = initial_capital
+    is_blown_up = False
+
+    for day, profit in daily_profit.items():
+        if is_blown_up:
+            portfolio_value[day] = 0
+            continue
+
+        portfolio_value[day] = current_capital
+        # A portfolio cannot go below zero.
+        current_capital = max(0, current_capital + profit)
+
+        if current_capital == 0:
+            is_blown_up = True
+
+    # Calculate daily returns based on the changing portfolio value
+    daily_returns = portfolio_value.pct_change().fillna(0)
+    
+    # The pct_change from a positive number to 0 is -1. Cap any numerical noise.
+    daily_returns[daily_returns < -1] = -1
+
+    return daily_returns
+
 
 def run_backtest(model_path: str):
     """Performs a backtest of the trained Scout agent on the test dataset."""
@@ -117,11 +156,8 @@ def run_backtest(model_path: str):
     agent_returns_series = pd.DataFrame(agent_trade_returns).set_index('timestamp')['pnl'].sort_index()
     benchmark_returns_series = pd.DataFrame(benchmark_trade_returns).set_index('timestamp')['pnl'].sort_index()
 
-    # --- FIX for Total Compounded Return ---
-    # Resample to daily returns. The PnL from the environment is already a percentage (e.g., 0.5 for 50%).
-    # We sum these percentages daily to get the daily portfolio return.
-    agent_daily_returns = agent_returns_series.resample('D').sum()
-    benchmark_daily_returns = benchmark_returns_series.resample('D').sum()
+    agent_daily_returns = simulate_portfolio(agent_returns_series, initial_capital=cfg.PORTFOLIO_STARTING_CAPITAL, capital_per_trade=cfg.PORTFOLIO_CAPITAL_PER_TRADE)
+    benchmark_daily_returns = simulate_portfolio(benchmark_returns_series, initial_capital=cfg.PORTFOLIO_STARTING_CAPITAL, capital_per_trade=cfg.PORTFOLIO_CAPITAL_PER_TRADE)
 
     agent_metrics = calculate_performance_metrics(agent_daily_returns, "Agent", agent_returns_series)
     benchmark_metrics = calculate_performance_metrics(benchmark_daily_returns, "Benchmark", benchmark_returns_series)
@@ -142,12 +178,24 @@ def run_backtest(model_path: str):
 
     report_filename = os.path.join(model_base_dir, f"backtest_report_{model_prefix}.html")
     
-    if not agent_daily_returns.empty:
-        agent_daily_returns.index = agent_daily_returns.index.tz_localize(None)
-    if not benchmark_daily_returns.empty:
-        benchmark_daily_returns.index = benchmark_daily_returns.index.tz_localize(None)
+    agent_report_series = agent_daily_returns
+    agent_report_series.name = "RL Agent" # Set the name for the report title
+    if not agent_report_series.empty:
+        agent_report_series.index = agent_report_series.index.tz_localize(None)
+
+    benchmark_report_series = benchmark_daily_returns
+    benchmark_report_series.name = "Benchmark (Buy All)" # Set the name for the report title
+    if not benchmark_report_series.empty:
+        benchmark_report_series.index = benchmark_report_series.index.tz_localize(None)
+    # --- FIX END ---
     
-    qs.reports.html(agent_daily_returns, benchmark=benchmark_daily_returns, output=report_filename, title=f"RL Scout Agent vs. Benchmark")
+    # Conditionally generate the report based on whether benchmark data exists.
+    if not benchmark_report_series.empty:
+        qs.reports.html(agent_report_series, benchmark=benchmark_report_series, output=report_filename, title=f"RL Scout Agent vs. Benchmark")
+    else:
+        logger.warning("Benchmark strategy resulted in no trades. Generating report for Agent only.")
+        qs.reports.html(agent_report_series, benchmark=None, output=report_filename, title=f"RL Scout Agent Performance")
+    
     logger.info(f"✅ Detailed HTML report saved to: {report_filename}")
 
 if __name__ == "__main__":
@@ -158,5 +206,6 @@ if __name__ == "__main__":
     
     import warnings
     warnings.filterwarnings("ignore", category=UserWarning)
+    warnings.filterwarnings("ignore", category=RuntimeWarning)
 
     run_backtest(model_path=args.model_path)
