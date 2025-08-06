@@ -1,12 +1,27 @@
-# FILE: trading_rl_agent/environments/solana_decision_env.py (NEW)
+# trading_rl_agent/environments/solana_decision_env.py
+"""
+Gymnasium environment for the Scout (Decision Gate) agent.
 
+In this environment, the agent is presented with a potential trade opportunity
+(a "decision point"). It must make a single, discrete choice: 'BUY' (1) or
+'IGNORE' (0).
+
+An episode consists of this single decision. If the agent chooses to buy, the
+environment simulates the entire lifecycle of that trade using a predefined,
+fixed stop-loss/take-profit strategy. The reward is the final realized PnL
+of that simulated trade. If the agent ignores, the reward is zero.
+
+The goal is for the agent to learn which token opportunities are likely to be
+profitable under the fixed management strategy, acting as an intelligent filter.
+"""
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 import pandas as pd
 from typing import Dict, Optional
 
-from trading_rl_agent import rl_config as cfg
+# Import from the new centralized config
+from config import rl_config as cfg
 
 class SolanaDecisionEnv(gym.Env):
     """
@@ -22,11 +37,11 @@ class SolanaDecisionEnv(gym.Env):
         # The observation space is a flat vector of token features
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf,
-            shape=(cfg.OBSERVATION_SPACE_DIM,),
+            shape=(cfg.ScoutConfig.OBSERVATION_SPACE_DIM,),
             dtype=np.float32
         )
         # The action space is a discrete choice: 0 for IGNORE, 1 for BUY
-        self.action_space = spaces.Discrete(cfg.ACTION_SPACE_DIM)
+        self.action_space = spaces.Discrete(cfg.ScoutConfig.ACTION_SPACE_DIM)
 
         self._current_decision_idx = 0
         self._token_ohlcv = None
@@ -34,7 +49,7 @@ class SolanaDecisionEnv(gym.Env):
 
     def _get_observation(self) -> np.ndarray:
         """Extracts the features for the current decision point from the dataframe."""
-        obs_series = self.df.iloc[self._current_decision_idx][cfg.OBSERVATION_FEATURES]
+        obs_series = self.df.iloc[self._current_decision_idx][cfg.ScoutConfig.OBSERVATION_FEATURES]
         return obs_series.to_numpy(dtype=np.float32)
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[Dict] = None) -> tuple:
@@ -75,46 +90,43 @@ class SolanaDecisionEnv(gym.Env):
         trade_data = self._token_ohlcv[self._token_ohlcv.index >= decision_timestamp]
 
         if len(trade_data) < 2:
-            return -cfg.INITIAL_CAPITAL # Immediate loss if no data to trade on
+            return -cfg.ScoutConfig.INITIAL_CAPITAL # Immediate loss if no data to trade on
 
         buy_price = trade_data['Close'].iloc[0]
         if buy_price <= 0:
-            return -cfg.INITIAL_CAPITAL
+            return -cfg.ScoutConfig.INITIAL_CAPITAL
 
         # Set SL/TP levels based on config
-        stop_loss_price = buy_price * (1 - cfg.SIM_INITIAL_STOP_LOSS_PERCENT / 100.0)
-        first_tp_price = buy_price * (1 + cfg.SIM_FIRST_SELL_PROFIT_MARGIN / 100.0) # Simplified for now
-        second_tp_price = buy_price * (1 + cfg.SIM_SECOND_TAKE_PROFIT_PERCENT / 100.0)
+        stop_loss_price = buy_price * (1 - cfg.ScoutConfig.SIM_INITIAL_STOP_LOSS_PERCENT / 100.0)
+        first_tp_price = buy_price * (1 + cfg.ScoutConfig.SIM_FIRST_SELL_PROFIT_MARGIN / 100.0)
+        second_tp_price = buy_price * (1 + cfg.ScoutConfig.SIM_SECOND_TAKE_PROFIT_PERCENT / 100.0)
         
         highest_price = buy_price
         first_tp_hit = False
         
         # Iterate through the token's price history from the point of buying
-        for i in range(1, min(len(trade_data), cfg.MAX_STEPS_PER_EPISODE)):
+        for i in range(1, min(len(trade_data), cfg.ScoutConfig.MAX_STEPS_PER_EPISODE)):
             self._simulation_step = i
             current_price = trade_data['Close'].iloc[i]
             highest_price = max(highest_price, current_price)
 
             # Check sell conditions in order of priority
             if current_price <= stop_loss_price:
-                return (current_price - buy_price) / buy_price # Return PnL as percentage
+                return (current_price - buy_price) / buy_price
 
             if current_price >= second_tp_price:
                 return (current_price - buy_price) / buy_price
 
             if not first_tp_hit and current_price >= first_tp_price:
-                # Simulate selling a portion and updating SL to breakeven
                 first_tp_hit = True
                 stop_loss_price = buy_price # Breakeven
-                # For simplicity, we assume the rest is held. A more complex sim could track partial profits.
 
             if first_tp_hit:
-                trailing_sl = highest_price * (1 - cfg.SIM_TRAILING_STOP_LOSS_PERCENT / 100.0)
+                trailing_sl = highest_price * (1 - cfg.ScoutConfig.SIM_TRAILING_STOP_LOSS_PERCENT / 100.0)
                 if current_price <= trailing_sl:
                      return (current_price - buy_price) / buy_price
         
-        # If the episode ends due to max steps (timeout), close the position at the last price
         last_price = trade_data['Close'].iloc[-1]
         pnl = (last_price - buy_price) / buy_price
-        time_penalty = self._simulation_step * cfg.TIME_PENALTY_PER_STEP
+        time_penalty = self._simulation_step * cfg.ScoutConfig.TIME_PENALTY_PER_STEP
         return pnl - time_penalty
