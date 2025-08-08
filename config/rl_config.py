@@ -4,22 +4,31 @@ Centralized configuration for the Hierarchical Reinforcement Learning (HRL) modu
 Contains settings for both the Scout Agent (trade entry) and the Manager Agent (trade management).
 """
 from datetime import datetime, timezone
-from typing import List
+from typing import List, Dict, Any
 
 # ==============================================================================
 # --- General & Data Configuration ---
 # ==============================================================================
-# Defines the time window from which to pull historical data for training/backtesting.
-DATA_WINDOW_START_TS: datetime = datetime(2025, 6, 26, 0, 0, 0, tzinfo=timezone.utc)
-DATA_WINDOW_END_TS: datetime = datetime(2025, 7, 19, 23, 59, 0, tzinfo=timezone.utc)
+# Defines the available time windows for pulling historical data. 
+# The `train_agents.py` script can be run with `--data-window test` or `--data-window full`.
+DATA_WINDOWS: Dict[str, Dict[str, datetime]] = {
+    "test": {
+        "start": datetime(2025, 6, 26, 0, 0, 0, tzinfo=timezone.utc),
+        "end": datetime(2025, 6, 27, 23, 59, 0, tzinfo=timezone.utc),
+    },
+    "full": {
+        "start": datetime(2025, 6, 26, 0, 0, 0, tzinfo=timezone.utc),
+        "end": datetime(2025, 7, 19, 23, 59, 0, tzinfo=timezone.utc),
+    }
+}
+DEFAULT_DATA_WINDOW: str = "full" # The window to use if none is specified.
 
 # Minimum number of trades a token must have within the window to be included.
 MIN_TRADES_FOR_TRAINING: int = 25
 
 # Paths for storing processed data.
 PROCESSED_DATA_DIR: str = "data/rl_processed_data"
-SCOUT_PROCESSED_DATA_PATH: str = f"{PROCESSED_DATA_DIR}/scout_training_decisions.csv"
-MANAGER_PROCESSED_DATA_PATH: str = f"{PROCESSED_DATA_DIR}/manager_trade_lifecycles.pkl"
+# The specific cache paths are now managed by the CacheManager based on the data window.
 
 # ==============================================================================
 # --- Backtest Portfolio Configuration ---
@@ -36,21 +45,20 @@ class ScoutConfig:
     """Settings for the Scout Agent, responsible for making 'BUY' or 'IGNORE' decisions."""
 
     # --- Environment ---
-    # This value is returned as a negative reward if a trade cannot be simulated (e.g., no price data).
-    # A value of 1.0 represents a -100% PnL.
     SIMULATION_FAILURE_PENALTY: float = 1.0
-    MAX_STEPS_PER_EPISODE: int = 720  # Max simulation steps for a single trade lifecycle.
-    DECISION_FREQUENCY: str = '5s'  # Frequency of data points in the OHLCV data.
-    # Defines the moments (in minutes after creation) to generate a decision point for the agent.
+    MAX_STEPS_PER_EPISODE: int = 720
+    DECISION_FREQUENCY: str = '5s'
     DECISION_POINTS_MINUTES: List[int] = [1, 2, 4, 8, 16, 32]
 
     # --- Observation Space ---
     OBSERVATION_FEATURES: list[str] = [
-        'initial_market_cap_sol', 'volume_first_minute_sol', 'volatility_first_minute',
-        'buy_sell_ratio_first_minute', 'time_since_creation_seconds', 'dex_liquidity_usd',
-        'dex_volume_m5', 'dex_price_change_m5', 'dex_buys_m5', 'dex_sells_m5',
-        'rugcheck_score', 'socials_score', 'creator_token_count', 'is_migrated',
-        'rugcheck_score_is_real', 'socials_score_is_real'
+        'initial_market_cap_sol', 
+        'volume_first_minute_sol', 
+        'volatility_first_minute',
+        'time_since_creation_seconds',
+        'rugcheck_score', 
+        'socials_score',
+        'creator_token_count'
     ]
     OBSERVATION_SPACE_DIM: int = len(OBSERVATION_FEATURES)
 
@@ -68,25 +76,52 @@ class ScoutConfig:
     SIM_SECOND_TAKE_PROFIT_PERCENT: float = 500.0
 
     # --- Training Hyperparameters ---
-    TOTAL_TIMESTEPS: int = 1_000_000
-    N_ENVS: int = 24
-    EVAL_FREQ: int = 10000
-    N_EVAL_EPISODES: int = 50
     RL_ALGORITHM: str = "PPO"
     POLICY_NAME: str = "MlpPolicy"
-    PPO_HYPERPARAMS: dict[str, any] = {
-        "n_steps": 2048, 
-        "batch_size": 64, 
-        "n_epochs": 10, 
-        "gamma": 0.995,
-        "gae_lambda": 0.95, 
-        "clip_range": 0.2, 
-        "ent_coef": 0.01, 
-        "vf_coef": 0.5,
-        "learning_rate": 1e-4, 
-        "max_grad_norm": 0.5,
+    N_ENVS: int = 24
+    N_EVAL_EPISODES: int = 50
+
+    # --- MODIFIED: Restructured Hyperparameters ---
+    # Hyperparameters for initial training
+    PPO_HYPERPARAMS: Dict[str, Any] = {
+        "learn_params": {
+            "total_timesteps": 7_000,
+            "eval_freq": 10000,
+        },
+        "model_params": {
+            "n_steps": 4096, 
+            "batch_size": 128, 
+            "n_epochs": 20, 
+            "gamma": 0.99,
+            "gae_lambda": 0.95, 
+            "clip_range": 0.2, 
+            "ent_coef": 0.01, 
+            "vf_coef": 0.5,
+            "learning_rate": 3e-4, 
+            "max_grad_norm": 0.5,
+        }
     }
-    FINE_TUNE_LR: float = 1e-5 # Lower learning rate for fine-tuning.
+
+    # Hyperparameters for fine-tuning an existing model
+    PPO_FINETUNE_HYPERPARAMS: Dict[str, Any] = {
+        "learn_params": {
+            "total_timesteps": 2_000, # Shorter run for fine-tuning
+            "eval_freq": 5000,
+        },
+        "model_params": {
+            "n_steps": 4096, 
+            "batch_size": 128, 
+            "n_epochs": 10, # Fewer epochs
+            "gamma": 0.995,
+            "gae_lambda": 0.95, 
+            "clip_range": 0.2, 
+            "ent_coef": 0.01, 
+            "vf_coef": 0.5,
+            "learning_rate": 1e-5, # Lower learning rate
+            "max_grad_norm": 0.5,
+        }
+    }
+    # --- END MODIFICATION ---
 
     # --- I/O Paths ---
     TENSORBOARD_LOG_DIR: str = "./rl_tensorboard_logs/scout/"
@@ -112,25 +147,52 @@ class ManagerConfig:
     TIME_PENALTY_PER_STEP: float = -0.0001
 
     # --- Training Hyperparameters ---
-    TOTAL_TIMESTEPS: int = 1_000_000
-    N_ENVS: int = ScoutConfig.N_ENVS
-    EVAL_FREQ: int = 8000
-    N_EVAL_EPISODES: int = 100
     RL_ALGORITHM: str = "PPO"
     POLICY_NAME: str = "MlpPolicy"
-    PPO_HYPERPARAMS: dict[str, any] = {
-        "n_steps": 1024, 
-        "batch_size": 64, 
-        "n_epochs": 10, 
-        "gamma": 0.99,
-        "gae_lambda": 0.95, 
-        "clip_range": 0.2, 
-        "ent_coef": 0.005, 
-        "vf_coef": 0.5,
-        "learning_rate": 1e-4, 
-        "max_grad_norm": 0.5,
+    N_ENVS: int = ScoutConfig.N_ENVS
+    N_EVAL_EPISODES: int = 100
+
+    # --- MODIFIED: Restructured Hyperparameters ---
+    # Hyperparameters for initial training
+    PPO_HYPERPARAMS: Dict[str, Any] = {
+        "learn_params": {
+            "total_timesteps": 7_000,
+            "eval_freq": 8000,
+        },
+        "model_params": {
+            "n_steps": 1024, 
+            "batch_size": 64, 
+            "n_epochs": 10, 
+            "gamma": 0.99,
+            "gae_lambda": 0.95, 
+            "clip_range": 0.2, 
+            "ent_coef": 0.005, 
+            "vf_coef": 0.5,
+            "learning_rate": 3e-4, 
+            "max_grad_norm": 0.5,
+        }
     }
-    FINE_TUNE_LR: float = 1e-5
+
+    # Hyperparameters for fine-tuning an existing model
+    PPO_FINETUNE_HYPERPARAMS: Dict[str, Any] = {
+        "learn_params": {
+            "total_timesteps": 2_000, # Shorter run for fine-tuning
+            "eval_freq": 4000,
+        },
+        "model_params": {
+            "n_steps": 1024, 
+            "batch_size": 64, 
+            "n_epochs": 5, # Fewer epochs
+            "gamma": 0.995,
+            "gae_lambda": 0.95, 
+            "clip_range": 0.2, 
+            "ent_coef": 0.005, 
+            "vf_coef": 0.5,
+            "learning_rate": 1e-5, # Lower learning rate
+            "max_grad_norm": 0.5,
+        }
+    }
+    # --- END MODIFICATION ---
 
     # --- I/O Paths ---
     TENSORBOARD_LOG_DIR: str = "./rl_tensorboard_logs/manager/"

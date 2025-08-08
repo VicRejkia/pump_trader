@@ -19,6 +19,7 @@ from gymnasium import spaces
 import numpy as np
 import pandas as pd
 from typing import Dict, Optional
+import os
 
 # Import from the new centralized config
 from config import rl_config as cfg
@@ -29,10 +30,10 @@ class SolanaDecisionEnv(gym.Env):
     for a given token opportunity. An episode simulates the entire lifecycle
     of that single trade.
     """
-    def __init__(self, df: pd.DataFrame, full_token_data: Dict[str, pd.DataFrame]):
+    def __init__(self, df: pd.DataFrame, ohlcv_data_dir: str):
         super().__init__()
         self.df = df # This is the dataframe of decision points
-        self.full_token_data = full_token_data # OHLCV data for all tokens
+        self.ohlcv_data_dir = ohlcv_data_dir # Path to the directory with Parquet files
 
         # The observation space is a flat vector of token features
         self.observation_space = spaces.Box(
@@ -60,7 +61,12 @@ class SolanaDecisionEnv(gym.Env):
         
         # Load the full OHLCV data for the token in this decision
         mint = self.current_decision_info['mint']
-        self._token_ohlcv = self.full_token_data.get(mint)
+        try:
+            token_file_path = os.path.join(self.ohlcv_data_dir, f"{mint}.parquet")
+            self._token_ohlcv = pd.read_parquet(token_file_path)
+        except FileNotFoundError:
+            # Handle cases where the file might not exist, though it should
+            self._token_ohlcv = None
 
         self._simulation_step = 0
         return self._get_observation(), {}

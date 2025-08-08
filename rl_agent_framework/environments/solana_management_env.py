@@ -28,8 +28,10 @@ class SolanaManagementEnv(gym.Env):
     """
     def __init__(self, trade_lifecycles: Dict[str, pd.DataFrame]):
         super().__init__()
+        # This now receives a SUBSET of the data (either train or eval)
         self.trade_lifecycles = trade_lifecycles
         self.trade_ids = list(self.trade_lifecycles.keys()) if self.trade_lifecycles else []
+
 
         self.observation_space = spaces.Box(
             low=np.array([-1.0, 0, 0, -1.0, -1.0], dtype=np.float32),

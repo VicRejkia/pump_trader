@@ -13,6 +13,7 @@ import pandas as pd
 import numpy as np
 import asyncio
 from tqdm import tqdm
+from datetime import datetime
 
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -22,70 +23,20 @@ from config import rl_config as cfg
 from bot_logger import setup_logging, logger
 from database_handler import DatabaseClient
 from rl_tools.cache_utils import CacheManager
+# --- MODIFIED: Import the centralized feature engineering function ---
+from rl_tools.feature_engineering import generate_feature_rich_ohlcv
 
-async def generate_feature_rich_ohlcv(
-    mint: str,
-    mint_trades: pd.DataFrame,
-    rugcheck_df: pd.DataFrame,
-    token_info_df: pd.DataFrame
-) -> pd.DataFrame:
+
+async def prepare_scout_data(start_ts: datetime, end_ts: datetime, db_client: DatabaseClient):
     """
-    Takes raw data for a SINGLE token and processes it into a feature-rich
-    OHLCV format, correctly handling time-aware joins.
+    Main function to run the data preparation pipeline for the Scout agent.
+    It now saves OHLCV data as parquet files inside the cache directory.
     """
-    mint_trades = mint_trades.set_index('timestamp').sort_index()
-
-    # Resample to 5s OHLCV
-    resampler = mint_trades.resample('5s')
-    ohlc = resampler['price_sol'].ohlc()
-    volume = resampler['volume_usd'].sum()
-    market_cap = resampler['market_cap_sol'].last()
-    
-    df = pd.concat([ohlc, volume, market_cap], axis=1)
-    df.columns = ['Open', 'High', 'Low', 'Close', 'Volume', 'marketCapSol']
-    
-    # Using modern assignment to avoid SettingWithCopyWarning
-    df = df.interpolate(method='time')
-    df.loc[:, 'Volume'] = df['Volume'].fillna(0)
-    df.dropna(subset=['Close'], inplace=True)
-
-    # Calculate Volatility
-    log_returns = np.log(df['Close'] / df['Close'].shift(1))
-    df['volatility'] = log_returns.rolling(window=12*5, min_periods=12).std() * np.sqrt(12*5)
-    df['volatility'] = df['volatility'].fillna(0)
-
-    # Time-aware merge for scores
-    mint_rugcheck = rugcheck_df[rugcheck_df['mint'] == mint].set_index('timestamp').sort_index().drop_duplicates()
-    if not mint_rugcheck.empty:
-        df = pd.merge_asof(df, mint_rugcheck[['rugcheck_score']], left_index=True, right_index=True, direction='backward')
-    else:
-        df['rugcheck_score'] = np.nan
-
-    mint_info = token_info_df[token_info_df['mint'] == mint]
-    if not mint_info.empty and 'socials_last_checked' in mint_info.columns and pd.notna(mint_info['socials_last_checked'].iloc[0]):
-        socials_event = pd.DataFrame({'socials_score': [mint_info['socials_score'].iloc[0]]}, index=[mint_info['socials_last_checked'].iloc[0]])
-        df = pd.merge_asof(df, socials_event, left_index=True, right_index=True, direction='backward')
-    else:
-        df['socials_score'] = np.nan
-        
-    if not mint_info.empty and 'token_creation_time' in mint_info.columns:
-        df['token_creation_time'] = mint_info['token_creation_time'].iloc[0]
-    else:
-        df['token_creation_time'] = df.index.min()
-
-    return df
-
-async def prepare_scout_data():
-    """Main function to run the data preparation pipeline for the Scout agent."""
-    setup_logging(logger_name="rl_scout_data_prep")
     logger.info("--- Starting Data Preparation for RL Scout Environment ---")
-    
-    db_client = DatabaseClient()
-    await db_client.connect()
 
     try:
         raw_data = await db_client.get_raw_data_for_rl(
-            cfg.DATA_WINDOW_START_TS, cfg.DATA_WINDOW_END_TS, cfg.MIN_TRADES_FOR_TRAINING
+            start_ts, end_ts, cfg.MIN_TRADES_FOR_TRAINING
         )
         if raw_data is None:
             logger.critical("Failed to fetch raw data. Exiting.")
@@ -93,7 +44,6 @@ async def prepare_scout_data():
 
         trades_df, rugcheck_df, token_info_df, dexscreener_df = raw_data
         
-        # Convert data types for all DFs immediately after loading
         for df in [trades_df, rugcheck_df, token_info_df, dexscreener_df]:
             if not df.empty:
                 for col in df.columns:
@@ -103,22 +53,27 @@ async def prepare_scout_data():
                     if col in numeric_cols:
                         df[col] = pd.to_numeric(df[col], errors='coerce')
 
-        all_feature_rich_data = {}
+        decision_points = []
         mints_to_process = trades_df['mint'].unique()
         
-        # Process tokens one by one to keep memory usage low
-        for mint in tqdm(mints_to_process, desc="Processing Tokens"):
+        # This function returns the path to the directory where OHLCV files will be saved.
+        cache_manager = CacheManager('scout', db_client, start_ts, end_ts)
+        ohlcv_dir = cache_manager.get_ohlcv_dir()
+        os.makedirs(ohlcv_dir, exist_ok=True)
+        
+        for mint in tqdm(mints_to_process, desc="Processing Tokens & Generating Decision Points"):
             mint_trades = trades_df[trades_df['mint'] == mint]
             if mint_trades.empty:
                 continue
-            processed_df = await generate_feature_rich_ohlcv(mint, mint_trades, rugcheck_df, token_info_df)
-            all_feature_rich_data[mint] = processed_df
-
-        decision_points = []
-        for mint, df in tqdm(all_feature_rich_data.items(), desc="Generating Decision Points"):
-            if df.empty or pd.isna(df['token_creation_time'].iloc[0]):
+            
+            # Use the imported feature engineering function
+            df = generate_feature_rich_ohlcv(mint, mint_trades, rugcheck_df, token_info_df)
+            if df.empty or ('token_creation_time' in df.columns and pd.isna(df['token_creation_time'].iloc[0])):
                 continue
-
+            
+            # Save the processed OHLCV dataframe to the cache directory
+            df.to_parquet(os.path.join(ohlcv_dir, f"{mint}.parquet"))
+            
             # Generate Pump.fun launch decision points
             first_trade_ts = df.index.min()
             for minutes in cfg.ScoutConfig.DECISION_POINTS_MINUTES:
@@ -133,70 +88,67 @@ async def prepare_scout_data():
                 past_minute_data = df.loc[ts - pd.Timedelta(minutes=1):ts]
                 
                 features = {
-                    'timestamp': ts, 'mint': mint, 'is_migrated': 0,
-                    'initial_market_cap_sol': df['marketCapSol'].iloc[0],
+                    'timestamp': ts, 'mint': mint,
+                    'initial_market_cap_sol': df['marketCapSol'].iloc[0] if not df.empty else 0,
                     'volume_first_minute_sol': past_minute_data['Volume'].sum(),
                     'volatility_first_minute': past_minute_data['volatility'].mean(),
-                    'buy_sell_ratio_first_minute': 1.0,
                     'time_since_creation_seconds': (ts - df['token_creation_time'].iloc[0]).total_seconds(),
-                    'dex_liquidity_usd': 0, 'dex_volume_m5': 0, 'dex_price_change_m5': 0, 'dex_buys_m5': 0, 'dex_sells_m5': 0,
-                    'rugcheck_score_is_real': 0 if pd.isna(snapshot['rugcheck_score']) else 1,
-                    'socials_score_is_real': 0 if pd.isna(snapshot['socials_score']) else 1,
                     'rugcheck_score': snapshot['rugcheck_score'] if pd.notna(snapshot['rugcheck_score']) else 10000,
                     'socials_score': snapshot['socials_score'] if pd.notna(snapshot['socials_score']) else 100,
-                    'creator_token_count': 1
+                    'creator_token_count': 1 # Placeholder, can be enriched later
                 }
                 decision_points.append(features)
-
-            # Generate DexScreener breakout points
-            mint_dex_data = dexscreener_df[dexscreener_df['mint'] == mint]
-            if not mint_dex_data.empty:
-                high_vol_timestamps = mint_dex_data[mint_dex_data['volume_m5'] > 10000]['timestamp']
-                for ts in high_vol_timestamps:
-                    if ts in df.index:
-                        dex_snapshot = mint_dex_data.set_index('timestamp').asof(ts)
-                        ohlcv_snapshot = df.asof(ts)
-                        features = {
-                            'timestamp': ts, 'mint': mint, 'is_migrated': 1,
-                            'initial_market_cap_sol': 0, 'volume_first_minute_sol': 0, 'volatility_first_minute': 0, 'buy_sell_ratio_first_minute': 0,
-                            'time_since_creation_seconds': (ts - ohlcv_snapshot['token_creation_time']).total_seconds(),
-                            'dex_liquidity_usd': dex_snapshot['liquidity_usd'], 'dex_volume_m5': dex_snapshot['volume_m5'],
-                            'dex_price_change_m5': dex_snapshot['price_change_m5'], 'dex_buys_m5': dex_snapshot['buys_m5'], 'dex_sells_m5': dex_snapshot['sells_m5'],
-                            'rugcheck_score_is_real': 0 if pd.isna(ohlcv_snapshot['rugcheck_score']) else 1,
-                            'socials_score_is_real': 0 if pd.isna(ohlcv_snapshot['socials_score']) else 1,
-                            'rugcheck_score': ohlcv_snapshot['rugcheck_score'] if pd.notna(ohlcv_snapshot['rugcheck_score']) else 10000,
-                            'socials_score': ohlcv_snapshot['socials_score'] if pd.notna(ohlcv_snapshot['socials_score']) else 100,
-                            'creator_token_count': 1
-                        }
-                        decision_points.append(features)
 
         if not decision_points:
             logger.critical("No decision points could be generated.")
             return None, None
         
         decision_df = pd.DataFrame(decision_points)
+        # Ensure observation features are present, fill with 0 if not
+        for feature in cfg.ScoutConfig.OBSERVATION_FEATURES:
+            if feature not in decision_df.columns:
+                decision_df[feature] = 0
+        decision_df.fillna(0, inplace=True)
 
         logger.info(f"--- Scout data preparation complete. Generated {len(decision_df)} decision points. ---")
+        
+        return decision_df, ohlcv_dir
 
-        return decision_df, all_feature_rich_data
+    except Exception as e:
+        logger.error(f"Error during Scout data preparation: {e}", exc_info=True)
+        return None, None
 
-    finally:
-        await db_client.close()
-
-def load_prepared_scout_data():
+def load_prepared_scout_data(start_ts: datetime, end_ts: datetime):
     """
-    Loads the processed decision data and OHLCV files for Scout training
-    from the managed cache.
+    Loads the processed decision dataframe and gets the OHLCV data path from the managed cache.
     """
-    # --- MODIFICATION: Use CacheManager to load data ---
-    cache_manager = CacheManager('scout', db_client=None) # DB client not needed for loading
+    # Instantiate the cache manager for the specific window to get the correct paths
+    cache_manager = CacheManager('scout', db_client=None, start_ts=start_ts, end_ts=end_ts)
     
     if not os.path.exists(cache_manager.manifest_path):
-        logger.error(f"Processed scout data cache not found. Please run the training pipeline first.")
+        logger.error(f"Processed scout data cache not found for window {start_ts.date()} - {end_ts.date()}. Please run the training pipeline first.")
         return None, None
 
     cached_data = cache_manager.load_cache()
-    return cached_data.get('decision_df'), cached_data.get('all_token_data')
+    decision_df = cached_data.get('decision_df')
+    ohlcv_dir = cache_manager.get_ohlcv_dir()
+
+    if decision_df is None:
+        logger.error("Decision dataframe not found in cache.")
+        return None, None
+    if not os.path.isdir(ohlcv_dir):
+        logger.error(f"OHLCV data directory not found at expected path: {ohlcv_dir}")
+        return None, None
+
+    return decision_df, ohlcv_dir
 
 if __name__ == "__main__":
-    asyncio.run(prepare_scout_data())
+    # Example of how to run this script standalone for debugging
+    async def run_standalone():
+        setup_logging(logger_name="rl_scout_data_prep_standalone")
+        db = DatabaseClient()
+        await db.connect()
+        window = cfg.DATA_WINDOWS[cfg.DEFAULT_DATA_WINDOW]
+        await prepare_scout_data(window['start'], window['end'], db)
+        await db.close()
+    asyncio.run(run_standalone())

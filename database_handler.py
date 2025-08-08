@@ -332,14 +332,6 @@ class DatabaseClient:
         async with self.pool.acquire() as conn:
             return await conn.fetch(query, creator)
         
-    async def has_active_buy_order(self, mint: str):
-        query = """
-            SELECT 1 FROM portfolio WHERE mint = $1 AND tx_type = 'buy' AND status = 'active'
-        """
-        async with self.pool.acquire() as conn:
-            result = await conn.fetchval(query, mint)
-            return result is not None
-        
     async def get_total_supply(self, mint: str): #
         """Fetch the total supply of a token (RAW units) from rugcheck table.
            NOTE: For price calculations, use _get_latest_token_info which also gets decimals.
