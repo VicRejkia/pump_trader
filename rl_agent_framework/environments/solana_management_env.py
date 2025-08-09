@@ -49,6 +49,8 @@ class SolanaManagementEnv(gym.Env):
         self._buy_market_cap: float = 0.0
         self._highest_pnl: float = 0.0
         self._time_of_buy: Optional[pd.Timestamp] = None
+        # MODIFIED: Add a variable to track the PnL from the previous step for reward shaping.
+        self._last_pnl: float = 0.0
 
     # --- NEW METHOD FOR DETERMINISTIC BACKTESTING ---
     def force_trade(self, trade_id: str, trade_df: pd.DataFrame):
@@ -93,6 +95,8 @@ class SolanaManagementEnv(gym.Env):
         self._buy_market_cap = initial_state['marketCapSol']
         self._time_of_buy = self._current_trade_data.index[0]
         self._highest_pnl = 0.0
+        # MODIFIED: Reset the last PnL at the start of each new episode.
+        self._last_pnl = 0.0
         
         # Reset forced trade ID after using it once
         self._current_trade_id = None
@@ -108,18 +112,42 @@ class SolanaManagementEnv(gym.Env):
             # Should not happen in normal operation, but as a safeguard
             return np.zeros(self.observation_space.shape, dtype=np.float32), 0.0, True, False, {}
 
+        # --- MODIFIED: REWARD SHAPING LOGIC ---
+
+        # 1. Get current state information
         current_price = self._current_trade_data.iloc[self._current_step]['Close']
         current_pnl = (current_price - self._buy_price) / self._buy_price if self._buy_price > 0 else 0.0
 
+        # 2. Determine reward and next state based on action
         if action == 1:  # SELL_NOW
             terminated = True
-            reward = current_pnl
+            reward = current_pnl  # The final, realized PnL is the primary reward.
+        
         else:  # HOLD
-            reward = cfg.ManagerConfig.TIME_PENALTY_PER_STEP # Use configured time penalty
+            # Calculate the change in PnL since the last step
+            pnl_improvement = current_pnl - self._last_pnl
+
+            # Apply reward shaping based on the trade's current status
+            if current_pnl > 0:
+                # If the trade is profitable, reward the agent for increases in profit
+                reward = pnl_improvement
+            else:
+                # If the trade is losing, penalize the agent proportionally to the loss
+                # This encourages cutting losses sooner rather than later.
+                # NOTE: It's good practice to make this factor a configurable parameter.
+                reward = current_pnl * cfg.ManagerConfig.LOSING_TRADE_HOLD_PENALTY_FACTOR
+
+            # Update state for the next step
+            self._last_pnl = current_pnl
             self._current_step += 1
+
+            # Check if the episode is truncated (ran out of data)
             if self._current_step >= len(self._current_trade_data):
                 truncated = True
-                # Final reward is the PnL at the last available data point if truncated
+                # At the very end, the final reward is the PnL at that last moment
                 reward = current_pnl
 
-        return self._get_observation(), reward, terminated, truncated, {}
+        # 3. Get the observation for the *next* state after the action is taken
+        observation = self._get_observation()
+        
+        return observation, reward, terminated, truncated, {}

@@ -115,7 +115,7 @@ class ScoutConfig:
             "gamma": 0.995,
             "gae_lambda": 0.95, 
             "clip_range": 0.2, 
-            "ent_coef": 0.01, 
+            "ent_coef": 0.02, 
             "vf_coef": 0.5,
             "learning_rate": 1e-5, # Lower learning rate
             "max_grad_norm": 0.5,
@@ -144,7 +144,8 @@ class ManagerConfig:
     ACTION_SPACE_DIM: int = 2  # 0 = HOLD, 1 = SELL_NOW
 
     # --- Reward Function ---
-    TIME_PENALTY_PER_STEP: float = -0.0001
+    #TIME_PENALTY_PER_STEP: float = -0.0001
+    LOSING_TRADE_HOLD_PENALTY_FACTOR = 0.1
 
     # --- Training Hyperparameters ---
     RL_ALGORITHM: str = "PPO"
@@ -160,7 +161,7 @@ class ManagerConfig:
             "eval_freq": 8000,
         },
         "model_params": {
-            "n_steps": 1024, 
+            "n_steps": 2048, 
             "batch_size": 64, 
             "n_epochs": 10, 
             "gamma": 0.99,
@@ -186,7 +187,7 @@ class ManagerConfig:
             "gamma": 0.995,
             "gae_lambda": 0.95, 
             "clip_range": 0.2, 
-            "ent_coef": 0.005, 
+            "ent_coef": 0.015, 
             "vf_coef": 0.5,
             "learning_rate": 1e-5, # Lower learning rate
             "max_grad_norm": 0.5,
