@@ -117,14 +117,41 @@ def run_backtest(model_path: str, data_window: str):
     benchmark_report_series = benchmark_daily_returns; benchmark_report_series.name = "Benchmark (Buy All)"
     if not benchmark_report_series.empty and benchmark_report_series.index.tz is not None: benchmark_report_series.index = benchmark_report_series.index.tz_localize(None)
     
-    # --- MODIFIED: Also check for non-zero standard deviation to prevent plotting errors ---
-    if (len(agent_report_series.index) > 1 and agent_report_series.std() > 0 and
-            len(benchmark_report_series.index) > 1 and benchmark_report_series.std() > 0):
-        qs.reports.html(agent_report_series, benchmark=benchmark_report_series, output=report_filename, title=f"RL Scout Agent vs. Benchmark")
-        logger.info(f"✅ Detailed HTML report saved to: {report_filename}")
+    # --- FINAL FIX: Explicitly check for zero variance to provide a better message ---
+    # and use a try/except block as a final safeguard.
+    
+    # Check for the condition that causes both warnings and the final crash.
+    agent_has_variance = len(agent_report_series.index) > 1 and agent_report_series.std() > 0
+    benchmark_has_variance = len(benchmark_report_series.index) > 1 and benchmark_report_series.std() > 0
+
+    if agent_has_variance and benchmark_has_variance:
+        try:
+            # If data looks good, attempt to generate the full report.
+            qs.reports.html(
+                agent_report_series,
+                benchmark=benchmark_report_series,
+                output=report_filename,
+                title=f"RL Scout Agent vs. Benchmark"
+            )
+            logger.info(f"✅ Detailed HTML report saved to: {report_filename}")
+
+        except np.linalg.LinAlgError:
+            # This is a fallback for any other unexpected numerical issue within the library.
+            logger.error(
+                "🔴 Failed to generate HTML report due to a numerical error in the plotting library. "
+                "The script will continue without the report."
+            )
+        except Exception as e:
+            logger.error(f"🔴 An unexpected error occurred during report generation: {e}")
     else:
-        logger.warning("Skipping HTML report generation due to insufficient data or lack of variance in results.")
-    # --- END MODIFICATION ---
+        # If there is no variance, provide a clear, user-friendly message instead of warnings.
+        logger.warning(
+            "⚠️ Portfolio value may have been completely wiped out (-100% return), resulting in zero variance in daily returns."
+        )
+        logger.warning(
+            "   Advanced statistical plots cannot be generated under this condition. Skipping HTML report."
+        )
+    # --- END FINAL FIX ---
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Backtest for Scout RL Trading Agent")

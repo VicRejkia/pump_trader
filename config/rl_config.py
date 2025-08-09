@@ -18,7 +18,7 @@ DATA_WINDOWS: Dict[str, Dict[str, datetime]] = {
     },
     "full": {
         "start": datetime(2025, 6, 26, 0, 0, 0, tzinfo=timezone.utc),
-        "end": datetime(2025, 7, 19, 23, 59, 0, tzinfo=timezone.utc),
+        "end": datetime(2025, 7, 19, 23, 59, 59, tzinfo=timezone.utc),
     }
 }
 DEFAULT_DATA_WINDOW: str = "full" # The window to use if none is specified.
@@ -85,7 +85,7 @@ class ScoutConfig:
     # Hyperparameters for initial training
     PPO_HYPERPARAMS: Dict[str, Any] = {
         "learn_params": {
-            "total_timesteps": 7_000,
+            "total_timesteps": 2_000_000,
             "eval_freq": 10000,
         },
         "model_params": {
@@ -105,7 +105,7 @@ class ScoutConfig:
     # Hyperparameters for fine-tuning an existing model
     PPO_FINETUNE_HYPERPARAMS: Dict[str, Any] = {
         "learn_params": {
-            "total_timesteps": 2_000, # Shorter run for fine-tuning
+            "total_timesteps": 750_000, # Shorter run for fine-tuning
             "eval_freq": 5000,
         },
         "model_params": {
@@ -156,7 +156,7 @@ class ManagerConfig:
     # Hyperparameters for initial training
     PPO_HYPERPARAMS: Dict[str, Any] = {
         "learn_params": {
-            "total_timesteps": 7_000,
+            "total_timesteps": 2_000_000,
             "eval_freq": 8000,
         },
         "model_params": {
@@ -176,7 +176,7 @@ class ManagerConfig:
     # Hyperparameters for fine-tuning an existing model
     PPO_FINETUNE_HYPERPARAMS: Dict[str, Any] = {
         "learn_params": {
-            "total_timesteps": 2_000, # Shorter run for fine-tuning
+            "total_timesteps": 750_000, # Shorter run for fine-tuning
             "eval_freq": 4000,
         },
         "model_params": {
