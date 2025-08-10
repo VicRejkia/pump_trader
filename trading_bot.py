@@ -31,22 +31,6 @@ from telegram_interface import send_telegram_message
 
 from typing import Optional
 
-# --- RL Imports (add these) ---
-# --- RL Agent Integration Imports ---
-try:
-    from stable_baselines3 import PPO
-    from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
-    from rl_agent_framework.agent import TradingAgent
-    from trading_rl_agent import rl_config as agent_config # Use a distinct name
-    RL_AVAILABLE = True
-except ImportError:
-    RL_AVAILABLE = False
-    # Create dummy classes for type hinting if SB3 is not installed
-    class PPO: pass
-    class VecNormalize: pass
-    class TradingAgent: pass
-# --- End RL Imports ---
-
 # Define paths for communication files relative to project root
 # Ensure these paths are consistent with how your Flask app will find them.
 # If flask_app is in 'web_app', and bot is in root, these paths are from root.
@@ -60,9 +44,8 @@ DYNAMIC_CONFIG_FILE = os.path.join(DATA_DIR_BOT, 'dynamic_config.json')
 class TradingBot:
     """Main class for running the trading bot."""
 
-    # Modify __init__ to accept RL agent path
-    def __init__(self, cleanup: bool = False, backup: bool = False, params_file: str = None, rl_agent_path: str = None, no_log_rotate: bool = False):
-        """Initialize the TradingBot with optional cleanup, backup, GA params file, and RL agent path."""
+    def __init__(self, cleanup: bool = False, backup: bool = False, params_file: str = None, no_log_rotate: bool = False):
+        """Initialize the TradingBot with optional cleanup, backup, GA params file."""
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         self.state = GlobalState.get_instance() # Bot's instance of GlobalState
@@ -70,9 +53,6 @@ class TradingBot:
         self.backup = backup
         self.no_log_rotate = no_log_rotate # Store the flag
         self.params_file = params_file
-        self.rl_agent_path = rl_agent_path
-        self.rl_agent_instance: Optional[TradingAgent] = None # <-- RENAMED for clarity
-        self.active_rl_parameters: Dict[str, Any] = {} # To store parameters set by RL agent
         self.db_client = None
         self.ws_handler = None
         self.tasks = []
@@ -83,7 +63,6 @@ class TradingBot:
         self._last_dynamic_config_mtime = 0
         self.bot_start_time = datetime.now(timezone.utc) # For uptime calculation
         self.dexscreener_fetcher = None
-        self._price_history_cache = {} # Cache for recent prices for RL observation
 
         # Ensure data directory exists
         os.makedirs(DATA_DIR_BOT, exist_ok=True)
@@ -343,18 +322,9 @@ class TradingBot:
                     "FIRST_SELL_PERCENT": self.config.get("FIRST_SELL_PERCENT"),
                     "TRAILING_STOP_LOSS_PERCENT": self.config.get("TRAILING_STOP_LOSS_PERCENT"),
                     "DEFAULT_VOLUME_THRESHOLD": self.config.get("DEFAULT_VOLUME_THRESHOLD"),
-                    "DEFAULT_MARKETCAP_THRESHOLD": self.config.get("DEFAULT_MARKETCAP_THRESHOLD"),
-                    "RL_AGENT_ACTIVE": bool(self.rl_agent) # Indicate if RL agent is loaded
+                    "DEFAULT_MARKETCAP_THRESHOLD": self.config.get("DEFAULT_MARKETCAP_THRESHOLD")
                 })
                 
-                rl_status_info = "Not Loaded"
-                if self.rl_agent:
-                    # Placeholder: In a real scenario, you might get more detailed status from the agent
-                    # For example, if your RLAgentManager has a get_status method:
-                    # rl_status_info = self.rl_agent_manager.get_status() # if you have such a manager
-                    rl_status_info = "Loaded & Active"
-
-
                 status_data = {
                     "bot_process_status": current_process_status,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -368,7 +338,6 @@ class TradingBot:
                     "socialscheck_queue_size": self.state.get_socialscheck_queue().qsize(),
                     "asyncio_tasks_count": len(active_async_tasks), # Tasks in bot's loop
                     "config_summary": config_summary,
-                    "rl_agent_status": rl_status_info,
                     # Add other fields as needed:
                     # "last_buy_check_ts": self.trading_manager.last_buy_check_ts.isoformat() if self.trading_manager and hasattr(self.trading_manager, 'last_buy_check_ts') else None,
                     # "last_sell_check_ts": self.trading_manager.last_sell_check_ts.isoformat() if self.trading_manager and hasattr(self.trading_manager, 'last_sell_check_ts') else None,
@@ -404,7 +373,6 @@ class TradingBot:
                     sol_price = f"[bold green]${sol_price_usd:.4f}[/bold green]" if sol_price_usd and sol_price_usd > 0 else "[bold red]N/A[/red]"
                     uptime = str(timedelta(seconds=int((datetime.now(timezone.utc) - self.bot_start_time).total_seconds())))
                     open_trades_count_str = f"[yellow]{len(await self.db_client.get_active_buy_positions())}[/yellow]" if self.db_client and self.db_client.pool else "[dim white]N/A[/dim white]"
-                    rl_status_str = "[green]Loaded & Active[/green]" if self.rl_agent else "[dim white]Not Loaded[/dim white]"
 
                     # --- Build WebSocket Status Section ---
                     ws_status_lines = []
@@ -479,7 +447,7 @@ class TradingBot:
                         f"[bold cyan]│[/bold cyan] :moneybag: [bold]SOL Balance:[/bold] {sol_amount:.4f}",
                         f"[bold cyan]│[/bold cyan] :timer_clock:  [bold]Uptime:[/bold]  {uptime}",
                         f"[bold cyan]│[/bold cyan] :heavy_dollar_sign: [bold]Actual SOL Price:[/bold] {sol_price}",
-                        f"[bold cyan]│[/bold cyan] :brain: [bold]RL Agent:[/bold] {rl_status_str}",
+                        
                         f"[bold cyan]│[/bold cyan] :bar_chart: [bold]Open Trades:[/bold] {open_trades_count_str}",
                         f"[bold cyan]│[/bold cyan] :recycle: [bold]RugCheck Queue:[/bold] [blue]{rug_queue_size}[/blue]",
                         f"[bold cyan]│[/bold cyan] :speech_balloon: [bold]Socials Queue:[/bold] [blue]{socials_queue_size}[/blue]",
@@ -642,103 +610,6 @@ class TradingBot:
         # Force exit if some non-daemon threads/tasks are stuck (use with caution)
         # os._exit(0)
 
-    # --- RL Agent Integration Functions ---
-    async def _get_live_observation(self) -> Optional[Dict[str, np.ndarray]]:
-        """
-        Gathers LIVE data and formats it into the aggregate observation vector
-        expected by the RL agent. This mirrors the logic from the simulation
-        environment but uses live data from the database.
-        """
-        if not self.db_client or not self.state:
-            return None
-        
-        log_debug("Constructing live observation for RL agent...")
-        try:
-            # Initialize observation structures based on rl_config
-            token_data_shape = (
-                agent_config.MAX_TOKENS_IN_UNIVERSE,
-                agent_config.TOKEN_HISTORY_LENGTH,
-                agent_config.NUM_TOKEN_FEATURES
-            )
-            token_obs_array = np.zeros(token_data_shape, dtype=np.float32)
-            global_features = np.zeros(agent_config.NUM_GLOBAL_FEATURES, dtype=np.float32)
-
-            # --- Fetch and populate data ---
-            # This part requires creating new DB methods or adapting existing ones
-            # to fetch the necessary data efficiently. For now, we use placeholders
-            # to illustrate the structure. A full implementation would require
-            # creating functions like `db_client.get_recent_ohlcv_for_all_active()`
-            # and `db_client.get_current_portfolio_stats()`.
-
-            # Placeholder: In a real implementation, you would query the DB for the
-            # recent history of all tokens you consider part of the agent's universe.
-            # token_histories = await self.db_client.get_recent_ohlcv_for_universe(...)
-            # for idx, history in enumerate(token_histories):
-            #     token_obs_array[idx] = history
-
-            # --- Populate Global Features ---
-            sol_balance = await self.state.get_current_sol_balance()
-            portfolio_stats = await self.db_client.get_portfolio_stats() # Assumes this method exists
-            
-            norm_factor = agent_config.INITIAL_CAPITAL * 2
-            global_features[0] = sol_balance / norm_factor
-            global_features[1] = portfolio_stats.get('total_value', 0) / norm_factor
-            global_features[2] = portfolio_stats.get('unrealized_pnl', 0)
-            global_features[3] = portfolio_stats.get('num_positions', 0)
-            
-            return {
-                "token_data": token_obs_array,
-                "global_data": global_features
-            }
-
-        except Exception as e:
-            log_error(f"Error constructing live RL observation: {e}", exc_info=True)
-            return None
-
-    async def run_rl_agent_updates(self):
-        """
-        Periodically queries the RL agent for new target allocations and updates
-        the bot's strategy. This runs as a separate, non-blocking task.
-        """
-        if not self.rl_agent_instance:
-            log_info("RL agent not loaded, skipping RL update task.")
-            return
-
-        log_info("🧠 Starting RL agent parameter update task...")
-        while not self.state.shutdown_event.is_set():
-            try:
-                start_time = asyncio.get_event_loop().time()
-                
-                # 1. [Async] Gather live state from the database.
-                observation = await self._get_live_observation()
-
-                if observation is not None:
-                    # 2. [Sync in Thread] Get the agent's decision without blocking.
-                    log_debug("Offloading RL prediction to worker thread...")
-                    action = await asyncio.to_thread(self.rl_agent_instance.predict, observation)
-                    
-                    if action is not None:
-                        # 3. [Async] Apply the decision.
-                        # The action is the vector of target weights. This would be passed
-                        # to a new method in TradingManager responsible for rebalancing.
-                        log_info(f"🧠 RL Agent proposed new target weights: {np.round(action, 3)}")
-                        
-                        if self.trading_manager:
-                            # This method needs to be created in TradingManager
-                            await self.trading_manager.rebalance_to_target_weights(action)
-
-                # Wait for the next decision interval.
-                wait_time = max(0, agent_config.AGENT_ACTION_INTERVAL_SECONDS - (asyncio.get_event_loop().time() - start_time))
-                await self.state.wait_or_interrupt(timeout=wait_time)
-
-            except Exception as e:
-                log_error(f"Error in RL agent update loop: {e}", exc_info=True)
-                await self.state.wait_or_interrupt(timeout=60) # Wait longer on error
-                
-        log_info("🧠 RL agent update task stopped.")
-
-    # --- End RL Agent Integration Functions ---
-
     async def main(self):
         self._write_status({"bot_process_status": "STARTING", "timestamp": datetime.now(timezone.utc).isoformat()})
         is_main_thread = threading.current_thread() is threading.main_thread()
@@ -755,46 +626,6 @@ class TradingBot:
         
         
         setup_logging() # Setup logging regardless
-
-        # --- Load GA Parameters (if provided and RL not active) ---
-        if self.params_file and not self.rl_agent_path:
-            log_info(f":dna: Attempting to load GA optimized parameters from: {self.params_file}")
-            if os.path.exists(self.params_file):
-                try:
-                    with open(self.params_file, 'r') as f:
-                        optimized_data = json.load(f)
-                    optimized_params = optimized_data.get('best_solution_parameters')
-                    if optimized_params:
-                        log_info(f":white_check_mark: Found {len(optimized_params)} GA optimized parameters.")
-                        for key, value in optimized_params.items():
-                            key_upper = key.upper() # Ensure uppercase for consistency
-                            if key_upper in self.config:
-                                original_type = type(self.config[key_upper])
-                                try: # Attempt type conversion
-                                    self.config[key_upper] = original_type(value)
-                                except (ValueError, TypeError):
-                                    log_warning(f"Could not convert GA param '{key_upper}' value '{value}' to type {original_type}. Using as is.")
-                                    self.config[key_upper] = value
-                            else:
-                                log_warning(f"GA Param '{key_upper}' not found in base config. Adding anyway.")
-                                self.config[key_upper] = value
-                        log_info(":sparkles: Merged GA optimized parameters into active configuration.")
-                    else:
-                        log_warning(f":warning: 'best_solution_parameters' not found in {self.params_file}.")
-                except Exception as e:
-                    log_error(f":x: Error loading GA parameters file {self.params_file}: {e}. Using base/default config.", exc_info=True)
-            else:
-                 log_warning(f":warning: GA Parameter file not found: {self.params_file}. Using base/default config.")
-
-        # --- Load RL Agent and VecNormalize (if provided) ---
-        if self.rl_agent_path:
-            if not RL_AVAILABLE:
-                log_error("RL Agent path specified, but Stable Baselines3 is not installed!")
-            else:
-                # The agent loading is synchronous, so it's fine here during setup.
-                self.rl_agent_instance = TradingAgent(model_path=self.rl_agent_path)
-                if not self.rl_agent_instance.model:
-                    self.rl_agent_instance = None # Invalidate if loading failed
 
         # --- Initialize DYNAMIC_CONFIG_FILE ---
         try:
@@ -882,9 +713,6 @@ class TradingBot:
             asyncio.create_task(self.ws_handler.connect_and_run(), name="websocket_services_manager")
         ]
         
-        # ADDED: Conditionally start the RL agent update task
-        if self.rl_agent:
-            self.tasks.append(asyncio.create_task(self.run_rl_agent_updates(), name="rl_agent_updater"))
         
         log_info(":rocket: [bold green]Trading bot core components started.[/bold green]")
         try:
@@ -966,7 +794,6 @@ if __name__ == "__main__":
     parser.add_argument("--cleanup", action="store_true", help="Clean up database before starting the bot. Deletes data permanently!")
     parser.add_argument("--backup", action="store_true", help="Backup database before starting the bot.")
     parser.add_argument("--params-file", type=str, default=None, help="Path to JSON file containing optimized parameters from GA.")
-    parser.add_argument("--rl-agent-path", type=str, default=None, help="Path to the trained RL agent model file (e.g., .zip for SB3). Overrides --params-file.")
     parser.add_argument("--no-log-rotate", action="store_true", help="Disable log rotation on startup (used when run by a controller).")
     args = parser.parse_args()
 
@@ -986,7 +813,6 @@ if __name__ == "__main__":
             cleanup=args.cleanup,
             backup=args.backup,
             params_file=args.params_file,
-            rl_agent_path=args.rl_agent_path,
             no_log_rotate=args.no_log_rotate # Pass the flag
         )
         try:

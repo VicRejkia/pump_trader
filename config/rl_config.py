@@ -181,7 +181,7 @@ class ManagerConfig:
             "eval_freq": 4000,
         },
         "model_params": {
-            "n_steps": 1024, 
+            "n_steps": 2048, 
             "batch_size": 64, 
             "n_epochs": 5, # Fewer epochs
             "gamma": 0.995,
