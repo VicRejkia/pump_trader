@@ -19,7 +19,7 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # Import from the new centralized config
-from config import rl_config as cfg
+from config import rl_config_old as cfg
 from bot_logger import setup_logging, logger
 from database_handler import DatabaseClient
 from rl_tools.cache_utils import CacheManager

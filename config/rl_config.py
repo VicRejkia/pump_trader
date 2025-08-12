@@ -1,200 +1,92 @@
-# configuration/rl_config.py
+# config/rl_config.py
 """
-Centralized configuration for the Hierarchical Reinforcement Learning (HRL) module.
-Contains settings for both the Scout Agent (trade entry) and the Manager Agent (trade management).
+Dedicated configuration constants and settings for the Reinforcement Learning Agent.
+This file centralizes all parameters related to the environment, training, rewards,
+and hardware setup for the RL module.
 """
-from datetime import datetime, timezone
-from typing import List, Dict, Any
+import torch as th
+from datetime import datetime
 
-# ==============================================================================
-# --- General & Data Configuration ---
-# ==============================================================================
-# Defines the available time windows for pulling historical data. 
-# The `train_agents.py` script can be run with `--data-window test` or `--data-window full`.
-DATA_WINDOWS: Dict[str, Dict[str, datetime]] = {
-    "test": {
-        "start": datetime(2025, 6, 26, 0, 0, 0, tzinfo=timezone.utc),
-        "end": datetime(2025, 6, 27, 23, 59, 0, tzinfo=timezone.utc),
-    },
-    "full": {
-        "start": datetime(2025, 6, 26, 0, 0, 0, tzinfo=timezone.utc),
-        "end": datetime(2025, 7, 19, 23, 59, 59, tzinfo=timezone.utc),
-    }
-}
-DEFAULT_DATA_WINDOW: str = "full" # The window to use if none is specified.
+# --- General RL Agent Configuration ---
+USE_RL_AGENT = False  # MASTER SWITCH: Set to True to enable the RL agent for live/paper trading.
 
-# Minimum number of trades a token must have within the window to be included.
-MIN_TRADES_FOR_TRAINING: int = 25
+# --- Hardware & Performance Configuration ---
+# Set the computation device. Options: "cuda" for GPU, "cpu" for CPU.
+# The script will automatically fall back to "cpu" if cuda is not available.
+DEVICE = "cuda"
 
-# Paths for storing processed data.
-PROCESSED_DATA_DIR: str = "data/rl_processed_data"
-# The specific cache paths are now managed by the CacheManager based on the data window.
+# Number of parallel environments (CPU cores) to use for training.
+# Set to 1 to disable multiprocessing (easier for debugging).
+# Using more cores (e.g., 4, 8) can significantly speed up training.
+N_CPU = 4
 
-# ==============================================================================
-# --- Backtest Portfolio Configuration ---
-# ==============================================================================
-# These settings exclusively control the backtester's portfolio simulation.
-PORTFOLIO_STARTING_CAPITAL: float = 1000.0 # The total starting bankroll for a backtest.
-PORTFOLIO_CAPITAL_PER_TRADE: float = 50.0  # The fixed dollar amount allocated to each trade.
+# --- Model & Data Paths ---
+RL_MODELS_DIR = "data/rl_models"  # Directory to save trained models and reports.
+RL_LOGS_DIR = "data/rl_logs"      # Directory for TensorBoard log files.
+BEST_MODEL_PATH = "data/rl_models/best_model.zip"  # Path to the model used for live inference.
 
+# --- Environment Configuration ---
+# Initial SOL balance for training/evaluation environments.
+ENV_INITIAL_BALANCE = 100.0
 
-# ==============================================================================
-# --- Scout Agent (Decision Gate) Configuration ---
-# ==============================================================================
-class ScoutConfig:
-    """Settings for the Scout Agent, responsible for making 'BUY' or 'IGNORE' decisions."""
+# Max number of different tokens the agent can hold a position in simultaneously.
+ENV_MAX_CONCURRENT_POSITIONS = 5
 
-    # --- Environment ---
-    SIMULATION_FAILURE_PENALTY: float = 1.0
-    MAX_STEPS_PER_EPISODE: int = 720
-    DECISION_FREQUENCY: str = '5s'
-    DECISION_POINTS_MINUTES: List[int] = [1, 2, 4, 8, 16, 32]
+# Number of top tokens (by volume) the agent should observe at each step.
+ENV_NUM_TOP_TOKENS_TO_OBSERVE = 5
 
-    # --- Observation Space ---
-    OBSERVATION_FEATURES: list[str] = [
-        'initial_market_cap_sol', 
-        'volume_first_minute_sol', 
-        'volatility_first_minute',
-        'time_since_creation_seconds',
-        'rugcheck_score', 
-        'socials_score',
-        'creator_token_count'
-    ]
-    OBSERVATION_SPACE_DIM: int = len(OBSERVATION_FEATURES)
+# Action thresholds for buy/sell signals. Action values are in [-1, 1].
+ENV_ACTION_BUY_THRESHOLD = 0.2
+ENV_ACTION_SELL_THRESHOLD = -0.2
 
-    # --- Action Space ---
-    ACTION_SPACE_DIM: int = 2  # 0 = IGNORE, 1 = BUY
+# Percentage of available balance to use for a new buy position. 0.95 means 95%.
+ENV_CAPITAL_PER_BUY_PERCENT = 0.95
 
-    # --- Reward Function ---
-    TIME_PENALTY_PER_STEP: float = 0.0001
-
-    # --- Simulation Logic (for reward calculation) ---
-    SIM_INITIAL_STOP_LOSS_PERCENT: float = 50.0
-    SIM_FIRST_SELL_PERCENT: float = 25.0
-    SIM_FIRST_SELL_PROFIT_MARGIN: float = 100.0
-    SIM_TRAILING_STOP_LOSS_PERCENT: float = 50.0
-    SIM_SECOND_TAKE_PROFIT_PERCENT: float = 500.0
-
-    # --- Training Hyperparameters ---
-    RL_ALGORITHM: str = "PPO"
-    POLICY_NAME: str = "MlpPolicy"
-    N_ENVS: int = 24
-    N_EVAL_EPISODES: int = 50
-
-    # --- MODIFIED: Restructured Hyperparameters ---
-    # Hyperparameters for initial training
-    PPO_HYPERPARAMS: Dict[str, Any] = {
-        "learn_params": {
-            "total_timesteps": 2_000_000,
-            "eval_freq": 10000,
-        },
-        "model_params": {
-            "n_steps": 4096, 
-            "batch_size": 128, 
-            "n_epochs": 20, 
-            "gamma": 0.99,
-            "gae_lambda": 0.95, 
-            "clip_range": 0.2, 
-            "ent_coef": 0.01, 
-            "vf_coef": 0.5,
-            "learning_rate": 3e-4, 
-            "max_grad_norm": 0.5,
-        }
-    }
-
-    # Hyperparameters for fine-tuning an existing model
-    PPO_FINETUNE_HYPERPARAMS: Dict[str, Any] = {
-        "learn_params": {
-            "total_timesteps": 750_000, # Shorter run for fine-tuning
-            "eval_freq": 5000,
-        },
-        "model_params": {
-            "n_steps": 4096, 
-            "batch_size": 128, 
-            "n_epochs": 10, # Fewer epochs
-            "gamma": 0.995,
-            "gae_lambda": 0.95, 
-            "clip_range": 0.2, 
-            "ent_coef": 0.02, 
-            "vf_coef": 0.5,
-            "learning_rate": 1e-5, # Lower learning rate
-            "max_grad_norm": 0.5,
-        }
-    }
-    # --- END MODIFICATION ---
-
-    # --- I/O Paths ---
-    TENSORBOARD_LOG_DIR: str = "./rl_tensorboard_logs/scout/"
-    MODEL_SAVE_DIR: str = "./rl_models/scout/"
+# Normalization constant for the `time_in_position` feature (in seconds).
+# Default: 4 hours = 4 * 3600 = 14400 seconds.
+ENV_TIME_IN_POSITION_NORM_SECONDS = 14400.0
 
 
-# ==============================================================================
-# --- Manager Agent (Trade Management) Configuration ---
-# ==============================================================================
-class ManagerConfig:
-    """Settings for the Manager Agent, responsible for deciding when to 'HOLD' or 'SELL' an open position."""
+# --- Training & Evaluation Configuration ---
+# -- Date Ranges --
+# IMPORTANT: Use non-overlapping periods for training and evaluation!
+TRAINING_START_DATE = "2025-06-26T00:00:00Z"
+TRAINING_END_DATE = "2025-06-27T00:00:00Z"
+EVAL_START_DATE = "2025-06-28T00:00:00Z"
+EVAL_END_DATE = "2025-06-29T00:00:00Z"
 
-    # --- Environment ---
-    MANAGER_DATA_EXTENSION_MINUTES: int = 180
+# Minimum number of trades a token must have in the date range to be included.
+MIN_TRADE_COUNT_FOR_TRAINING = 100
 
-    # --- Observation Space ---
-    OBSERVATION_SPACE_DIM: int = 5
+# -- Optuna Hyperparameter Optimization --
+OPTUNA_N_TRIALS = 100  # Number of hyperparameter combinations to test.
+OPTUNA_TIMEOUT_SECONDS = 3600 * 4  # Max duration for the entire study (e.g., 4 hours).
+OPTUNA_PRUNER_N_WARMUP_STEPS = 5 # Number of reports before pruning can happen.
+OPTUNA_PRUNER_N_MIN_TRIALS = 5  # Minimum number of trials before pruning is activated.
 
-    # --- Action Space ---
-    ACTION_SPACE_DIM: int = 2  # 0 = HOLD, 1 = SELL_NOW
+# -- PPO Algorithm Timesteps --
+# Training steps for each Optuna trial.
+PPO_TIMESTEPS_PER_TRIAL = 100_000
+# Training steps for retraining the final model with the best hyperparameters.
+PPO_FINAL_MODEL_TIMESTEPS = 500_000
 
-    # --- Reward Function ---
-    #TIME_PENALTY_PER_STEP: float = -0.0001
-    LOSING_TRADE_HOLD_PENALTY_FACTOR = 0.1
+# Frequency for evaluating the model and checking for pruning.
+# Should be a multiple of the PPO `n_steps` hyperparameter.
+PPO_EVAL_FREQ = 2048
 
-    # --- Training Hyperparameters ---
-    RL_ALGORITHM: str = "PPO"
-    POLICY_NAME: str = "MlpPolicy"
-    N_ENVS: int = ScoutConfig.N_ENVS
-    N_EVAL_EPISODES: int = 100
 
-    # --- MODIFIED: Restructured Hyperparameters ---
-    # Hyperparameters for initial training
-    PPO_HYPERPARAMS: Dict[str, Any] = {
-        "learn_params": {
-            "total_timesteps": 2_000_000,
-            "eval_freq": 8000,
-        },
-        "model_params": {
-            "n_steps": 2048, 
-            "batch_size": 64, 
-            "n_epochs": 10, 
-            "gamma": 0.99,
-            "gae_lambda": 0.95, 
-            "clip_range": 0.2, 
-            "ent_coef": 0.005, 
-            "vf_coef": 0.5,
-            "learning_rate": 3e-4, 
-            "max_grad_norm": 0.5,
-        }
-    }
+# --- Reward Function Configuration ---
+# Primary weight for the dense reward signal (change in portfolio value).
+REWARD_DENSE_WEIGHT = 1.0
 
-    # Hyperparameters for fine-tuning an existing model
-    PPO_FINETUNE_HYPERPARAMS: Dict[str, Any] = {
-        "learn_params": {
-            "total_timesteps": 750_000, # Shorter run for fine-tuning
-            "eval_freq": 4000,
-        },
-        "model_params": {
-            "n_steps": 2048, 
-            "batch_size": 64, 
-            "n_epochs": 5, # Fewer epochs
-            "gamma": 0.995,
-            "gae_lambda": 0.95, 
-            "clip_range": 0.2, 
-            "ent_coef": 0.015, 
-            "vf_coef": 0.5,
-            "learning_rate": 1e-5, # Lower learning rate
-            "max_grad_norm": 0.5,
-        }
-    }
-    # --- END MODIFICATION ---
+# Primary weight for the sparse reward signal (rewards on completed trades).
+REWARD_SPARSE_WEIGHT = 0.2
 
-    # --- I/O Paths ---
-    TENSORBOARD_LOG_DIR: str = "./rl_tensorboard_logs/manager/"
-    MODEL_SAVE_DIR: str = "./rl_models/manager/"
+# Component weights for the sparse reward (should ideally sum to 1.0).
+REWARD_PNL_WEIGHT = 0.5
+REWARD_RISK_WEIGHT = 0.2
+REWARD_POSITION_MANAGEMENT_WEIGHT = 0.2
+REWARD_EXECUTION_WEIGHT = 0.1
+
+# The expected max PnL for a single trade, used for scaling the reward.
+MAX_EXPECTED_PNL_PER_TRADE_SOL = 1.0

@@ -7,7 +7,7 @@ import pandas as pd
 import quantstats as qs
 import numpy as np
 
-from config import rl_config as cfg
+from config import rl_config_old as cfg
 
 def calculate_performance_metrics(daily_returns: pd.Series, title: str, all_trades: pd.Series) -> dict:
     """Calculates key performance metrics for a series of daily trade returns."""

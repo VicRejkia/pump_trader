@@ -30,7 +30,7 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from bot_logger import setup_logging, logger
-from config import rl_config as cfg
+from config import rl_config_old as cfg
 from rl_tools.cache_utils import CacheManager
 from database_handler import DatabaseClient
 # --- MODIFIED: Import window-aware functions ---

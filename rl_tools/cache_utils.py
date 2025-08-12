@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 from bot_logger import logger
 from database_handler import DatabaseClient
-from config import rl_config as cfg
+from config import rl_config_old as cfg
 
 class CacheManager:
     """

@@ -15,7 +15,7 @@ from stable_baselines3.common.callbacks import EvalCallback
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from config import rl_config as cfg
+from config import rl_config_old as cfg
 from rl_agent_framework.environments.solana_scout_env import SolanaDecisionEnv
 from rl_tools.scout_data_preparation import load_prepared_scout_data
 from bot_logger import setup_logging, logger

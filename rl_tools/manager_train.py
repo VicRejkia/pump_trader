@@ -16,7 +16,7 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from bot_logger import setup_logging, logger
-from config import rl_config as cfg
+from config import rl_config_old as cfg
 from rl_agent_framework.environments.solana_management_env import SolanaManagementEnv
 from rl_tools.manager_data_preparation import load_prepared_manager_data
 

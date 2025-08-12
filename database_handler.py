@@ -2181,11 +2181,11 @@ class DatabaseClient:
 
             # --- THIS IS THE FIX ---
             # Query v_trades for Pump.fun data, not the unified view.
-            # We also calculate volume_usd directly here.
+            # We also calculate volume_usd directly here AND FETCH TX_TYPE.
             trade_query = """
                 SELECT 
                     t.mint, t.timestamp, t.price AS price_sol, t.marketCapSol AS market_cap_sol,
-                    (t.sol_amount * t.sol_price_usd) AS volume_usd
+                    (t.sol_amount * t.sol_price_usd) AS volume_usd, t.tx_type, sol_price_usd AS sol_price_usd
                 FROM v_trades t
                 WHERE t.mint = ANY($1::text[]);
             """

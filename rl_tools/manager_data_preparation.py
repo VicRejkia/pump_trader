@@ -16,7 +16,7 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from bot_logger import setup_logging, logger
-from config import rl_config as cfg
+from config import rl_config_old as cfg
 # --- MODIFIED: Import the window-aware loading function ---
 from rl_tools.scout_data_preparation import load_prepared_scout_data
 from rl_tools.cache_utils import CacheManager

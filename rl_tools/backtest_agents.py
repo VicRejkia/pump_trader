@@ -25,7 +25,7 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from bot_logger import setup_logging, logger
-from config import rl_config as cfg
+from config import rl_config_old as cfg
 from rl_tools.scout_backtest import run_backtest as run_scout_backtest
 from rl_tools.manager_backtest import run_backtest as run_manager_backtest
 

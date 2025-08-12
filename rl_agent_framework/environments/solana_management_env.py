@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 from typing import Dict, Optional
 
-from config import rl_config as cfg
+from config import rl_config_old as cfg
 
 class SolanaManagementEnv(gym.Env):
     """

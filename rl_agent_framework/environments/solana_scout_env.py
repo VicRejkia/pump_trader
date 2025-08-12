@@ -22,7 +22,7 @@ from typing import Dict, Optional
 import os
 
 # Import from the new centralized config
-from config import rl_config as cfg
+from config import rl_config_old as cfg
 
 class SolanaDecisionEnv(gym.Env):
     """
