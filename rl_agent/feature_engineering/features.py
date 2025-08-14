@@ -122,8 +122,9 @@ def _calculate_pump_features(group: pd.DataFrame) -> pd.DataFrame:
     minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0), index=group.index)
     
     # Smooth TR and DM over 15s window (convert time window to number of periods)
-    freq = pd.infer_freq(group.index) or '1S'  # Default to 1-second if frequency inference fails
-    periods_15s = int(window_15s / pd.Timedelta(freq))
+    # freq = pd.infer_freq(group.index) or '1S'  # Default to 1-second if frequency inference fails
+    # periods_15s = int(window_15s / pd.Timedelta(freq))
+    periods_15s = 3
     
     tr_smooth = tr.rolling(window=periods_15s, min_periods=1).mean()
     plus_di = 100 * plus_dm.rolling(window=periods_15s, min_periods=1).mean() / (tr_smooth + epsilon)
@@ -174,6 +175,13 @@ async def calculate_all_features(
     for col in ['price_sol', 'market_cap_sol', 'volume_usd', 'sol_price_usd']:
         if not trades_df.empty and col in trades_df.columns:
             trades_df[col] = pd.to_numeric(trades_df[col], errors='coerce')
+        
+    # Keep only rows where price_sol is > 0 and not NaN
+    if not trades_df.empty and 'price_sol' in trades_df.columns:
+        initial_len = len(trades_df)
+        trades_df = trades_df[trades_df['price_sol'] > 0]  # Excludes 0, negatives, and NaN (NaN > 0 → False)
+        cleaned_len = len(trades_df)
+        logger.info(f"Removed {initial_len - cleaned_len} trades with invalid price_sol (≤0 or NaN)")
 
     trades_df.dropna(subset=['timestamp', 'price_sol', 'volume_usd', 'mint'], inplace=True)
 
@@ -217,7 +225,8 @@ async def calculate_all_features(
         mint_df[['volume_usd', 'buy_volume_usd', 'sell_volume_usd']] = mint_df[['volume_usd', 'buy_volume_usd', 'sell_volume_usd']].fillna(0)
         mint_df.dropna(subset=['Close'], inplace=True)
 
-        if mint_df.empty:
+        # Skip to the next token if the DataFrame is empty or has too few rows for feature calculation.
+        if mint_df.empty or len(mint_df) < 20:
             continue
             
         # --- 4. Calculate Time-Based Features ---

@@ -18,12 +18,26 @@ DEVICE = "cuda"
 # Number of parallel environments (CPU cores) to use for training.
 # Set to 1 to disable multiprocessing (easier for debugging).
 # Using more cores (e.g., 4, 8) can significantly speed up training.
-N_CPU = 4
+N_CPU = 1
 
 # --- Model & Data Paths ---
 RL_MODELS_DIR = "data/rl_models"  # Directory to save trained models and reports.
 RL_LOGS_DIR = "data/rl_logs"      # Directory for TensorBoard log files.
 BEST_MODEL_PATH = "data/rl_models/best_model.zip"  # Path to the model used for live inference.
+
+# --- NEW: Caching and Data Splitting Configuration ---
+# Defines the storage method for pre-processed data.
+# Options:
+#   - "pickle": Saves all token data into a single, large .pkl file. Simple but can be memory intensive.
+#   - "parquet": Saves each token's data as a separate, compressed .parquet file. More scalable.
+CACHE_STRATEGY = "parquet" # <<< SWITCH BETWEEN 'pickle' AND 'parquet' HERE
+
+# Defines the ratio for splitting the data into training and evaluation sets.
+# The list should sum to 1.0. Example: [0.8, 0.2] means 80% for training, 20% for evaluation.
+# A random seed ensures the split is the same every time the cache is generated.
+DATA_SPLIT_RATIO = [0.8, 0.2]
+DATA_SPLIT_RANDOM_SEED = 42 # Use a fixed seed for reproducibility
+
 
 # --- Environment Configuration ---
 # Initial SOL balance for training/evaluation environments.
@@ -47,16 +61,14 @@ ENV_CAPITAL_PER_BUY_PERCENT = 0.95
 ENV_TIME_IN_POSITION_NORM_SECONDS = 14400.0
 
 
-# --- Training & Evaluation Configuration ---
-# -- Date Ranges --
-# IMPORTANT: Use non-overlapping periods for training and evaluation!
-TRAINING_START_DATE = "2025-06-26T00:00:00Z"
-TRAINING_END_DATE = "2025-06-27T00:00:00Z"
-EVAL_START_DATE = "2025-06-28T00:00:00Z"
-EVAL_END_DATE = "2025-06-29T00:00:00Z"
+# --- Training Data Configuration ---
+# A single date range for fetching the entire raw dataset. This will then be
+# split into training and evaluation sets based on the DATA_SPLIT_RATIO.
+DATA_START_DATE = "2025-06-26T00:00:00Z"
+DATA_END_DATE = "2025-06-30T00:00:00Z"
 
 # Minimum number of trades a token must have in the date range to be included.
-MIN_TRADE_COUNT_FOR_TRAINING = 100
+MIN_TRADE_COUNT_FOR_DATASET = 100
 
 # -- Optuna Hyperparameter Optimization --
 OPTUNA_N_TRIALS = 100  # Number of hyperparameter combinations to test.
@@ -66,9 +78,9 @@ OPTUNA_PRUNER_N_MIN_TRIALS = 5  # Minimum number of trials before pruning is act
 
 # -- PPO Algorithm Timesteps --
 # Training steps for each Optuna trial.
-PPO_TIMESTEPS_PER_TRIAL = 100_000
+PPO_TIMESTEPS_PER_TRIAL = 500_000
 # Training steps for retraining the final model with the best hyperparameters.
-PPO_FINAL_MODEL_TIMESTEPS = 500_000
+PPO_FINAL_MODEL_TIMESTEPS = 1_500_000
 
 # Frequency for evaluating the model and checking for pruning.
 # Should be a multiple of the PPO `n_steps` hyperparameter.
