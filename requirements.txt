@@ -12,20 +12,12 @@ pandas
 pygad
 nest_asyncio
 
-# RL Libraries
-# stable-baselines3[extra]>=2.0.0a5  # Use a specific version or range if needed
-# gymnasium>=0.28.1                  # Core environment standard
-# tensorboard                        # For monitoring training progress
-# # Ensure compatible torch/tensorflow is installed depending on SB3 backend
-# pip install torch torchvision torchaudio
-# or
-# pip install tensorflow
-
 # Machine Learning & RL
-torch
-stable-baselines3[extra]
-gymnasium
-quantstats
+torch>=2.6.0
+stable-baselines3[extra]>=2.6.0
+gymnasium>)1.1.1
+quantstats>=0.0.69
+optuna>=4.4.0
 
 # PostgreSQL Integration
 asyncpg
@@ -33,7 +25,7 @@ psycopg2-binary
 
 # Data & Utilities
 numpy
-pandas
+pandas>=2.2.3
 scikit-learn
 pyyaml
 tqdm

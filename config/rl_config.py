@@ -3,6 +3,22 @@
 Dedicated configuration constants and settings for the Reinforcement Learning Agent.
 This file centralizes all parameters related to the environment, training, rewards,
 and hardware setup for the RL module.
+
+Optimal Hardware Settings
+
+Task                         | device Setting | N_CPU Setting | Rationale
+-----------------------------|----------------|---------------|----------------------------------------------------------------------------------------
+tune                         | "cuda"         | 1             | During tuning, you're running many sequential trials. The bottleneck is training each small model,
+                                                                which is best done on the GPU. Since each trial uses only one environment,
+                                                                setting N_CPU higher than 1 provides no speed benefit and just adds overhead.
+
+train & fine-tune            | "cuda"         | 8 to 16       | For the main training runs, the goal is to feed the GPU as much data as possible.
+                                                                Setting N_CPU to a high value (e.g., the number of cores you have available) runs many environments
+                                                                in parallel. This ensures the GPU is never waiting for the CPU to finish a simulation, dramatically
+                                                                peeding up the entire process.
+
+In short: always use the GPU ("cuda") if you have one. Only increase N_CPU for the final, long train and fine-tune runs.
+
 """
 import torch as th
 from datetime import datetime
@@ -18,7 +34,7 @@ DEVICE = "cuda"
 # Number of parallel environments (CPU cores) to use for training.
 # Set to 1 to disable multiprocessing (easier for debugging).
 # Using more cores (e.g., 4, 8) can significantly speed up training.
-N_CPU = 1
+N_CPU = 16
 
 # --- Model & Data Paths ---
 RL_MODELS_DIR = "data/rl_models"  # Directory to save trained models and reports.
@@ -71,16 +87,16 @@ DATA_END_DATE = "2025-06-30T00:00:00Z"
 MIN_TRADE_COUNT_FOR_DATASET = 100
 
 # -- Optuna Hyperparameter Optimization --
-OPTUNA_N_TRIALS = 100  # Number of hyperparameter combinations to test.
+OPTUNA_N_TRIALS = 15  # Number of hyperparameter combinations to test.
 OPTUNA_TIMEOUT_SECONDS = 3600 * 4  # Max duration for the entire study (e.g., 4 hours).
 OPTUNA_PRUNER_N_WARMUP_STEPS = 5 # Number of reports before pruning can happen.
 OPTUNA_PRUNER_N_MIN_TRIALS = 5  # Minimum number of trials before pruning is activated.
 
 # -- PPO Algorithm Timesteps --
 # Training steps for each Optuna trial.
-PPO_TIMESTEPS_PER_TRIAL = 500_000
+PPO_TIMESTEPS_PER_TRIAL = 10_000
 # Training steps for retraining the final model with the best hyperparameters.
-PPO_FINAL_MODEL_TIMESTEPS = 1_500_000
+PPO_FINAL_MODEL_TIMESTEPS = 500_000
 
 # Frequency for evaluating the model and checking for pruning.
 # Should be a multiple of the PPO `n_steps` hyperparameter.

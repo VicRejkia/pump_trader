@@ -33,11 +33,12 @@ WARMUP_STEPS = 200 # Approx. 17 mins of 5s ticks to let indicators build up
 class MemeCoinEnv(gym.Env):
     metadata = {'render.modes': ['human']}
 
-    def __init__(self, data_manager: DataManager, rl_config: Dict[str, Any]):
+    def __init__(self, data_manager: DataManager, rl_config: Dict[str, Any], silent: bool = False):
         super().__init__()
         self.data_manager = data_manager
         self.rl_config = rl_config
         self.reward_function = RewardFunction(self.rl_config)
+        self.silent = silent # MODIFIED: Use the passed argument
         
         # --- Load parameters from the config dictionary ---
         self.initial_balance = self.rl_config.get('ENV_INITIAL_BALANCE', 100.0)
@@ -95,13 +96,15 @@ class MemeCoinEnv(gym.Env):
 
     def _log_episode_end(self, reason: str):
         """Helper to log a summary when an episode finishes."""
-        final_pnl = self.portfolio_value - self.initial_balance
-        final_pnl_pct = (final_pnl / self.initial_balance) * 100
-        logger.info(f"--- Episode End: {reason} ---")
-        logger.info(f"Duration: {self._steps} steps ({self.current_timestamp})")
-        logger.info(f"Final Portfolio: {self.portfolio_value:.2f} SOL (PnL: {final_pnl:.2f} SOL, {final_pnl_pct:.2f}%)")
-        logger.info(f"Trades: {self.episode_buys} Buys, {self.episode_sells} Sells")
-        logger.info("-" * (25 + len(reason)))
+        # MODIFICATION: Only log if not in silent mode
+        if not self.silent:
+            final_pnl = self.portfolio_value - self.initial_balance
+            final_pnl_pct = (final_pnl / self.initial_balance) * 100
+            logger.info(f"--- Episode End: {reason} ---")
+            logger.info(f"Duration: {self._steps} steps ({self.current_timestamp})")
+            logger.info(f"Final Portfolio: {self.portfolio_value:.2f} SOL (PnL: {final_pnl:.2f} SOL, {final_pnl_pct:.2f}%)")
+            logger.info(f"Trades: {self.episode_buys} Buys, {self.episode_sells} Sells")
+            logger.info("-" * (25 + len(reason)))
 
 
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
@@ -224,7 +227,10 @@ class MemeCoinEnv(gym.Env):
                 self.balance += sell_value_sol
                 del self.positions[mint]
                 self.episode_sells += 1
-                logger.debug(f"SELL: {mint[:6]} at price {current_price:.6f}. PnL: {pnl:.4f} SOL. Balance: {self.balance:.2f} SOL.")
+                # MODIFICATION: Only log if not in silent mode
+                if not self.silent:
+                    logger.debug(f"SELL: {mint[:6]} at price {current_price:.6f}. PnL: {pnl:.4f} SOL. Balance: {self.balance:.2f} SOL.")
+
 
     def _execute_buys(self, action: np.ndarray, observed_tokens: List[pd.Series]):
         buy_threshold = self.rl_config.get('ENV_ACTION_BUY_THRESHOLD', 0.2)
@@ -247,7 +253,9 @@ class MemeCoinEnv(gym.Env):
                         'timestamp': self.current_timestamp
                     }
                     self.episode_buys += 1
-                    logger.debug(f"BUY: {mint[:6]} for {capital_per_buy:.4f} SOL at price {current_price:.6f}. Balance: {self.balance:.2f} SOL.")
+                    # MODIFICATION: Only log if not in silent mode
+                    if not self.silent:
+                        logger.debug(f"BUY: {mint[:6]} for {capital_per_buy:.4f} SOL at price {current_price:.6f}. Balance: {self.balance:.2f} SOL.")
 
     def _update_portfolio(self):
         held_value = 0
