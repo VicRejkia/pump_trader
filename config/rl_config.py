@@ -29,12 +29,12 @@ USE_RL_AGENT = False  # MASTER SWITCH: Set to True to enable the RL agent for li
 # --- Hardware & Performance Configuration ---
 # Set the computation device. Options: "cuda" for GPU, "cpu" for CPU.
 # The script will automatically fall back to "cpu" if cuda is not available.
-DEVICE = "cuda"
+DEVICE = "cpu"
 
 # Number of parallel environments (CPU cores) to use for training.
 # Set to 1 to disable multiprocessing (easier for debugging).
 # Using more cores (e.g., 4, 8) can significantly speed up training.
-N_CPU = 16
+N_CPU = 6
 
 # --- Model & Data Paths ---
 RL_MODELS_DIR = "data/rl_models"  # Directory to save trained models and reports.
@@ -81,22 +81,22 @@ ENV_TIME_IN_POSITION_NORM_SECONDS = 14400.0
 # A single date range for fetching the entire raw dataset. This will then be
 # split into training and evaluation sets based on the DATA_SPLIT_RATIO.
 DATA_START_DATE = "2025-06-26T00:00:00Z"
-DATA_END_DATE = "2025-06-30T00:00:00Z"
+DATA_END_DATE = "2025-07-20T00:00:00Z"
 
 # Minimum number of trades a token must have in the date range to be included.
 MIN_TRADE_COUNT_FOR_DATASET = 100
 
 # -- Optuna Hyperparameter Optimization --
-OPTUNA_N_TRIALS = 15  # Number of hyperparameter combinations to test.
+OPTUNA_N_TRIALS = 50  # Number of hyperparameter combinations to test.
 OPTUNA_TIMEOUT_SECONDS = 3600 * 4  # Max duration for the entire study (e.g., 4 hours).
 OPTUNA_PRUNER_N_WARMUP_STEPS = 5 # Number of reports before pruning can happen.
 OPTUNA_PRUNER_N_MIN_TRIALS = 5  # Minimum number of trials before pruning is activated.
 
 # -- PPO Algorithm Timesteps --
 # Training steps for each Optuna trial.
-PPO_TIMESTEPS_PER_TRIAL = 10_000
+PPO_TIMESTEPS_PER_TRIAL = 50_000
 # Training steps for retraining the final model with the best hyperparameters.
-PPO_FINAL_MODEL_TIMESTEPS = 500_000
+PPO_FINAL_MODEL_TIMESTEPS = 1_500_000
 
 # Frequency for evaluating the model and checking for pruning.
 # Should be a multiple of the PPO `n_steps` hyperparameter.

@@ -87,13 +87,17 @@ if project_root not in sys.path:
 import numpy as np
 import optuna
 import torch as th
-from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback, CallbackList
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecNormalize
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3 import PPO
 from optuna.samplers import TPESampler
+from stable_baselines3.common.logger import configure
+
+import nest_asyncio
+nest_asyncio.apply()
 
 import config.rl_config as rl_cfg
 import config.config as main_cfg
@@ -142,38 +146,35 @@ def sample_ppo_params(trial: optuna.trial.Trial, n_envs: int) -> Dict[str, Any]:
 
 
 def objective(trial: optuna.trial.Trial, rl_config: Dict, cache_manager: CacheManager, train_mints: List[str], eval_mints: List[str]) -> float:
-    train_env, eval_env = None, None
-    try:
-        SAMPLE_SIZE = 50
-        train_mints_subset = random.sample(train_mints, min(len(train_mints), SAMPLE_SIZE))
-        eval_mints_subset = random.sample(eval_mints, min(len(eval_mints), 10))
+    """
+    Objective function for Optuna. It lazy-loads a random subset of data
+    for each trial to keep memory usage low.
+    """
+    # --- Suppress the "PPO on GPU with MlpPolicy" warning just for tuning ---
+    import warnings
+    warnings.filterwarnings(
+        "ignore",
+        category=UserWarning,
+        message=".*You are trying to run PPO on the GPU.*"
+    )
 
+    train_env, eval_env = None, None
+
+    try:
+        # 1. Select a small, random subset of tokens for this trial
+        SAMPLE_SIZE = 50
+        EVAL_SAMPLE_SIZE = 10
+        train_mints_subset = random.sample(train_mints, min(len(train_mints), SAMPLE_SIZE))
+        eval_mints_subset = random.sample(eval_mints, min(len(eval_mints), EVAL_SAMPLE_SIZE))
+
+        # 2. Prepare the training environment
         train_data_manager = DataManager(db_client=None, cache_manager=cache_manager)
         asyncio.run(train_data_manager.load_and_prepare_data(mints_to_load=train_mints_subset, verbose=False))
-        
-        eval_data_manager = DataManager(db_client=None, cache_manager=cache_manager)
-        
-        temp_loader = DataManager(db_client=None, cache_manager=cache_manager)
-        cached_sets = temp_loader.cache_manager.load_from_cache(verbose=False)
-        
-        if 'evaluation_set' in cached_sets and cached_sets['evaluation_set']:
-            valid_eval_mints = [m for m in eval_mints_subset if m in cached_sets['evaluation_set']]
-            if not valid_eval_mints:
-                # If no valid eval mints, just use a small subset of training data for the eval step
-                # to prevent a crash, although the reward will not be representative.
-                valid_eval_mints = train_mints_subset[:max(1, len(train_mints_subset)//10)]
-                eval_data_manager.training_data = pd.concat([cached_sets['training_set'][m] for m in valid_eval_mints]).sort_index()
-            else:
-                 eval_data_manager.training_data = pd.concat([cached_sets['evaluation_set'][m] for m in valid_eval_mints]).sort_index()
-        else:
-            raise KeyError("'evaluation_set' is empty or not found in the cached data.")
         
         train_env = DummyVecEnv([lambda: Monitor(MemeCoinEnv(train_data_manager, rl_config, silent=True))])
         train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
 
-        eval_env = DummyVecEnv([lambda: Monitor(MemeCoinEnv(eval_data_manager, rl_config, silent=True))])
-        eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False, training=False, clip_obs=10.0)
-        
+        # 3. Define and train the model
         device = rl_config['DEVICE'] if th.cuda.is_available() else 'cpu'
         hyperparams = sample_ppo_params(trial, n_envs=1)
         
@@ -182,6 +183,29 @@ def objective(trial: optuna.trial.Trial, rl_config: Dict, cache_manager: CacheMa
 
         model = PPO("MlpPolicy", train_env, device=device, verbose=0, **hyperparams)
         model.learn(total_timesteps=rl_config['PPO_TIMESTEPS_PER_TRIAL'])
+        
+        # 4. Save normalization stats from training *before* setting up the evaluation env
+        train_env.save("temp_vec_normalize.pkl")
+        
+        # 5. Prepare the evaluation environment
+        eval_data_manager = DataManager(db_client=None, cache_manager=cache_manager)
+        cached_sets = cache_manager.load_from_cache(verbose=False)
+        evaluation_set_data = cached_sets.get('evaluation_set', {})
+        
+        valid_eval_dfs = [evaluation_set_data[m] for m in eval_mints_subset if m in evaluation_set_data]
+        
+        if not valid_eval_dfs:
+            raise optuna.exceptions.TrialPruned("No valid evaluation data found for the selected subset of tokens.")
+
+        eval_data_manager.training_data = pd.concat(valid_eval_dfs).sort_index()
+
+        eval_env = DummyVecEnv([lambda: Monitor(MemeCoinEnv(eval_data_manager, rl_config, silent=True))])
+        # Now we can safely load the normalization stats
+        eval_env = VecNormalize.load("temp_vec_normalize.pkl", eval_env)
+        eval_env.training = False
+        eval_env.norm_reward = False
+        
+        # 6. Evaluate the trained model
         mean_reward, _ = evaluate_policy(model, eval_env, n_eval_episodes=5, deterministic=True)
         
         if not np.isfinite(mean_reward):
@@ -195,8 +219,11 @@ def objective(trial: optuna.trial.Trial, rl_config: Dict, cache_manager: CacheMa
         logger.error(f"Error in trial #{trial.number}: {e}", exc_info=True)
         raise optuna.exceptions.TrialPruned(f"Unhandled exception: {e}")
     finally:
+        # 7. Cleanup
         if train_env: train_env.close()
         if eval_env: eval_env.close()
+        if os.path.exists("temp_vec_normalize.pkl"):
+            os.remove("temp_vec_normalize.pkl")
 
 
 async def run_hyperparameter_tuning(rl_config: Dict[str, Any]):
@@ -309,7 +336,7 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
         if not mints:
             logger.error("Could not retrieve training token mints from cache. Aborting.")
             return
-        train_mints, _ = mints
+        train_mints, eval_mints = mints
         logger.info(f"Found {len(train_mints)} tokens for training.")
 
         n_cpu = rl_config['N_CPU']
@@ -326,6 +353,13 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
         vec_env_cls = SubprocVecEnv if n_cpu > 1 else DummyVecEnv
         env_fns = [make_env_lazy(i, rl_config, mint_chunks) for i in range(n_cpu)]
         vec_env = vec_env_cls(env_fns)
+
+        # --- NEW: Setup Evaluation Environment ---
+        logger.info(f"Found {len(eval_mints)} tokens for evaluation.")
+        eval_mint_chunks_np = np.array_split(eval_mints, 1) # Use 1 process for eval
+        eval_mint_chunks = [chunk.tolist() for chunk in eval_mint_chunks_np if chunk.size > 0]
+        # Use DummyVecEnv for the single evaluation process
+        eval_env = DummyVecEnv([make_env_lazy(0, rl_config, eval_mint_chunks)])
 
         device = rl_config['DEVICE'] if th.cuda.is_available() else 'cpu'
         reset_num_timesteps = True
@@ -360,11 +394,23 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
         final_model_name = f"{timestamp}_{action_name}_{model_name}_{timesteps_str}.zip"
         final_model_path = os.path.join(rl_config['RL_MODELS_DIR'], final_model_name)
         
+        # --- MODIFIED: Setup and Combine Callbacks ---
         checkpoint_callback = CheckpointCallback(
             save_freq=max(rl_config['PPO_EVAL_FREQ'] // n_cpu, 1),
             save_path=log_dir,
             name_prefix="checkpoint"
         )
+        
+        eval_callback = EvalCallback(
+            eval_env,
+            best_model_save_path=log_dir,
+            log_path=log_dir,
+            eval_freq=max(rl_config['PPO_EVAL_FREQ'] // n_cpu, 1),
+            deterministic=True,
+            render=False
+        )
+        
+        callback_list = CallbackList([checkpoint_callback, eval_callback])
         
         logger.info(f"🚀 Starting model training for {timesteps} timesteps...")
         logger.info(f"TensorBoard logs will be saved in: {log_dir}")
@@ -373,9 +419,10 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
         logger.info(f"--> tensorboard --logdir={rl_config['RL_LOGS_DIR']}")
         
         try:
+            # --- MODIFIED: Use the combined callback list ---
             model.learn(
                 total_timesteps=timesteps,
-                callback=checkpoint_callback,
+                callback=callback_list,
                 reset_num_timesteps=reset_num_timesteps
             )
         except KeyboardInterrupt:
@@ -383,7 +430,9 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
         finally:
             model.save(final_model_path)
             logger.info(f"✅ Training finished. Model saved to {final_model_path}")
+            logger.info(f"🏆 Best performing model saved to {log_dir}/best_model.zip")
             vec_env.close()
+            eval_env.close()
 
     finally:
         if db_client: await db_client.close()

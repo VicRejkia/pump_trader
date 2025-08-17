@@ -66,6 +66,7 @@ class DataManager:
             self._is_preloaded = False
 
         self._current_dataset_iterator = None
+        self._columns = None # NEW: Add instance attribute for columns
 
     # --- NEW METHOD ---
     def get_split_token_mints(self, verbose: bool = True) -> Optional[Tuple[List[str], List[str]]]:
@@ -174,8 +175,20 @@ class DataManager:
         if mints_to_load:
             if verbose:
                 logger.info(f"Lazy loading data for {len(mints_to_load)} specific mints.")
+            
+            # --- FIX START ---
+            # Search for the provided mints in both the training and evaluation sets
+            # loaded from the cache to ensure the correct data is found.
+            dataframes_to_concat = []
+            if train_tokens_dict:
+                dataframes_to_concat.extend([train_tokens_dict[m] for m in mints_to_load if m in train_tokens_dict])
+            if eval_tokens_dict:
+                dataframes_to_concat.extend([eval_tokens_dict[m] for m in mints_to_load if m in eval_tokens_dict])
+
             # We assume we are loading a subset for a single dataset (e.g., training)
-            self.training_data = pd.concat([train_tokens_dict[m] for m in mints_to_load if m in train_tokens_dict]).sort_index()
+            self.training_data = pd.concat(dataframes_to_concat).sort_index()
+            # --- FIX END ---
+
             # For evaluation, you might do the same with an eval_mints list
             self.evaluation_data = None # Or load a subset of eval tokens if needed
             if verbose:
@@ -195,14 +208,18 @@ class DataManager:
         return True
 
     def use_training_data(self):
+        """Sets the iterator to the training dataset using memory-efficient itertuples."""
         if self.training_data is not None:
-            self._current_dataset_iterator = self.training_data.iterrows()
+            self._current_dataset_iterator = self.training_data.itertuples()
+            self._columns = self.training_data.columns
         else:
             self._current_dataset_iterator = iter([])
 
     def use_evaluation_data(self):
+        """Sets the iterator to the evaluation dataset using memory-efficient itertuples."""
         if self.evaluation_data is not None:
-            self._current_dataset_iterator = self.evaluation_data.iterrows()
+            self._current_dataset_iterator = self.evaluation_data.itertuples()
+            self._columns = self.evaluation_data.columns
         else:
             self._current_dataset_iterator = iter([])
 
@@ -211,8 +228,19 @@ class DataManager:
         return self
 
     def __next__(self) -> Optional[Tuple[pd.Timestamp, pd.Series]]:
+        """
+        Gets the next data point, converting itertuples output to the required format.
+        """
+        if self._current_dataset_iterator is None:
+            return None
         try:
-            return next(self._current_dataset_iterator)
+            # row_tuple from itertuples() is (Index, col1, col2, ...)
+            row_tuple = next(self._current_dataset_iterator)
+
+            # Reconstruct the (timestamp, Series) format expected by the environment
+            timestamp = row_tuple[0]
+            data = pd.Series(row_tuple[1:], index=self._columns, name=timestamp)
+            return timestamp, data
         except StopIteration:
             return None
 
