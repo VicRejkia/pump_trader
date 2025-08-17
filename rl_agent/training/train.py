@@ -94,6 +94,8 @@ from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecNorm
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3 import PPO
 from optuna.samplers import TPESampler
+
+# Import the 'configure' utility to create new logger instances
 from stable_baselines3.common.logger import configure
 
 import nest_asyncio
@@ -379,7 +381,12 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
         elif action_name in ['continue', 'finetune']:
             logger.info(f"Loading model from {args.model_path} to '{action_name}' training.")
             model = PPO.load(args.model_path, env=vec_env, device=device)
-            model.set_logger(type(model.logger)(log_dir, model.logger.output_formats))
+            # --- FIX START ---
+            # Create a new logger instance for the new training session.
+            # Do not try to access model.logger as it does not exist after loading.
+            new_logger = configure(log_dir, ["tensorboard"])
+            model.set_logger(new_logger)
+            # --- FIX END ---
             reset_num_timesteps = False
             if action_name == 'finetune' and hasattr(args, 'learning_rate') and args.learning_rate:
                 new_lr = args.learning_rate
