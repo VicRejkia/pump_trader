@@ -14,16 +14,19 @@ if project_root not in sys.path:
 from bot_logger import logger
 from rl_agent.data.data_manager import DataManager
 from rl_agent.rewards.reward_function import RewardFunction
+from config.rl_config import get_active_features
 
-FEATURE_COLUMNS = [
-    'volume_usd', 'buy_volume_usd', 'sell_volume_usd', 'market_cap_sol', 'tx_buy_count', 
-    'tx_sell_count', 'sol_price_avg', 'price_change_15s', 'price_change_30s', 
-    'volume_change_15s', 'volatility_15s', 'buy_sell_ratio', 'buy_sell_ratio_15s', 
-    'short_term_rsi', 'tx_buy_count_15s', 'tx_sell_count_15s', 'tx_total_count_15s', 
-    'macd', 'macd_signal', 'macd_histogram', 'bollinger_upper', 'bollinger_lower', 
-    'bollinger_width', 'ema_short', 'ema_long', 'adx_15s', 'obv', 
-    'rugcheck_score', 'socials_score', 'token_age_seconds'
-]
+# FEATURE_COLUMNS = [
+#     'volume_usd', 'buy_volume_usd', 'sell_volume_usd', 'market_cap_sol', 'tx_buy_count', 
+#     'tx_sell_count', 'sol_price_avg', 'price_change_15s', 'price_change_30s', 
+#     'volume_change_15s', 'volatility_15s', 'buy_sell_ratio', 'buy_sell_ratio_15s', 
+#     'short_term_rsi', 'tx_buy_count_15s', 'tx_sell_count_15s', 'tx_total_count_15s', 
+#     'macd', 'macd_signal', 'macd_histogram', 'bollinger_upper', 'bollinger_lower', 
+#     'bollinger_width', 'ema_short', 'ema_long', 'adx_15s', 'obv', 
+#     'rugcheck_score', 'socials_score', 'token_age_seconds'
+# ]
+
+FEATURE_COLUMNS = get_active_features()
 
 # --- NEW: Stability constants ---
 EPS = 1e-9  # Epsilon for safe division

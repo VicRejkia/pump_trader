@@ -74,7 +74,7 @@ ENV_CAPITAL_PER_BUY_PERCENT = 0.95
 
 # Normalization constant for the `time_in_position` feature (in seconds).
 # Default: 4 hours = 4 * 3600 = 14400 seconds.
-ENV_TIME_IN_POSITION_NORM_SECONDS = 14400.0
+ENV_TIME_IN_POSITION_NORM_SECONDS = 14400.0 * 2
 
 
 # --- Training Data Configuration ---
@@ -88,7 +88,7 @@ MIN_TRADE_COUNT_FOR_DATASET = 100
 
 # -- Optuna Hyperparameter Optimization --
 OPTUNA_N_TRIALS = 50  # Number of hyperparameter combinations to test.
-OPTUNA_TIMEOUT_SECONDS = 3600 * 4  # Max duration for the entire study (e.g., 4 hours).
+OPTUNA_TIMEOUT_SECONDS = ENV_TIME_IN_POSITION_NORM_SECONDS #3600 * 4  # Max duration for the entire study (e.g., 4 hours).
 OPTUNA_PRUNER_N_WARMUP_STEPS = 5 # Number of reports before pruning can happen.
 OPTUNA_PRUNER_N_MIN_TRIALS = 5  # Minimum number of trials before pruning is activated.
 
@@ -118,3 +118,53 @@ REWARD_EXECUTION_WEIGHT = 0.1
 
 # The expected max PnL for a single trade, used for scaling the reward.
 MAX_EXPECTED_PNL_PER_TRADE_SOL = 1.0
+
+# --- NEW: Centralized Feature Management ---
+# This dictionary is the single source of truth for all features.
+# Set a feature to True to include it in training and observation, or False to exclude it.
+FEATURES_CONFIG = {
+    # --- Volume & Transaction Features ---
+    'volume_usd': True,
+    'buy_volume_usd': True,
+    'sell_volume_usd': True,
+    'volume_change_15s': True,
+    'obv': True,
+    'tx_buy_count': True,
+    'tx_sell_count': True,
+    'tx_buy_count_15s': True,
+    'tx_sell_count_15s': True,
+    'tx_total_count_15s': True, #False,  # Was harmful, disabled by default
+
+    # --- Price & Momentum Features ---
+    'price_change_15s': True,
+    'price_change_30s': True, #False, # Was slightly harmful
+    'volatility_15s': True,
+    'buy_sell_ratio': True,
+    'buy_sell_ratio_15s': True, #False, # Was very harmful, disabled by default
+    'short_term_rsi': True, #False,     # Was harmful, disabled by default
+    'adx_15s': True, #False,            # Was harmful, disabled by default
+    
+    # --- Classic Technical Indicators ---
+    'macd': True, #False
+    'macd_signal': True, #False
+    'macd_histogram': True, #False
+    'bollinger_upper': True, #False
+    'bollinger_lower': True, #False
+    'bollinger_width': True, #False    # Was slightly harmful
+    'ema_short': True, #False
+    'ema_long': True, #False
+
+    # --- Contextual & Static Features ---
+    'market_cap_sol': True,      # Keep for context, even if importance was zero
+    'sol_price_avg': True, #False
+    'rugcheck_score': True,
+    'socials_score': True,
+    'token_age_seconds': True,
+}
+
+def get_active_features() -> list[str]:
+    """
+    Reads the FEATURES_CONFIG dictionary and returns a list of feature names
+    that are set to True.
+    """
+    return [feature for feature, is_active in FEATURES_CONFIG.items() if is_active]

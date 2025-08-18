@@ -68,6 +68,16 @@ class DataManager:
         self._current_dataset_iterator = None
         self._columns = None # NEW: Add instance attribute for columns
 
+    def use_single_token_data(self, token_df: pd.DataFrame):
+        """
+        Temporarily sets the iterator to a single token's DataFrame for evaluation.
+        """
+        if token_df is not None and not token_df.empty:
+            self._current_dataset_iterator = token_df.itertuples()
+            self._columns = token_df.columns
+        else:
+            self._current_dataset_iterator = iter([])
+
     # --- NEW METHOD ---
     def get_split_token_mints(self, verbose: bool = True) -> Optional[Tuple[List[str], List[str]]]:
         """
