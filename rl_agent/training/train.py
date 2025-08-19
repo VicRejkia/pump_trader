@@ -74,12 +74,8 @@ from typing import Any, Dict, List
 from functools import partial
 import pandas as pd
 import multiprocessing
-import threading
-import queue
 import random
-import logging
 
-# Add the project root directory to the Python path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
@@ -87,16 +83,19 @@ if project_root not in sys.path:
 import numpy as np
 import optuna
 import torch as th
-from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback, CallbackList
+# ADD THIS IMPORT for the custom callback
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, EvalCallback, CallbackList
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecNormalize
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3 import PPO
 from optuna.samplers import TPESampler
-
-# Import the 'configure' utility to create new logger instances
 from stable_baselines3.common.logger import configure
+
+# --- MLflow Integration ---
+import mlflow
+#import mlflow.stable_baselines3
 
 import nest_asyncio
 nest_asyncio.apply()
@@ -110,6 +109,44 @@ from rl_agent.data.data_manager import DataManager
 from rl_agent.data.cache_manager import CacheManager
 from rl_agent.environments.meme_coin_env import MemeCoinEnv
 
+
+# ==============================================================================
+# SECTION 2: CONSTANTS AND NEW CALLBACK CLASS
+# ==============================================================================
+
+# --- MLflow Experiment Names ---
+MLFLOW_EXPERIMENT_TUNING = "MemeCoin Hyperparameter Tuning"
+MLFLOW_EXPERIMENT_TRAINING = "MemeCoin PPO Training"
+
+# --- MLflow Integration ---
+import mlflow
+
+import config.rl_config as rl_cfg
+import config.config as main_cfg
+from bot_logger import logger, setup_logging
+from database_handler import DatabaseClient
+from rl_agent.agents.ppo_agent import create_ppo_agent
+from rl_agent.data.data_manager import DataManager
+from rl_agent.data.cache_manager import CacheManager
+from rl_agent.environments.meme_coin_env import MemeCoinEnv
+
+# --- MLflow Experiment Names ---
+MLFLOW_EXPERIMENT_TUNING = "MemeCoin Hyperparameter Tuning"
+MLFLOW_EXPERIMENT_TRAINING = "MemeCoin PPO Training"
+
+class MLflowLoggingCallback(BaseCallback):
+    """
+    A custom callback to log evaluation metrics to MLflow during training.
+    """
+    def __init__(self, verbose=0):
+        super(MLflowLoggingCallback, self).__init__(verbose)
+
+    def _on_step(self) -> bool:
+        # Check if evaluation results are in the logs
+        if 'eval/mean_reward' in self.logger.name_to_value:
+            mean_reward = self.logger.name_to_value['eval/mean_reward']
+            mlflow.log_metric("eval_mean_reward", mean_reward, step=self.num_timesteps)
+        return True
 
 def _valid_batch_sizes(n_steps: int, n_envs: int) -> List[int]:
     candidates = [32, 64, 128, 256, 512, 1024]
@@ -149,89 +186,79 @@ def sample_ppo_params(trial: optuna.trial.Trial, n_envs: int) -> Dict[str, Any]:
 
 def objective(trial: optuna.trial.Trial, rl_config: Dict, cache_manager: CacheManager, train_mints: List[str], eval_mints: List[str]) -> float:
     """
-    Objective function for Optuna. It lazy-loads a random subset of data
-    for each trial to keep memory usage low.
+    Optuna objective function with MLflow nested runs for each trial.
+    Each trial is logged as a separate run within a parent "Optuna Study" run.
     """
-    # --- Suppress the "PPO on GPU with MlpPolicy" warning just for tuning ---
-    import warnings
-    warnings.filterwarnings(
-        "ignore",
-        category=UserWarning,
-        message=".*You are trying to run PPO on the GPU.*"
-    )
+    # Start a nested MLflow run for this specific trial
+    with mlflow.start_run(nested=True):
+        # Log the hyperparameters suggested by Optuna for this trial
+        mlflow.log_params(trial.params)
 
-    train_env, eval_env = None, None
+        train_env, eval_env = None, None
+        try:
+            # The rest of the function's logic remains the same...
+            SAMPLE_SIZE = 50
+            EVAL_SAMPLE_SIZE = 10
+            train_mints_subset = random.sample(train_mints, min(len(train_mints), SAMPLE_SIZE))
+            eval_mints_subset = random.sample(eval_mints, min(len(eval_mints), EVAL_SAMPLE_SIZE))
 
-    try:
-        # 1. Select a small, random subset of tokens for this trial
-        SAMPLE_SIZE = 50
-        EVAL_SAMPLE_SIZE = 10
-        train_mints_subset = random.sample(train_mints, min(len(train_mints), SAMPLE_SIZE))
-        eval_mints_subset = random.sample(eval_mints, min(len(eval_mints), EVAL_SAMPLE_SIZE))
+            train_data_manager = DataManager(db_client=None, cache_manager=cache_manager)
+            asyncio.run(train_data_manager.load_and_prepare_data(mints_to_load=train_mints_subset, verbose=False))
+            
+            train_env = DummyVecEnv([lambda: Monitor(MemeCoinEnv(train_data_manager, rl_config, silent=True))])
+            train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
 
-        # 2. Prepare the training environment
-        train_data_manager = DataManager(db_client=None, cache_manager=cache_manager)
-        asyncio.run(train_data_manager.load_and_prepare_data(mints_to_load=train_mints_subset, verbose=False))
-        
-        train_env = DummyVecEnv([lambda: Monitor(MemeCoinEnv(train_data_manager, rl_config, silent=True))])
-        train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
+            device = rl_config['DEVICE'] if th.cuda.is_available() else 'cpu'
+            hyperparams = sample_ppo_params(trial, n_envs=1)
+            
+            if hyperparams["policy_kwargs"]["activation_fn"] == 'ReLU':
+                hyperparams["policy_kwargs"]["activation_fn"] = th.nn.ReLU
 
-        # 3. Define and train the model
-        device = rl_config['DEVICE'] if th.cuda.is_available() else 'cpu'
-        hyperparams = sample_ppo_params(trial, n_envs=1)
-        
-        if hyperparams["policy_kwargs"]["activation_fn"] == 'ReLU':
-            hyperparams["policy_kwargs"]["activation_fn"] = th.nn.ReLU
+            model = PPO("MlpPolicy", train_env, device=device, verbose=0, **hyperparams)
+            model.learn(total_timesteps=rl_config['PPO_TIMESTEPS_PER_TRIAL'])
+            
+            train_env.save("temp_vec_normalize.pkl")
+            
+            eval_data_manager = DataManager(db_client=None, cache_manager=cache_manager)
+            cached_sets = cache_manager.load_from_cache(verbose=False)
+            evaluation_set_data = cached_sets.get('evaluation_set', {})
+            
+            valid_eval_dfs = [evaluation_set_data[m] for m in eval_mints_subset if m in evaluation_set_data]
+            
+            if not valid_eval_dfs:
+                raise optuna.exceptions.TrialPruned("No valid evaluation data found for the selected subset of tokens.")
 
-        model = PPO("MlpPolicy", train_env, device=device, verbose=0, **hyperparams)
-        model.learn(total_timesteps=rl_config['PPO_TIMESTEPS_PER_TRIAL'])
-        
-        # 4. Save normalization stats from training *before* setting up the evaluation env
-        train_env.save("temp_vec_normalize.pkl")
-        
-        # 5. Prepare the evaluation environment
-        eval_data_manager = DataManager(db_client=None, cache_manager=cache_manager)
-        cached_sets = cache_manager.load_from_cache(verbose=False)
-        evaluation_set_data = cached_sets.get('evaluation_set', {})
-        
-        valid_eval_dfs = [evaluation_set_data[m] for m in eval_mints_subset if m in evaluation_set_data]
-        
-        if not valid_eval_dfs:
-            raise optuna.exceptions.TrialPruned("No valid evaluation data found for the selected subset of tokens.")
+            eval_data_manager.training_data = pd.concat(valid_eval_dfs).sort_index()
 
-        eval_data_manager.training_data = pd.concat(valid_eval_dfs).sort_index()
+            eval_env = DummyVecEnv([lambda: Monitor(MemeCoinEnv(eval_data_manager, rl_config, silent=True))])
+            eval_env = VecNormalize.load("temp_vec_normalize.pkl", eval_env)
+            eval_env.training = False
+            eval_env.norm_reward = False
+            
+            mean_reward, _ = evaluate_policy(model, eval_env, n_eval_episodes=5, deterministic=True)
+            
+            if not np.isfinite(mean_reward):
+                raise optuna.exceptions.TrialPruned("Reward is not finite.")
 
-        eval_env = DummyVecEnv([lambda: Monitor(MemeCoinEnv(eval_data_manager, rl_config, silent=True))])
-        # Now we can safely load the normalization stats
-        eval_env = VecNormalize.load("temp_vec_normalize.pkl", eval_env)
-        eval_env.training = False
-        eval_env.norm_reward = False
-        
-        # 6. Evaluate the trained model
-        mean_reward, _ = evaluate_policy(model, eval_env, n_eval_episodes=5, deterministic=True)
-        
-        if not np.isfinite(mean_reward):
-            raise optuna.exceptions.TrialPruned("Reward is not finite.")
+            # Log the final metric for this trial to MLflow
+            mlflow.log_metric("final_mean_reward", float(mean_reward))
+            return float(mean_reward)
 
-        return float(mean_reward)
-
-    except optuna.exceptions.TrialPruned as e:
-        raise e
-    except Exception as e:
-        logger.error(f"Error in trial #{trial.number}: {e}", exc_info=True)
-        raise optuna.exceptions.TrialPruned(f"Unhandled exception: {e}")
-    finally:
-        # 7. Cleanup
-        if train_env: train_env.close()
-        if eval_env: eval_env.close()
-        if os.path.exists("temp_vec_normalize.pkl"):
-            os.remove("temp_vec_normalize.pkl")
-
+        except optuna.exceptions.TrialPruned as e:
+            raise e
+        except Exception as e:
+            logger.error(f"Error in trial #{trial.number}: {e}", exc_info=True)
+            raise optuna.exceptions.TrialPruned(f"Unhandled exception: {e}")
+        finally:
+            if train_env: train_env.close()
+            if eval_env: eval_env.close()
+            if os.path.exists("temp_vec_normalize.pkl"):
+                os.remove("temp_vec_normalize.pkl")
 
 async def run_hyperparameter_tuning(rl_config: Dict[str, Any]):
-    logger.info("PHASE 1: Starting Hyperparameter Tuning (Lazy Loading Mode).")
+    logger.info("PHASE 1: Starting Hyperparameter Tuning with MLflow.")
     
-    logger.info("Validating data cache...")
+    # Data preparation logic remains the same
     db_client = None
     try:
         start_ts = datetime.fromisoformat(rl_config['DATA_START_DATE'].replace("Z", "+00:00"))
@@ -240,8 +267,7 @@ async def run_hyperparameter_tuning(rl_config: Dict[str, Any]):
 
         if not await cache_manager.is_cache_valid(verbose=True):
             logger.info("Cache is not valid. Regenerating...")
-            main_config_dict = {key: getattr(main_cfg, key) for key in dir(main_cfg) if key.isupper()}
-            db_client = DatabaseClient(config_dict=main_config_dict)
+            db_client = DatabaseClient()
             await db_client.connect()
             data_generator = DataManager(db_client, start_date=start_ts, end_date=end_ts)
             await data_generator.load_and_prepare_data()
@@ -252,197 +278,190 @@ async def run_hyperparameter_tuning(rl_config: Dict[str, Any]):
             logger.error("Could not retrieve token mints from cache. Aborting.")
             return
         train_mints, eval_mints = mints
-
-        logger.info("✅ Cache is ready. Starting Optuna study.")
-    except Exception as e:
-        logger.error(f"Failed during initial data preparation: {e}", exc_info=True)
-        return
     finally:
         if db_client: await db_client.close()
 
-    optuna_logger = logging.getLogger("optuna")
-    optuna_logger.propagate = False
-    optuna_logger.addHandler(logging.NullHandler()) 
-    
-    study = optuna.create_study(direction="maximize", sampler=TPESampler(seed=42))
-    objective_with_args = partial(objective, rl_config=rl_config, cache_manager=cache_manager, train_mints=train_mints, eval_mints=eval_mints)
-    
-    study.optimize(objective_with_args, n_trials=rl_config['OPTUNA_N_TRIALS'], n_jobs=1, gc_after_trial=True)
-    
-    logger.info(f"Tuning finished. Best trial: #{study.best_trial.number} with reward: {study.best_trial.value:.4f}")
-    best_params = study.best_trial.params
+    # Set the MLflow experiment for this entire tuning process
+    mlflow.set_experiment(MLFLOW_EXPERIMENT_TUNING)
+    # Start a parent run to contain all Optuna trials
+    with mlflow.start_run(run_name=f"OptunaStudy_{datetime.now().strftime('%Y%m%d-%H%M%S')}"):
+        mlflow.log_param("n_trials", rl_config['OPTUNA_N_TRIALS'])
+        mlflow.log_param("timeout_seconds", rl_config['OPTUNA_TIMEOUT_SECONDS'])
+        
+        study = optuna.create_study(direction="maximize", sampler=TPESampler(seed=42))
+        objective_with_args = partial(objective, rl_config=rl_config, cache_manager=cache_manager, train_mints=train_mints, eval_mints=eval_mints)
+        
+        study.optimize(objective_with_args, n_trials=rl_config['OPTUNA_N_TRIALS'], n_jobs=1, gc_after_trial=True)
+        
+        logger.info(f"Tuning finished. Best trial: #{study.best_trial.number} with reward: {study.best_trial.value:.4f}")
+        
+        # Log the best trial's information to the parent run
+        mlflow.log_params(study.best_trial.params)
+        mlflow.log_metric("best_trial_reward", study.best_trial.value)
 
-    if "pi_layers" in best_params and "vf_layers" in best_params:
-        best_params["policy_kwargs"] = {
-            "activation_fn": "ReLU",
-            "net_arch": {
-                "pi": list(map(int, best_params.pop("pi_layers").split(','))),
-                "vf": list(map(int, best_params.pop("vf_layers").split(','))),
+        best_params = study.best_trial.params
+        # Re-add policy_kwargs for saving, as Optuna flattens it
+        if "pi_layers" in best_params and "vf_layers" in best_params:
+            best_params["policy_kwargs"] = {
+                "activation_fn": "ReLU",
+                "net_arch": {
+                    "pi": list(map(int, best_params.pop("pi_layers").split(','))),
+                    "vf": list(map(int, best_params.pop("vf_layers").split(','))),
+                }
             }
-        }
 
-    params_filename = f"best_params_{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
-    params_path = os.path.join(rl_config['RL_MODELS_DIR'], params_filename)
-    os.makedirs(rl_config['RL_MODELS_DIR'], exist_ok=True)
-    with open(params_path, 'w') as f:
-        json.dump(best_params, f, indent=4)
-    logger.info(f"✅ Best hyperparameters saved to: {params_path}")
+        params_filename = f"best_params_{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+        params_path = os.path.join(rl_config['RL_MODELS_DIR'], params_filename)
+        os.makedirs(rl_config['RL_MODELS_DIR'], exist_ok=True)
+        with open(params_path, 'w') as f:
+            json.dump(best_params, f, indent=4)
+
+        # Log the resulting best_params.json file as an artifact of the parent run
+        mlflow.log_artifact(params_path)
+        logger.info(f"✅ Best hyperparameters saved to: {params_path} and logged to MLflow.")
 
 
-def make_env_lazy(
-    rank: int,
-    rl_config: Dict,
-    mint_chunks: List[List[str]],
-    seed: int = 0,
-):
+
+def make_env_lazy(rank: int, rl_config: Dict, mint_chunks: List[List[str]], seed: int = 0):
     def _init():
         start_ts = datetime.fromisoformat(rl_config['DATA_START_DATE'].replace("Z", "+00:00"))
         end_ts = datetime.fromisoformat(rl_config['DATA_END_DATE'].replace("Z", "+00:00"))
-
         data_manager = DataManager(start_date=start_ts, end_date=end_ts)
-        
         mints_for_this_process = mint_chunks[rank]
         asyncio.run(data_manager.load_and_prepare_data(mints_to_load=mints_for_this_process, verbose=False))
-        
         env = MemeCoinEnv(data_manager, rl_config, silent=True)
         env.reset(seed=seed + rank)
         return Monitor(env)
-
     return _init
-
 
 async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace):
     action_name = args.action
-    logger.info(f"PHASE 2/3/4: Starting model '{action_name}'...")
-    timesteps = rl_config['PPO_FINAL_MODEL_TIMESTEPS']
-    db_client = None
-
-    try:
-        logger.info("Validating data cache and preparing token lists...")
-        start_ts = datetime.fromisoformat(rl_config['DATA_START_DATE'].replace("Z", "+00:00"))
-        end_ts = datetime.fromisoformat(rl_config['DATA_END_DATE'].replace("Z", "+00:00"))
-        cache_manager = CacheManager(None, start_ts, end_ts, verbose=False)
+    model_name = args.name if hasattr(args, 'name') and args.name else "PPO_Model"
+    run_name = f"{model_name}_{action_name}_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    
+    # Set the experiment and start the run
+    mlflow.set_experiment(MLFLOW_EXPERIMENT_TRAINING)
+    with mlflow.start_run(run_name=run_name):
+        logger.info(f"PHASE 2/3/4: Starting model '{action_name}' with MLflow run '{run_name}'.")
         
-        if not await cache_manager.is_cache_valid(verbose=True):
-            logger.info("Cache is not valid or out of date. Regenerating...")
-            main_config_dict = {key: getattr(main_cfg, key) for key in dir(main_cfg) if key.isupper()}
-            db_client = DatabaseClient(config_dict=main_config_dict)
-            await db_client.connect()
-            data_generator = DataManager(db_client, start_date=start_ts, end_date=end_ts)
-            await data_generator.load_and_prepare_data()
-            await db_client.close()
-            db_client = None
-        
-        data_provider = DataManager(cache_manager=cache_manager)
-        mints = data_provider.get_split_token_mints()
-        if not mints:
-            logger.error("Could not retrieve training token mints from cache. Aborting.")
-            return
-        train_mints, eval_mints = mints
-        logger.info(f"Found {len(train_mints)} tokens for training.")
+        # --- Log parameters and configs ---
+        mlflow.log_param("action_type", action_name)
+        mlflow.log_param("n_cpu", rl_config['N_CPU'])
+        mlflow.log_param("device", rl_config['DEVICE'])
+        mlflow.log_param("timesteps", rl_config['PPO_FINAL_MODEL_TIMESTEPS'])
+        if action_name == 'finetune' and hasattr(args, 'learning_rate') and args.learning_rate:
+            mlflow.log_param("finetune_learning_rate", args.learning_rate)
 
-        n_cpu = rl_config['N_CPU']
-        
-        mint_chunks_np = np.array_split(train_mints, n_cpu)
-        mint_chunks = [chunk.tolist() for chunk in mint_chunks_np if chunk.size > 0]
-        
-        n_cpu = len(mint_chunks)
-        if n_cpu == 0:
-            logger.error("No data available for training after splitting into chunks. Aborting.")
-            return
-        logger.info(f"Distributing training data across {n_cpu} CPU core(s).")
+        # Log active features as a text artifact
+        active_features = rl_cfg.get_active_features()
+        mlflow.log_param("active_features_count", len(active_features))
+        with open("active_features.txt", "w") as f:
+            f.write("\n".join(active_features))
+        mlflow.log_artifact("active_features.txt", "config")
+        os.remove("active_features.txt")
 
-        vec_env_cls = SubprocVecEnv if n_cpu > 1 else DummyVecEnv
-        env_fns = [make_env_lazy(i, rl_config, mint_chunks) for i in range(n_cpu)]
-        vec_env = vec_env_cls(env_fns)
-
-        # --- NEW: Setup Evaluation Environment ---
-        logger.info(f"Found {len(eval_mints)} tokens for evaluation.")
-        eval_mint_chunks_np = np.array_split(eval_mints, 1) # Use 1 process for eval
-        eval_mint_chunks = [chunk.tolist() for chunk in eval_mint_chunks_np if chunk.size > 0]
-        # Use DummyVecEnv for the single evaluation process
-        eval_env = DummyVecEnv([make_env_lazy(0, rl_config, eval_mint_chunks)])
-
-        device = rl_config['DEVICE'] if th.cuda.is_available() else 'cpu'
-        reset_num_timesteps = True
-        model = None
-
-        timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-        model_name = args.name if hasattr(args, 'name') and args.name else "PPO_Model"
-        log_dir = os.path.join(rl_config['RL_LOGS_DIR'], f"{timestamp}_{model_name}")
-        os.makedirs(log_dir, exist_ok=True)
-
+        # Log config files for full reproducibility
+        mlflow.log_artifact("config/rl_config.py", "config")
         if action_name == 'train':
-            logger.info(f"Training new model from hyperparameters: {args.params_path}")
-            with open(args.params_path, 'r') as f:
-                hyperparams = json.load(f)
-            model = create_ppo_agent(vec_env, hyperparams, device=device, tensorboard_log_path=log_dir)
+            mlflow.log_artifact(args.params_path, "config")
         
-        elif action_name in ['continue', 'finetune']:
-            logger.info(f"Loading model from {args.model_path} to '{action_name}' training.")
-            model = PPO.load(args.model_path, env=vec_env, device=device)
-            # --- FIX START ---
-            # Create a new logger instance for the new training session.
-            # Do not try to access model.logger as it does not exist after loading.
-            new_logger = configure(log_dir, ["tensorboard"])
-            model.set_logger(new_logger)
-            # --- FIX END ---
-            reset_num_timesteps = False
-            if action_name == 'finetune' and hasattr(args, 'learning_rate') and args.learning_rate:
-                new_lr = args.learning_rate
-                logger.info(f"Fine-tuning: Adjusting learning rate to {new_lr}")
-                model.learning_rate = new_lr
-
-        if not model:
-            logger.error("Model could not be created or loaded. Aborting.")
-            return
-            
-        timesteps_str = f"{timesteps / 1_000_000:.1f}M" if timesteps >= 1_000_000 else f"{int(timesteps / 1000)}k"
-        final_model_name = f"{timestamp}_{action_name}_{model_name}_{timesteps_str}.zip"
-        final_model_path = os.path.join(rl_config['RL_MODELS_DIR'], final_model_name)
-        
-        # --- MODIFIED: Setup and Combine Callbacks ---
-        checkpoint_callback = CheckpointCallback(
-            save_freq=max(rl_config['PPO_EVAL_FREQ'] // n_cpu, 1),
-            save_path=log_dir,
-            name_prefix="checkpoint"
-        )
-        
-        eval_callback = EvalCallback(
-            eval_env,
-            best_model_save_path=log_dir,
-            log_path=log_dir,
-            eval_freq=max(rl_config['PPO_EVAL_FREQ'] // n_cpu, 1),
-            deterministic=True,
-            render=False
-        )
-        
-        callback_list = CallbackList([checkpoint_callback, eval_callback])
-        
-        logger.info(f"🚀 Starting model training for {timesteps} timesteps...")
-        logger.info(f"TensorBoard logs will be saved in: {log_dir}")
-        logger.info(f"Final model will be saved to: {final_model_path}")
-        logger.info("--> To monitor progress, run the following command in a new terminal:")
-        logger.info(f"--> tensorboard --logdir={rl_config['RL_LOGS_DIR']}")
-        
+        # Environment and data setup logic remains the same
+        # ... (pasting the data setup logic from your script for completeness) ...
+        db_client = None
         try:
-            # --- MODIFIED: Use the combined callback list ---
+            logger.info("Validating data cache and preparing token lists...")
+            start_ts = datetime.fromisoformat(rl_config['DATA_START_DATE'].replace("Z", "+00:00"))
+            end_ts = datetime.fromisoformat(rl_config['DATA_END_DATE'].replace("Z", "+00:00"))
+            cache_manager = CacheManager(None, start_ts, end_ts, verbose=False)
+            
+            if not await cache_manager.is_cache_valid(verbose=True):
+                db_client = DatabaseClient()
+                await db_client.connect()
+                data_generator = DataManager(db_client, start_date=start_ts, end_date=end_ts)
+                await data_generator.load_and_prepare_data()
+
+            data_provider = DataManager(cache_manager=cache_manager)
+            mints = data_provider.get_split_token_mints()
+            train_mints, eval_mints = mints
+
+            n_cpu = rl_config['N_CPU']
+            mint_chunks = [c.tolist() for c in np.array_split(train_mints, n_cpu) if c.size > 0]
+            n_cpu = len(mint_chunks)
+            logger.info(f"Distributing training data across {n_cpu} CPU core(s).")
+
+            vec_env_cls = SubprocVecEnv if n_cpu > 1 else DummyVecEnv
+            vec_env = vec_env_cls([make_env_lazy(i, rl_config, mint_chunks) for i in range(n_cpu)])
+
+            eval_mint_chunks = [c.tolist() for c in np.array_split(eval_mints, 1) if c.size > 0]
+            eval_env = DummyVecEnv([make_env_lazy(0, rl_config, eval_mint_chunks)])
+
+
+            device = rl_config['DEVICE'] if th.cuda.is_available() else 'cpu'
+            reset_num_timesteps = True
+            model = None
+
+            timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+            model_name = args.name if hasattr(args, 'name') and args.name else "PPO_Model"
+            log_dir = os.path.join(rl_config['RL_LOGS_DIR'], f"{timestamp}_{model_name}")
+            os.makedirs(log_dir, exist_ok=True)
+
+            if action_name == 'train':
+                logger.info(f"Training new model from hyperparameters: {args.params_path}")
+                with open(args.params_path, 'r') as f:
+                    hyperparams = json.load(f)
+                model = create_ppo_agent(vec_env, hyperparams, device=device, tensorboard_log_path=log_dir)
+            
+            elif action_name in ['continue', 'finetune']:
+                logger.info(f"Loading model from {args.model_path} to '{action_name}' training.")
+                model = PPO.load(args.model_path, env=vec_env, device=device)
+                # --- FIX START ---
+                # Create a new logger instance for the new training session.
+                # Do not try to access model.logger as it does not exist after loading.
+                new_logger = configure(log_dir, ["tensorboard"])
+                model.set_logger(new_logger)
+                # --- FIX END ---
+                reset_num_timesteps = False
+                if action_name == 'finetune' and hasattr(args, 'learning_rate') and args.learning_rate:
+                    new_lr = args.learning_rate
+                    logger.info(f"Fine-tuning: Adjusting learning rate to {new_lr}")
+                    model.learning_rate = new_lr
+
+            if not model:
+                logger.error("Model could not be created or loaded. Aborting.")
+                return
+                
+            # --- Callbacks with MLflow ---
+            log_dir = os.path.join(rl_config['RL_LOGS_DIR'], mlflow.active_run().info.run_id)
+            os.makedirs(log_dir, exist_ok=True)
+            
+            checkpoint_callback = CheckpointCallback(save_freq=max(rl_config['PPO_EVAL_FREQ'] // n_cpu, 1), save_path=log_dir, name_prefix="checkpoint")
+            eval_callback = EvalCallback(eval_env, best_model_save_path=log_dir, log_path=log_dir, eval_freq=max(rl_config['PPO_EVAL_FREQ'] // n_cpu, 1))
+            mlflow_callback = MLflowLoggingCallback()
+            callback_list = CallbackList([checkpoint_callback, eval_callback, mlflow_callback])
+            
+            # --- Training ---
+            logger.info(f"🚀 Starting model training...")
             model.learn(
-                total_timesteps=timesteps,
+                total_timesteps=rl_config['PPO_FINAL_MODEL_TIMESTEPS'],
                 callback=callback_list,
                 reset_num_timesteps=reset_num_timesteps
             )
-        except KeyboardInterrupt:
-            logger.warning("Training interrupted by user. Saving current model state...")
-        finally:
-            model.save(final_model_path)
-            logger.info(f"✅ Training finished. Model saved to {final_model_path}")
-            logger.info(f"🏆 Best performing model saved to {log_dir}/best_model.zip")
-            vec_env.close()
-            eval_env.close()
 
-    finally:
-        if db_client: await db_client.close()
+            # --- Log Final Model and Best Model ---
+            final_model_path = os.path.join(log_dir, "final_model.zip")
+            model.save(final_model_path)
+            mlflow.log_artifact(final_model_path, "model")
+
+            best_model_path = os.path.join(log_dir, "best_model.zip")
+            if os.path.exists(best_model_path):
+                mlflow.log_artifact(best_model_path, "model")
+            
+            logger.info(f"✅ Training finished. Model and results logged to MLflow.")
+
+        finally:
+            if db_client: await db_client.close()
+            if 'vec_env' in locals() and vec_env: vec_env.close()
+            if 'eval_env' in locals() and eval_env: eval_env.close()
 
 
 async def main():

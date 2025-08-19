@@ -122,6 +122,8 @@ MAX_EXPECTED_PNL_PER_TRADE_SOL = 1.0
 # --- NEW: Centralized Feature Management ---
 # This dictionary is the single source of truth for all features.
 # Set a feature to True to include it in training and observation, or False to exclude it.
+# IF you add new features, make sure to implement them inside the `rl_agent\feature_engineering\features.py` file, inside the `_calculate_pump_features()` function.
+# To find out
 FEATURES_CONFIG = {
     # --- Volume & Transaction Features ---
     'volume_usd': True,
