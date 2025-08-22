@@ -22,18 +22,18 @@ if project_root not in sys.path:
 
 from bot_logger import logger
 from database_handler import DatabaseClient
-import config.rl_config as rl_cfg
 
 class CacheManager:
     """
     Handles creation, validation, and loading of cached data using a configurable strategy.
     It measures performance and storage usage for comparison.
     """
-    def __init__(self, db_client: DatabaseClient, start_ts: datetime, end_ts: datetime, verbose: bool = True):
+    def __init__(self, db_client: DatabaseClient, start_ts: datetime, end_ts: datetime, rl_config: dict, verbose: bool = True):
         self.db_client = db_client
         self.start_ts = start_ts
         self.end_ts = end_ts
-        self.strategy = rl_cfg.CACHE_STRATEGY.lower() # 'pickle' or 'parquet'
+        self.rl_config = rl_config # Store the config
+        self.strategy = self.rl_config.get('CACHE_STRATEGY', 'parquet').lower()
 
         date_str = f"{self.start_ts.strftime('%Y%m%d')}_{self.end_ts.strftime('%Y%m%d')}"
         self.cache_dir = os.path.join(project_root, "rl_agent", "data", "cache", date_str)
@@ -45,12 +45,13 @@ class CacheManager:
         
     def _generate_fingerprint(self) -> str:
         """Generates a hash from relevant config params to detect changes."""
+        # Now reads from the instance's config dictionary
         config_params = {
-            'DATA_START_DATE': rl_cfg.DATA_START_DATE,
-            'DATA_END_DATE': rl_cfg.DATA_END_DATE,
-            'MIN_TRADE_COUNT_FOR_DATASET': rl_cfg.MIN_TRADE_COUNT_FOR_DATASET,
-            'DATA_SPLIT_RATIO': rl_cfg.DATA_SPLIT_RATIO,
-            'DATA_SPLIT_RANDOM_SEED': rl_cfg.DATA_SPLIT_RANDOM_SEED,
+            'DATA_START_DATE': self.rl_config.get('DATA_START_DATE'),
+            'DATA_END_DATE': self.rl_config.get('DATA_END_DATE'),
+            'MIN_TRADE_COUNT_FOR_DATASET': self.rl_config.get('MIN_TRADE_COUNT_FOR_DATASET'),
+            'DATA_SPLIT_RATIO': self.rl_config.get('DATA_SPLIT_RATIO'),
+            'DATA_SPLIT_RANDOM_SEED': self.rl_config.get('DATA_SPLIT_RANDOM_SEED'),
         }
         config_str = json.dumps(config_params, sort_keys=True)
         return hashlib.sha256(config_str.encode()).hexdigest()

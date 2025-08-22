@@ -17,13 +17,16 @@ import inquirer
 import mlflow
 from mlflow.tracking import MlflowClient
 from mlflow.exceptions import MlflowException
+
 from datetime import datetime
 
 # --- Constants for MLflow Experiment Names ---
 # These names must match those in your training scripts
-MLFLOW_EXPERIMENT_TUNING = "MemeCoin Hyperparameter Tuning"
-MLFLOW_EXPERIMENT_TRAINING = "MemeCoin PPO Training"
-MLFLOW_EXPERIMENT_ANALYSIS = "MemeCoin Feature Analysis"
+MLFLOW_EXPERIMENT_TUNING = "PumpTrader.RL Hyperparameter Tuning"
+MLFLOW_EXPERIMENT_TRAINING = "PumpTrader.RL PPO Training"
+MLFLOW_EXPERIMENT_ANALYSIS = "PumpTrader.RL Feature Analysis"
+
+
 
 # --- Helper Functions ---
 
@@ -47,7 +50,18 @@ def run_command(command: list):
         print("\n" + "="*60)
         print(f"🚀 Executing command:\n   {' '.join(command)}")
         print("="*60 + "\n")
-        subprocess.run(command, check=True)
+
+        # Create a copy of the current environment variables.
+        clean_env = os.environ.copy()
+
+        # Unset MLFLOW_RUN_ID if it exists. This prevents the parent process's
+        # MLflow context from "leaking" into the subprocess, which solves the
+        # "run is already active" error.
+        if "MLFLOW_RUN_ID" in clean_env:
+            del clean_env["MLFLOW_RUN_ID"]
+
+        # Execute the subprocess with the cleaned environment.
+        subprocess.run(command, check=True, env=clean_env)
     except subprocess.CalledProcessError as e:
         print(f"❌ Error executing command: {e}")
     except FileNotFoundError:
@@ -55,17 +69,19 @@ def run_command(command: list):
 
 def find_params_artifact_path(run_id: str):
     """
-    Lists artifacts in a run and finds the path to the best_params file.
+    Lists artifacts in a run and finds the path to the best_params file,
+    searching within the 'config' artifact subdirectory.
     """
     try:
         client = MlflowClient()
-        artifacts = client.list_artifacts(run_id)
+        # Search specifically within the 'config' directory where params are stored
+        artifacts = client.list_artifacts(run_id, path="config")
         for artifact in artifacts:
-            # Find the file that matches the pattern 'best_params_....json'
-            if artifact.path.startswith("best_params_") and artifact.path.endswith(".json"):
+            # The full path needed for download is the directory + filename
+            if artifact.path.endswith(".json"):
                 print(f"Found parameters file: {artifact.path}")
-                return artifact.path # Return the actual filename
-        print("❌ Error: No 'best_params_*.json' artifact found in this run.")
+                return artifact.path
+        print("❌ Error: No '.json' parameter artifact found in this run's 'config' directory.")
         return None
     except MlflowException as e:
         print(f"Error listing artifacts: {e}")
@@ -87,12 +103,12 @@ def fetch_mlflow_runs(experiment_name: str, num_runs: int = 10):
             order_by=["start_time DESC"],
             max_results=num_runs * 1000 # Fetch more to account for child runs
         )
-
+        
         # 2. Filter the results in Python to keep only the parent runs.
         parent_runs = [
             run for run in all_runs if 'mlflow.parentRunId' not in run.data.tags
         ]
-        
+
         # 3. Return the desired number of parent runs.
         return parent_runs[:num_runs]
     except MlflowException as e:
@@ -114,7 +130,7 @@ def select_run_from_list(runs, message: str):
         # --- MODIFICATION START ---
         # Correctly search for the metric without short-circuiting
         metrics = run.data.metrics
-        metric_val = metrics.get('best_trial_reward') or metrics.get('final_mean_reward') or metrics.get('eval_mean_reward')
+        metric_val = metrics.get('best_trial_reward') or metrics.get('final_mean_reward') or metrics.get('eval_mean_reward') or metrics.get('best_trial_value')
 
         # Format the metric value after finding it
         if metric_val is not None:
@@ -189,18 +205,46 @@ def continue_or_finetune_training(action: str):
     run_id = select_run_from_list(runs, "Select a training run to continue/finetune:")
     if not run_id: return
 
-    # We are looking for the best or the last model artifact
-    model_path = get_artifact_path(run_id, "model/best_model.zip")
+    # --- Fetch the parent run's name for the new naming convention ---
+    client = MlflowClient()
+    parent_run = client.get_run(run_id)
+    parent_run_name = parent_run.data.tags.get('mlflow.runName', run_id)
+
+    # --- Download artifacts (logic remains the same) ---
+    model_artifact_path = "model/best_model.zip"
+    model_path = get_artifact_path(run_id, model_artifact_path)
     if not model_path:
-        model_path = get_artifact_path(run_id, "model/final_model.zip")
+        model_artifact_path = "model/final_model.zip"
+        model_path = get_artifact_path(run_id, model_artifact_path)
     
-    if not model_path:
-        print("Could not find a 'best_model.zip' or 'final_model.zip' artifact in this run.")
+    params_artifact_path = find_params_artifact_path(run_id)
+
+    if not model_path or not params_artifact_path:
+        print("❌ Could not find a required model or parameter artifact in this run. Aborting.")
         return
     
-    print(f"✅ Model to continue found at: {model_path}")
+    params_path = get_artifact_path(run_id, params_artifact_path)
+    if not params_path: return
 
-    command = ["python", "rl_agent/training/train.py", action, "--model-path", model_path]
+    print(f"✅ Model to continue found at: {model_path}")
+    print(f"✅ Original parameters found at: {params_path}")
+
+    # --- Interactively ask for the new run name with a helpful default ---
+    action_suffix = "ct_v2" if action == "continue" else "ft_v2"
+    suggested_name = f"{parent_run_name}_{action_suffix}"
+    new_model_name = input(f"Enter a name for this '{action}' run (default: {suggested_name}): ")
+    if not new_model_name:
+        new_model_name = suggested_name
+
+
+    # --- Add the params_path and parent_run_id to the command ---
+    command = [
+        "python", "rl_agent/training/train.py", action,
+        "--model-path", model_path,
+        "--params-path", params_path,
+        "--parent-run-id", run_id,
+        "--name", new_model_name 
+    ]
 
     if action == 'finetune':
         lr = input("New learning rate for fine-tuning (optional, press Enter for no change): ")

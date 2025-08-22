@@ -107,7 +107,7 @@ async def run_evaluation(model_path: str, start_date_str: str, end_date_str: str
     """
     Main orchestration function for the evaluation process, wrapped in an MLflow run.
     """
-    mlflow.set_experiment("MemeCoin Backtesting")
+    mlflow.set_experiment("PumpTrader.RL Backtesting")
     run_name = f"Eval_{os.path.basename(model_path)}_{start_date_str}_to_{end_date_str}"
 
     with mlflow.start_run(run_name=run_name):
@@ -115,6 +115,16 @@ async def run_evaluation(model_path: str, start_date_str: str, end_date_str: str
 
         # --- Log parameters to MLflow ---
         mlflow.log_param("model_path", model_path)
+
+        # If a registered model URI like models:/Name/Version is passed, record linkage
+        if model_path.startswith("models:/"):
+            parts = model_path.split("/")
+            if len(parts) >= 3:
+                mlflow.set_tags({
+                    "registered_model_name": parts[1],
+                    "registered_model_version": parts[2],
+                })
+                
         mlflow.log_param("start_date", start_date_str)
         mlflow.log_param("end_date", end_date_str)
 
@@ -154,6 +164,15 @@ async def run_evaluation(model_path: str, start_date_str: str, end_date_str: str
             
             # Switch data_manager to use the evaluation set for the backtest
             data_manager.use_evaluation_data()
+            evaluation_df = data_manager.get_evaluation_data()
+
+            if evaluation_df is not None and not evaluation_df.empty:
+                # FIX: Use the actual directory path as the source
+                input_data_eval = mlflow.data.from_pandas(evaluation_df)
+                mlflow.log_input(input_data_eval, context="evaluation")
+            else:
+                logger.warning("Evaluation data is empty, skipping MLflow input logging.")
+            
 
             # 5. Create Environment
             env = MemeCoinEnv(

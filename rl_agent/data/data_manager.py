@@ -7,6 +7,7 @@ import pandas as pd
 from datetime import datetime
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
+import mlflow
 
 # Project-specific imports
 import os
@@ -19,7 +20,6 @@ from bot_logger import logger
 from database_handler import DatabaseClient
 from rl_agent.feature_engineering.features import calculate_all_features
 from rl_agent.data.cache_manager import CacheManager
-import config.rl_config as rl_cfg
 
 class DataManager:
     """
@@ -32,8 +32,12 @@ class DataManager:
     """
     # --- MODIFICATION START ---
     # Allow initialization with just one of db_client or cache_manager
-    def __init__(self, db_client: Optional[DatabaseClient] = None, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None, training_df: Optional[pd.DataFrame] = None, evaluation_df: Optional[pd.DataFrame] = None, cache_manager: Optional[CacheManager] = None):
+    def __init__(self, rl_config: dict, db_client: Optional[DatabaseClient] = None, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None, training_df: Optional[pd.DataFrame] = None, evaluation_df: Optional[pd.DataFrame] = None, cache_manager: Optional[CacheManager] = None):
     # --- MODIFICATION END ---
+        self.rl_config = rl_config
+        self.training_set_dict: Optional[Dict[str, pd.DataFrame]] = None
+        self.evaluation_set_dict: Optional[Dict[str, pd.DataFrame]] = None
+
         # Allow for initialization with pre-loaded data
         if training_df is not None:
             self.db_client = None
@@ -46,18 +50,18 @@ class DataManager:
             # MODIFICATION: Allow either db_client or cache_manager to be None initially
             if not db_client and not cache_manager and not (start_date and end_date):
                  raise ValueError("For non-preloaded data, cache_manager or db_client must be provided.")
-
+            
+            self.training_data: Optional[pd.DataFrame] = None
+            self.evaluation_data: Optional[pd.DataFrame] = None
             self.db_client = db_client
             self.start_date = start_date
             self.end_date = end_date
-            self.min_trade_count = rl_cfg.MIN_TRADE_COUNT_FOR_DATASET
-            self.training_data: Optional[pd.DataFrame] = None
-            self.evaluation_data: Optional[pd.DataFrame] = None
+            self.min_trade_count = self.rl_config.get('MIN_TRADE_COUNT_FOR_DATASET')
 
             if cache_manager is not None:
                 self.cache_manager = cache_manager
             elif db_client is not None and start_date is not None and end_date is not None:
-                self.cache_manager = CacheManager(self.db_client, self.start_date, self.end_date)
+                self.cache_manager = CacheManager(self.db_client, self.start_date, self.end_date, rl_config=self.rl_config)
             else:
                 # This will be the case for child processes that create their own manager
                 self.cache_manager = None
@@ -67,6 +71,15 @@ class DataManager:
 
         self._current_dataset_iterator = None
         self._columns = None # NEW: Add instance attribute for columns
+
+    # resturn the `training_data` as a pandas DataFrame
+    def get_training_data(self) -> pd.DataFrame:
+        """Returns the training data as a DataFrame."""
+        return self.training_data
+    
+    def get_evaluation_data(self) -> pd.DataFrame:
+        """Returns the evaluation data as a DataFrame."""
+        return self.evaluation_data
 
     def use_single_token_data(self, token_df: pd.DataFrame):
         """
@@ -81,9 +94,20 @@ class DataManager:
     # --- NEW METHOD ---
     def get_split_token_mints(self, verbose: bool = True) -> Optional[Tuple[List[str], List[str]]]:
         """
-        Loads the cached token sets and returns only the lists of mints for training and evaluation.
-        This avoids loading the full dataframes into memory.
+        [MODIFIED] Returns the lists of mints for training and evaluation.
+        It first checks for in-memory dictionaries before loading from cache.
         """
+        # --- MODIFICATION START ---
+        if self.training_set_dict is not None and self.evaluation_set_dict is not None:
+            if verbose:
+                logger.info("Getting token mint lists from in-memory cache.")
+            train_mints = list(self.training_set_dict.keys())
+            eval_mints = list(self.evaluation_set_dict.keys())
+            if verbose:
+                logger.info(f"Found {len(train_mints)} training mints and {len(eval_mints)} evaluation mints.")
+            return train_mints, eval_mints
+        # --- MODIFICATION END ---
+
         if self.cache_manager.strategy != 'parquet':
             logger.error("get_split_token_mints requires 'parquet' cache strategy.")
             return None
@@ -118,7 +142,7 @@ class DataManager:
         
         # MODIFICATION: If cache manager was not provided at init, create it now.
         if self.cache_manager is None:
-            self.cache_manager = CacheManager(self.db_client, self.start_date, self.end_date, verbose=verbose)
+            self.cache_manager = CacheManager(self.db_client, self.start_date, self.end_date, self.rl_config, verbose=verbose)
 
 
         train_tokens_dict: Optional[Dict[str, pd.DataFrame]] = None
@@ -129,6 +153,9 @@ class DataManager:
             cached_content = self.cache_manager.load_from_cache(verbose=verbose)
             train_tokens_dict = cached_content.get('training_set')
             eval_tokens_dict = cached_content.get('evaluation_set')
+
+            self.training_set_dict = train_tokens_dict
+            self.evaluation_set_dict = eval_tokens_dict
             if not train_tokens_dict:
                 logger.error("Could not load training set from cache.")
                 return False
@@ -157,7 +184,7 @@ class DataManager:
             logger.info("Splitting tokens into training and evaluation sets...")
             token_mints = list(all_tokens_dict.keys())
             
-            train_ratio, eval_ratio = rl_cfg.DATA_SPLIT_RATIO
+            train_ratio, eval_ratio = self.rl_config.get('DATA_SPLIT_RATIO')
             if not (train_ratio + eval_ratio == 1.0):
                     raise ValueError("DATA_SPLIT_RATIO must sum to 1.0")
 
@@ -165,12 +192,15 @@ class DataManager:
                 token_mints,
                 train_size=train_ratio,
                 test_size=eval_ratio,
-                random_state=rl_cfg.DATA_SPLIT_RANDOM_SEED,
+                random_state=self.rl_config.get('DATA_SPLIT_RANDOM_SEED'),
                 shuffle=True
             )
             
             train_tokens_dict = {m: all_tokens_dict[m] for m in tqdm(train_mints, desc="Building Training Set")}
             eval_tokens_dict = {m: all_tokens_dict[m] for m in tqdm(eval_mints, desc="Building Evaluation Set")}
+
+            self.training_set_dict = train_tokens_dict
+            self.evaluation_set_dict = eval_tokens_dict
             
             logger.info(f"Split complete: {len(train_tokens_dict)} training tokens, {len(eval_tokens_dict)} evaluation tokens.")
 

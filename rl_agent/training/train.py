@@ -96,11 +96,17 @@ from stable_baselines3.common.logger import configure
 # --- MLflow Integration ---
 import mlflow
 #import mlflow.stable_baselines3
+import mlflow.data
+from mlflow.data.filesystem_dataset_source import FileSystemDatasetSource
+from mlflow.data.dataset import Dataset
+from mlflow.tracking import MlflowClient
+
+from rl_agent.mlflow_model import log_sb3_model
 
 import nest_asyncio
 nest_asyncio.apply()
 
-import config.rl_config as rl_cfg
+from config.rl_config import get_config_for_mode, get_active_features
 import config.config as main_cfg
 from bot_logger import logger, setup_logging
 from database_handler import DatabaseClient
@@ -115,25 +121,27 @@ from rl_agent.environments.meme_coin_env import MemeCoinEnv
 # ==============================================================================
 
 # --- MLflow Experiment Names ---
-MLFLOW_EXPERIMENT_TUNING = "MemeCoin Hyperparameter Tuning"
-MLFLOW_EXPERIMENT_TRAINING = "MemeCoin PPO Training"
+MLFLOW_EXPERIMENT_TUNING = "PumpTrader.RL Hyperparameter Tuning"
+MLFLOW_EXPERIMENT_TRAINING = "PumpTrader.RL PPO Training"
 
 # --- MLflow Integration ---
-import mlflow
+# Set the MLflow tracking URI to the local file system
 
-import config.rl_config as rl_cfg
-import config.config as main_cfg
-from bot_logger import logger, setup_logging
-from database_handler import DatabaseClient
-from rl_agent.agents.ppo_agent import create_ppo_agent
-from rl_agent.data.data_manager import DataManager
-from rl_agent.data.cache_manager import CacheManager
-from rl_agent.environments.meme_coin_env import MemeCoinEnv
 
-# --- MLflow Experiment Names ---
-MLFLOW_EXPERIMENT_TUNING = "MemeCoin Hyperparameter Tuning"
-MLFLOW_EXPERIMENT_TRAINING = "MemeCoin PPO Training"
-
+class MlflowCallback(BaseCallback):
+    def _on_step(self) -> bool:
+        # Check if evaluation results are in the logs
+        if 'eval/mean_reward' in self.logger.name_to_value:
+            mean_reward = self.logger.name_to_value['eval/mean_reward']
+            mlflow.log_metric("eval_mean_reward", mean_reward, step=self.num_timesteps)
+        # Also log current learning rate and clip range if available
+        try:
+            if hasattr(self.model, 'lr_schedule'):
+                mlflow.log_metric("lr", float(self.model.lr_schedule(self.model.num_timesteps)), step=self.num_timesteps)
+        except Exception:
+            pass
+        return True
+    
 class MLflowLoggingCallback(BaseCallback):
     """
     A custom callback to log evaluation metrics to MLflow during training.
@@ -142,10 +150,15 @@ class MLflowLoggingCallback(BaseCallback):
         super(MLflowLoggingCallback, self).__init__(verbose)
 
     def _on_step(self) -> bool:
-        # Check if evaluation results are in the logs
-        if 'eval/mean_reward' in self.logger.name_to_value:
-            mean_reward = self.logger.name_to_value['eval/mean_reward']
-            mlflow.log_metric("eval_mean_reward", mean_reward, step=self.num_timesteps)
+        # Log selected SB3 metrics if present
+        for key in [
+            "eval/mean_reward", "rollout/ep_len_mean", "rollout/ep_rew_mean",
+            "train/entropy_loss", "train/value_loss", "train/policy_gradient_loss",
+            "train/approx_kl", "train/clip_fraction", "train/clip_range",
+            "time/fps", "time/iterations", "train/learning_rate", "train/n_updates"
+        ]:
+            if key in self.logger.name_to_value:
+                mlflow.log_metric(key.replace("/", "_"), float(self.logger.name_to_value[key]), step=self.num_timesteps)
         return True
 
 def _valid_batch_sizes(n_steps: int, n_envs: int) -> List[int]:
@@ -191,8 +204,7 @@ def objective(trial: optuna.trial.Trial, rl_config: Dict, cache_manager: CacheMa
     """
     # Start a nested MLflow run for this specific trial
     with mlflow.start_run(nested=True):
-        # Log the hyperparameters suggested by Optuna for this trial
-        mlflow.log_params(trial.params)
+
 
         train_env, eval_env = None, None
         try:
@@ -202,7 +214,7 @@ def objective(trial: optuna.trial.Trial, rl_config: Dict, cache_manager: CacheMa
             train_mints_subset = random.sample(train_mints, min(len(train_mints), SAMPLE_SIZE))
             eval_mints_subset = random.sample(eval_mints, min(len(eval_mints), EVAL_SAMPLE_SIZE))
 
-            train_data_manager = DataManager(db_client=None, cache_manager=cache_manager)
+            train_data_manager = DataManager(rl_config, db_client=None, cache_manager=cache_manager)
             asyncio.run(train_data_manager.load_and_prepare_data(mints_to_load=train_mints_subset, verbose=False))
             
             train_env = DummyVecEnv([lambda: Monitor(MemeCoinEnv(train_data_manager, rl_config, silent=True))])
@@ -214,12 +226,14 @@ def objective(trial: optuna.trial.Trial, rl_config: Dict, cache_manager: CacheMa
             if hyperparams["policy_kwargs"]["activation_fn"] == 'ReLU':
                 hyperparams["policy_kwargs"]["activation_fn"] = th.nn.ReLU
 
+            mlflow.log_params(hyperparams)
+
             model = PPO("MlpPolicy", train_env, device=device, verbose=0, **hyperparams)
             model.learn(total_timesteps=rl_config['PPO_TIMESTEPS_PER_TRIAL'])
             
             train_env.save("temp_vec_normalize.pkl")
             
-            eval_data_manager = DataManager(db_client=None, cache_manager=cache_manager)
+            eval_data_manager = DataManager(rl_config, db_client=None, cache_manager=cache_manager)
             cached_sets = cache_manager.load_from_cache(verbose=False)
             evaluation_set_data = cached_sets.get('evaluation_set', {})
             
@@ -263,16 +277,18 @@ async def run_hyperparameter_tuning(rl_config: Dict[str, Any]):
     try:
         start_ts = datetime.fromisoformat(rl_config['DATA_START_DATE'].replace("Z", "+00:00"))
         end_ts = datetime.fromisoformat(rl_config['DATA_END_DATE'].replace("Z", "+00:00"))
-        cache_manager = CacheManager(None, start_ts, end_ts, verbose=False)
+        cache_manager = CacheManager(None, start_ts, end_ts, rl_config=rl_config, verbose=False)
 
         if not await cache_manager.is_cache_valid(verbose=True):
             logger.info("Cache is not valid. Regenerating...")
             db_client = DatabaseClient()
             await db_client.connect()
-            data_generator = DataManager(db_client, start_date=start_ts, end_date=end_ts)
+            data_generator = DataManager(rl_config, db_client, start_date=start_ts, end_date=end_ts)
             await data_generator.load_and_prepare_data()
         
-        data_provider = DataManager(db_client=None, cache_manager=cache_manager)
+        data_provider = DataManager(rl_config=rl_config, db_client=None, cache_manager=cache_manager)
+        await data_provider.load_and_prepare_data()
+
         mints = data_provider.get_split_token_mints()
         if not mints:
             logger.error("Could not retrieve token mints from cache. Aborting.")
@@ -285,19 +301,40 @@ async def run_hyperparameter_tuning(rl_config: Dict[str, Any]):
     mlflow.set_experiment(MLFLOW_EXPERIMENT_TUNING)
     # Start a parent run to contain all Optuna trials
     with mlflow.start_run(run_name=f"OptunaStudy_{datetime.now().strftime('%Y%m%d-%H%M%S')}"):
-        mlflow.log_param("n_trials", rl_config['OPTUNA_N_TRIALS'])
-        mlflow.log_param("timeout_seconds", rl_config['OPTUNA_TIMEOUT_SECONDS'])
+        mlflow.log_params({
+            "n_trials": rl_config['OPTUNA_N_TRIALS'],
+            "timeout": rl_config['OPTUNA_TIMEOUT_SECONDS'],
+            "dataset_cache_name": os.path.basename(cache_manager.cache_dir)
+        })
+
+        # Now that the DataFrames are populated, we can safely get them for MLflow
+        training_df = data_provider.get_training_data()
+        if training_df is not None and not training_df.empty:
+            # FIX: Use the actual directory path as the source
+            input_data_train = mlflow.data.from_pandas(training_df)
+            mlflow.log_input(input_data_train, context="training")
+        else:
+            logger.warning("Training data is empty, skipping MLflow input logging.")
+
+        evaluation_df = data_provider.get_evaluation_data()
+        if evaluation_df is not None and not evaluation_df.empty:
+            # FIX: Use the actual directory path as the source
+            input_data_eval = mlflow.data.from_pandas(evaluation_df)
+            mlflow.log_input(input_data_eval, context="evaluation")
+        else:
+            logger.warning("Evaluation data is empty, skipping MLflow input logging.")
+
         
         study = optuna.create_study(direction="maximize", sampler=TPESampler(seed=42))
         objective_with_args = partial(objective, rl_config=rl_config, cache_manager=cache_manager, train_mints=train_mints, eval_mints=eval_mints)
         
-        study.optimize(objective_with_args, n_trials=rl_config['OPTUNA_N_TRIALS'], n_jobs=1, gc_after_trial=True)
+        study.optimize(objective_with_args, n_trials=rl_config['OPTUNA_N_TRIALS'], n_jobs=1, gc_after_trial=True, timeout=rl_config['OPTUNA_TIMEOUT_SECONDS'])
         
         logger.info(f"Tuning finished. Best trial: #{study.best_trial.number} with reward: {study.best_trial.value:.4f}")
         
         # Log the best trial's information to the parent run
         mlflow.log_params(study.best_trial.params)
-        mlflow.log_metric("best_trial_reward", study.best_trial.value)
+        mlflow.log_metric("best_trial_value", study.best_trial.value)
 
         best_params = study.best_trial.params
         # Re-add policy_kwargs for saving, as Optuna flattens it
@@ -326,7 +363,7 @@ def make_env_lazy(rank: int, rl_config: Dict, mint_chunks: List[List[str]], seed
     def _init():
         start_ts = datetime.fromisoformat(rl_config['DATA_START_DATE'].replace("Z", "+00:00"))
         end_ts = datetime.fromisoformat(rl_config['DATA_END_DATE'].replace("Z", "+00:00"))
-        data_manager = DataManager(start_date=start_ts, end_date=end_ts)
+        data_manager = DataManager(rl_config=rl_config, start_date=start_ts, end_date=end_ts)
         mints_for_this_process = mint_chunks[rank]
         asyncio.run(data_manager.load_and_prepare_data(mints_to_load=mints_for_this_process, verbose=False))
         env = MemeCoinEnv(data_manager, rl_config, silent=True)
@@ -341,19 +378,30 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
     
     # Set the experiment and start the run
     mlflow.set_experiment(MLFLOW_EXPERIMENT_TRAINING)
-    with mlflow.start_run(run_name=run_name):
+
+    with mlflow.start_run(run_name=f"{model_name}-{args.action}") as run:
         logger.info(f"PHASE 2/3/4: Starting model '{action_name}' with MLflow run '{run_name}'.")
         
         # --- Log parameters and configs ---
-        mlflow.log_param("action_type", action_name)
-        mlflow.log_param("n_cpu", rl_config['N_CPU'])
-        mlflow.log_param("device", rl_config['DEVICE'])
         mlflow.log_param("timesteps", rl_config['PPO_FINAL_MODEL_TIMESTEPS'])
         if action_name == 'finetune' and hasattr(args, 'learning_rate') and args.learning_rate:
-            mlflow.log_param("finetune_learning_rate", args.learning_rate)
+             mlflow.log_param("finetune_learning_rate", args.learning_rate)
+
+        # --- FIX: Log the parent run ID to create a link ---
+        if hasattr(args, 'parent_run_id') and args.parent_run_id:
+            mlflow.set_tag("continued_from", args.parent_run_id)
+
+        mlflow.set_tags({
+            "project": "PumpTrader.RL",
+            "phase": action_name
+        })
+
+        mlflow.log_param("action", args.action)
+        mlflow.log_params(rl_config)
+        mlflow.log_artifact(args.params_path, "config")
 
         # Log active features as a text artifact
-        active_features = rl_cfg.get_active_features()
+        active_features = get_active_features(rl_config)
         mlflow.log_param("active_features_count", len(active_features))
         with open("active_features.txt", "w") as f:
             f.write("\n".join(active_features))
@@ -362,8 +410,6 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
 
         # Log config files for full reproducibility
         mlflow.log_artifact("config/rl_config.py", "config")
-        if action_name == 'train':
-            mlflow.log_artifact(args.params_path, "config")
         
         # Environment and data setup logic remains the same
         # ... (pasting the data setup logic from your script for completeness) ...
@@ -372,16 +418,58 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
             logger.info("Validating data cache and preparing token lists...")
             start_ts = datetime.fromisoformat(rl_config['DATA_START_DATE'].replace("Z", "+00:00"))
             end_ts = datetime.fromisoformat(rl_config['DATA_END_DATE'].replace("Z", "+00:00"))
-            cache_manager = CacheManager(None, start_ts, end_ts, verbose=False)
+            cache_manager = CacheManager(None, start_ts, end_ts, rl_config=rl_config, verbose=False)
             
             if not await cache_manager.is_cache_valid(verbose=True):
                 db_client = DatabaseClient()
                 await db_client.connect()
-                data_generator = DataManager(db_client, start_date=start_ts, end_date=end_ts)
+                data_generator = DataManager(rl_config, db_client, start_date=start_ts, end_date=end_ts)
                 await data_generator.load_and_prepare_data()
+            
+            mlflow.log_param("dataset_cache_name", os.path.basename(cache_manager.cache_dir))
+            # Log dataset fingerprint for reproducibility
+            try:
+                manifest_path = cache_manager.manifest_path
+                if os.path.exists(manifest_path):
+                    mlflow.log_artifact() (manifest_path, name="data_cache")
+            except Exception:
+                pass
 
-            data_provider = DataManager(cache_manager=cache_manager)
+            data_provider = DataManager(rl_config=rl_config, cache_manager=cache_manager)
+
+            # This is the crucial step. Since the cache is valid, this function will
+            # efficiently load the pre-processed data from the cache files and
+            # concatenate it into the data_provider.training_data and
+            # data_provider.evaluation_data attributes.
+            logger.info("Loading full datasets from cache for MLflow logging...")
+            await data_provider.load_and_prepare_data()
+
+            # The cache_manager object holds the absolute path to the cache directory.
+            # This is the real path MLflow needs to resolve the data source.
+            cache_directory_path = cache_manager.cache_dir
+
+            # Now that the DataFrames are populated, we can safely get them for MLflow
+            training_df = data_provider.get_training_data()
+            if training_df is not None and not training_df.empty:
+                # FIX: Use the actual directory path as the source
+                input_data_train = mlflow.data.from_pandas(training_df)
+                mlflow.log_input(input_data_train, context="training")
+            else:
+                logger.warning("Training data is empty, skipping MLflow input logging.")
+
+            evaluation_df = data_provider.get_evaluation_data()
+            if evaluation_df is not None and not evaluation_df.empty:
+                # FIX: Use the actual directory path as the source
+                input_data_eval = mlflow.data.from_pandas(evaluation_df)
+                mlflow.log_input(input_data_eval, context="evaluation")
+            else:
+                logger.warning("Evaluation data is empty, skipping MLflow input logging.")
+            
+
+
+            
             mints = data_provider.get_split_token_mints()
+
             train_mints, eval_mints = mints
 
             n_cpu = rl_config['N_CPU']
@@ -436,8 +524,11 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
             
             checkpoint_callback = CheckpointCallback(save_freq=max(rl_config['PPO_EVAL_FREQ'] // n_cpu, 1), save_path=log_dir, name_prefix="checkpoint")
             eval_callback = EvalCallback(eval_env, best_model_save_path=log_dir, log_path=log_dir, eval_freq=max(rl_config['PPO_EVAL_FREQ'] // n_cpu, 1))
-            mlflow_callback = MLflowLoggingCallback()
+            mlflow_callback = MlflowCallback()
             callback_list = CallbackList([checkpoint_callback, eval_callback, mlflow_callback])
+            
+            log_dir = os.path.join(rl_config['RL_LOGS_DIR'], mlflow.active_run().info.run_id)
+            os.makedirs(log_dir, exist_ok=True)
             
             # --- Training ---
             logger.info(f"🚀 Starting model training...")
@@ -452,9 +543,56 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
             model.save(final_model_path)
             mlflow.log_artifact(final_model_path, "model")
 
+            # Log pyfunc model for registry/serving, keep raw zip as well
+            mlflow.log_artifact(final_model_path, "sb3")
+
             best_model_path = os.path.join(log_dir, "best_model.zip")
             if os.path.exists(best_model_path):
                 mlflow.log_artifact(best_model_path, "model")
+
+            input_example = None
+            try:
+                # FIX 1: A VecEnv's reset() returns only the observation, not (obs, info)
+                obs = eval_env.reset()
+                if isinstance(obs, np.ndarray) and obs.ndim > 1:
+                    obs = obs[0] # Handle VecEnv case by taking the first observation
+                input_example = np.asarray(obs)
+                logger.info(f"Successfully created input_example from live environment sample with shape: {input_example.shape}")
+
+            except Exception as e:
+                # FIX 2: Log the error and create a fallback placeholder
+                logger.error(f"Could not sample observation from env, creating a dummy example from the observation space instead. Error: {e}", exc_info=False)
+                if hasattr(eval_env, 'observation_space') and hasattr(eval_env.observation_space, 'sample'):
+                    # This is the most reliable way to create a valid example
+                    input_example = eval_env.observation_space.sample()
+                    logger.info(f"Successfully created fallback input_example with shape: {input_example.shape}")
+
+
+            model_uri = log_sb3_model(
+                model,
+                run_name=run_name,
+                signature_dict=None,
+                input_example=input_example,
+                extra_artifacts=None,
+                register_as=rl_config.get('MLFLOW_REGISTERED_MODEL_NAME'),
+            )
+            mlflow.log_param("model_uri", model_uri)
+
+            # If registered, optionally move to Staging automatically
+            reg_name = rl_config.get('MLFLOW_REGISTERED_MODEL_NAME')
+            if reg_name:
+                try:
+                    client = MlflowClient()
+                    mv = client.get_latest_versions(reg_name, stages=["None"]) or []
+                    # Transition the latest version created in this run
+                    for v in mv:
+                        if v.run_id == run.info.run_id:
+                            client.transition_model_version_stage(reg_name, v.version, stage="Staging")
+                            mlflow.set_tag("model_stage", "Staging")
+                            break
+                except Exception:
+                    pass
+
             
             logger.info(f"✅ Training finished. Model and results logged to MLflow.")
 
@@ -474,22 +612,39 @@ async def main():
     parser_train.add_argument("--params-path", type=str, required=True, help="Path to best_params.json.")
     parser_train.add_argument("--name", type=str, default="PPO_Model", help="Custom name for the training run.")
     
+    # --- FIX: Update 'continue' parser to accept a name ---
     parser_continue = subparsers.add_parser("continue", help="Continue training an existing model.")
     parser_continue.add_argument("--model-path", type=str, required=True, help="Path to the model .zip checkpoint.")
-    
+    parser_continue.add_argument("--params-path", type=str, required=True, help="Path to the original best_params.json.")
+    parser_continue.add_argument("--parent-run-id", type=str, required=True, help="MLflow run ID of the model being continued.")
+    parser_continue.add_argument("--name", type=str, default="PPO_Model", help="Custom name for the new training run.")
+
+    # --- FIX: Update 'finetune' parser to accept a name ---
     parser_finetune = subparsers.add_parser("finetune", help="Fine-tune an existing model.")
     parser_finetune.add_argument("--model-path", type=str, required=True, help="Path to the final model .zip.")
+    parser_finetune.add_argument("--params-path", type=str, required=True, help="Path to the original best_params.json.")
+    parser_finetune.add_argument("--parent-run-id", type=str, required=True, help="MLflow run ID of the model being fine-tuned.")
+    parser_finetune.add_argument("--name", type=str, default="PPO_Model", help="Custom name for the new training run.")
     parser_finetune.add_argument("--learning-rate", type=float, help="Optional new learning rate for fine-tuning.")
+    
+    
     
     args = parser.parse_args()
 
-    rl_config_dict = {key: getattr(rl_cfg, key) for key in dir(rl_cfg) if key.isupper()}
+    # Get the configuration dictionary for the current action
+    # This is the central change. The 'rl_config' dict is now the source of truth.
+    try:
+        rl_config = get_config_for_mode(args.action)
+    except ValueError as e:
+        logger.error(e)
+        return
     
     try:
+        # Pass the config dictionary to the appropriate handler function
         if args.action == 'tune':
-            await run_hyperparameter_tuning(rl_config_dict)
+            await run_hyperparameter_tuning(rl_config)
         else:
-            await run_model_training(rl_config_dict, args)
+            await run_model_training(rl_config, args)
     except Exception as e:
         logger.error(f"A critical error occurred in main: {e}", exc_info=True)
 

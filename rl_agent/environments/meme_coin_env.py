@@ -16,18 +16,6 @@ from rl_agent.data.data_manager import DataManager
 from rl_agent.rewards.reward_function import RewardFunction
 from config.rl_config import get_active_features
 
-# FEATURE_COLUMNS = [
-#     'volume_usd', 'buy_volume_usd', 'sell_volume_usd', 'market_cap_sol', 'tx_buy_count', 
-#     'tx_sell_count', 'sol_price_avg', 'price_change_15s', 'price_change_30s', 
-#     'volume_change_15s', 'volatility_15s', 'buy_sell_ratio', 'buy_sell_ratio_15s', 
-#     'short_term_rsi', 'tx_buy_count_15s', 'tx_sell_count_15s', 'tx_total_count_15s', 
-#     'macd', 'macd_signal', 'macd_histogram', 'bollinger_upper', 'bollinger_lower', 
-#     'bollinger_width', 'ema_short', 'ema_long', 'adx_15s', 'obv', 
-#     'rugcheck_score', 'socials_score', 'token_age_seconds'
-# ]
-
-FEATURE_COLUMNS = get_active_features()
-
 # --- NEW: Stability constants ---
 EPS = 1e-9  # Epsilon for safe division
 MAX_STEPS_PER_EPISODE = 5000  # Ensures episodes finish, e.g., ~7 hours of 5s ticks
@@ -42,6 +30,8 @@ class MemeCoinEnv(gym.Env):
         self.rl_config = rl_config
         self.reward_function = RewardFunction(self.rl_config)
         self.silent = silent # MODIFIED: Use the passed argument
+
+        self.feature_columns = get_active_features(self.rl_config)
         
         # --- Load parameters from the config dictionary ---
         self.initial_balance = self.rl_config.get('ENV_INITIAL_BALANCE', 100.0)
@@ -51,7 +41,7 @@ class MemeCoinEnv(gym.Env):
 
         # Observation Space
         num_portfolio_features = 4
-        num_base_token_features = len(FEATURE_COLUMNS)
+        num_base_token_features = len(self.feature_columns)
         num_position_features = 5
         total_token_features = num_base_token_features + num_position_features
         obs_space_size = num_portfolio_features + (self.num_top_tokens_to_observe * total_token_features)
@@ -179,14 +169,14 @@ class MemeCoinEnv(gym.Env):
 
         top_tokens = self._get_top_tokens()
         token_features_list = []
-        num_base_token_features = len(FEATURE_COLUMNS)
+        num_base_token_features = len(self.feature_columns)
         num_position_features = 5
         
         for i in range(self.num_top_tokens_to_observe):
             if i < len(top_tokens):
                 token_data = top_tokens[i]
                 mint = token_data.get('mint', 'unknown')
-                base_features = token_data[FEATURE_COLUMNS].values.astype(np.float32)
+                base_features = token_data[self.feature_columns].values.astype(np.float32)
 
                 if mint in self.positions:
                     pos = self.positions[mint]
@@ -285,5 +275,5 @@ class MemeCoinEnv(gym.Env):
         return {}
         
     def render(self, mode='human'):
-        print(f"Step: {self.current_step}, Timestamp: {self.current_timestamp}, "
+        logger.info(f"Step: {self.current_step}, Timestamp: {self.current_timestamp}, "
               f"Portfolio Value: {self.portfolio_value:.4f} SOL, Positions: {len(self.positions)}")
