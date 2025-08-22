@@ -161,6 +161,52 @@ class MLflowLoggingCallback(BaseCallback):
                 mlflow.log_metric(key.replace("/", "_"), float(self.logger.name_to_value[key]), step=self.num_timesteps)
         return True
 
+class AdvancedMlflowCallback(EvalCallback):
+    """
+    A custom callback that extends EvalCallback to log all key metrics
+    directly to MLflow, avoiding race conditions with the SB3 logger.
+    """
+    def __init__(self, *args, **kwargs):
+        super(AdvancedMlflowCallback, self).__init__(*args, **kwargs)
+
+    def _on_step(self) -> bool:
+        # First, run the regular EvalCallback's _on_step
+        # This will trigger evaluations and log to the SB3 logger
+        super(AdvancedMlflowCallback, self)._on_step()
+
+        # 1. Log rollout metrics when an episode finishes
+        # The Monitor wrapper places episode info in the 'infos' dictionary
+        for info in self.locals.get("infos", []):
+            if "episode" in info:
+                ep_info = info["episode"]
+                mlflow.log_metric("rollout_ep_rew_mean", ep_info["r"], step=self.num_timesteps)
+                mlflow.log_metric("rollout_ep_len_mean", ep_info["l"], step=self.num_timesteps)
+
+        # 2. Log the standard training metrics from the SB3 logger
+        # This part is reliable because train/* metrics are always present
+        for key in [
+            "train/entropy_loss", "train/value_loss", "train/policy_gradient_loss",
+            "train/approx_kl", "train/clip_fraction", "train/learning_rate"
+        ]:
+            if key in self.logger.name_to_value:
+                mlflow.log_metric(key.replace("/", "_"), self.logger.name_to_value[key], step=self.num_timesteps)
+
+        return True
+
+    def _on_rollout_end(self) -> None:
+        """
+        This event is triggered after the evaluation is done.
+        We can log the eval metrics here.
+        """
+        super()._on_rollout_end()
+        if self.last_mean_reward != -np.inf:
+            mlflow.log_metric("eval_mean_reward", self.last_mean_reward, step=self.num_timesteps)
+
+            # Extract episode lengths from the evaluation environment
+            if self.eval_env.venv.episode_lengths:
+                 mlflow.log_metric("eval_mean_ep_length", np.mean(self.eval_env.venv.episode_lengths), step=self.num_timesteps)
+
+
 def _valid_batch_sizes(n_steps: int, n_envs: int) -> List[int]:
     candidates = [32, 64, 128, 256, 512, 1024]
     total_steps = n_steps * n_envs
@@ -431,9 +477,11 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
             try:
                 manifest_path = cache_manager.manifest_path
                 if os.path.exists(manifest_path):
-                    mlflow.log_artifact() (manifest_path, name="data_cache")
-            except Exception:
-                pass
+                    # FIX: Corrected the function call and used 'artifact_path'
+                    mlflow.log_artifact(manifest_path, artifact_path="data_cache")
+            except Exception as e:
+                # FIX: Added a warning if logging fails
+                logger.warning(f"Could not log data cache manifest: {e}")
 
             data_provider = DataManager(rl_config=rl_config, cache_manager=cache_manager)
 
@@ -522,13 +570,24 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
             log_dir = os.path.join(rl_config['RL_LOGS_DIR'], mlflow.active_run().info.run_id)
             os.makedirs(log_dir, exist_ok=True)
             
-            checkpoint_callback = CheckpointCallback(save_freq=max(rl_config['PPO_EVAL_FREQ'] // n_cpu, 1), save_path=log_dir, name_prefix="checkpoint")
-            eval_callback = EvalCallback(eval_env, best_model_save_path=log_dir, log_path=log_dir, eval_freq=max(rl_config['PPO_EVAL_FREQ'] // n_cpu, 1))
-            mlflow_callback = MlflowCallback()
-            callback_list = CallbackList([checkpoint_callback, eval_callback, mlflow_callback])
+            # 1. Keep the CheckpointCallback for safety
+            checkpoint_callback = CheckpointCallback(
+                save_freq=max(rl_config['PPO_EVAL_FREQ'] // n_cpu, 1),
+                save_path=log_dir,
+                name_prefix="checkpoint"
+            )
             
-            log_dir = os.path.join(rl_config['RL_LOGS_DIR'], mlflow.active_run().info.run_id)
-            os.makedirs(log_dir, exist_ok=True)
+            # 2. Use the new AdvancedMlflowCallback.
+            # It handles BOTH evaluation AND logging to MLflow.
+            advanced_mlflow_callback = AdvancedMlflowCallback(
+                eval_env,
+                best_model_save_path=log_dir,
+                log_path=log_dir,
+                eval_freq=max(rl_config['PPO_EVAL_FREQ'] // n_cpu, 1)
+            )
+            
+            # The callback list is now simpler, containing just two items.
+            callback_list = CallbackList([checkpoint_callback, advanced_mlflow_callback])
             
             # --- Training ---
             logger.info(f"🚀 Starting model training...")

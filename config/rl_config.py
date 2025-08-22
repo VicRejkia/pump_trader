@@ -12,6 +12,11 @@ RL_CONFIG = {
         # --- Hardware & Performance ---
         "DEVICE": "cuda" if th.cuda.is_available() else "cpu",
 
+        # --- Training Data Configuration ---
+        "DATA_START_DATE": "2025-06-26T00:00:00Z",
+        "DATA_END_DATE": "2025-06-30T00:00:00Z",
+        "MIN_TRADE_COUNT_FOR_DATASET": 100,
+
         # --- Model & Data Paths ---
         "RL_MODELS_DIR": "data/rl_models",
         "RL_LOGS_DIR": "data/rl_logs",
@@ -33,11 +38,6 @@ RL_CONFIG = {
         "ENV_EPS": 1e-9,  # Epsilon for safe division
         "ENV_MAX_STEPS_PER_EPISODE": 5000,
         "ENV_WARMUP_STEPS": 200,
-
-        # --- Training Data Configuration ---
-        "DATA_START_DATE": "2025-06-26T00:00:00Z",
-        "DATA_END_DATE": "2025-07-20T00:00:00Z",
-        "MIN_TRADE_COUNT_FOR_DATASET": 100,
 
         # --- Reward Function Configuration ---
         "REWARD_DENSE_WEIGHT": 1.0,
