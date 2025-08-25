@@ -14,13 +14,13 @@ RL_CONFIG = {
 
         # --- Training Data Configuration ---
         "DATA_START_DATE": "2025-06-26T00:00:00Z",
-        "DATA_END_DATE": "2025-06-30T00:00:00Z",
+        "DATA_END_DATE": "2025-07-20T00:00:00Z",
         "MIN_TRADE_COUNT_FOR_DATASET": 100,
 
-        # --- Model & Data Paths ---
-        "RL_MODELS_DIR": "data/rl_models",
-        "RL_LOGS_DIR": "data/rl_logs",
-        "BEST_MODEL_PATH": "data/rl_models/best_model.zip",
+        # --- Model & Data Paths (OBSOLETE - Kept for reference, but not used) ---
+        # "RL_MODELS_DIR": "data/rl_models", # This is now managed by MLflow
+        # "RL_LOGS_DIR": "data/rl_logs",     # This is now managed by MLflow
+        "BEST_MODEL_PATH": "data/rl_models/best_model.zip", # Legacy, might be used by older scripts
 
         # --- Caching and Data Splitting ---
         "CACHE_STRATEGY": "parquet",
@@ -29,8 +29,8 @@ RL_CONFIG = {
 
         # --- Environment Configuration ---
         "ENV_INITIAL_BALANCE": 100.0,
-        "ENV_MAX_CONCURRENT_POSITIONS": 5,
-        "ENV_NUM_TOP_TOKENS_TO_OBSERVE": 5,
+        "ENV_MAX_CONCURRENT_POSITIONS": 10,
+        "ENV_NUM_TOP_TOKENS_TO_OBSERVE": 15,
         "ENV_ACTION_BUY_THRESHOLD": 0.2,
         "ENV_ACTION_SELL_THRESHOLD": -0.2,
         "ENV_CAPITAL_PER_BUY_PERCENT": 0.95,
@@ -51,16 +51,16 @@ RL_CONFIG = {
         # --- Feature Management ---
         "FEATURES_CONFIG": {
             'tx_sell_count': True,
-            'market_cap_sol': True, 
-            'sol_price_avg': False, 
+            'market_cap_sol': True,
+            'sol_price_avg': True,
             'price_change_15s': True,
             'price_change_30s': True,
-            'volume_usd': True, 
+            'volume_usd': True,
             'volume_change_15s': True,
             'volatility_15s': True,
             'buy_sell_ratio': True,
             'buy_sell_ratio_15s': True,
-            'buy_volume_usd': True, 
+            'buy_volume_usd': True,
             'sell_volume_usd': True,
             'tx_buy_count_15s': True,
             'tx_sell_count_15s': True,
@@ -82,14 +82,14 @@ RL_CONFIG = {
             'adx_15s': True,
             'obv': True,
             'rugcheck_score': True,
-            'socials_score': True, 
+            'socials_score': True,
             'token_age_seconds': True
         }
     },
     "tune": {
         "N_CPU": 1,
         "DEVICE": "cuda",
-        "PPO_TIMESTEPS_PER_TRIAL": 50_000,
+        "PPO_TIMESTEPS_PER_TRIAL": 500_000,
         "OPTUNA_N_TRIALS": 30,
         "OPTUNA_TIMEOUT_SECONDS": 14400, # 4 hours
         "OPTUNA_PRUNER_N_WARMUP_STEPS": 5,
@@ -98,19 +98,19 @@ RL_CONFIG = {
     "train": {
         "N_CPU": 3,
         "DEVICE": "cpu",
-        "PPO_FINAL_MODEL_TIMESTEPS": 20_000,
+        "PPO_FINAL_MODEL_TIMESTEPS": 2_000_000,
         "PPO_EVAL_FREQ": 2048,
     },
     "finetune": {
         "N_CPU": 3,
         "DEVICE": "cpu",
-        "PPO_FINAL_MODEL_TIMESTEPS": 5_000, # Shorter duration for fine-tuning
+        "PPO_FINAL_MODEL_TIMESTEPS": 500_000, # Shorter duration for fine-tuning
         "PPO_EVAL_FREQ": 2048,
     },
     "continue": {
         "N_CPU": 3,
         "DEVICE": "cpu",
-        "PPO_FINAL_MODEL_TIMESTEPS": 50_000,
+        "PPO_FINAL_MODEL_TIMESTEPS": 1_000_000,
         "PPO_EVAL_FREQ": 2048,
     }
 }
@@ -119,7 +119,7 @@ def get_config_for_mode(mode: str) -> dict:
     """Merges common config with mode-specific config."""
     if mode not in RL_CONFIG:
         raise ValueError(f"Unknown configuration mode: '{mode}'. Must be one of {list(RL_CONFIG.keys())}")
-    
+
     # Start with a copy of the common configuration
     config = RL_CONFIG['common'].copy()
     # Update it with the mode-specific settings, overriding common ones if necessary

@@ -12,7 +12,7 @@ import time
 import pandas as pd
 from typing import Dict, Any
 from datetime import datetime, timezone
-from tqdm import tqdm 
+from tqdm import tqdm
 
 # Project-specific imports
 import sys
@@ -32,20 +32,22 @@ class CacheManager:
         self.db_client = db_client
         self.start_ts = start_ts
         self.end_ts = end_ts
-        self.rl_config = rl_config # Store the config
+        self.rl_config = rl_config
         self.strategy = self.rl_config.get('CACHE_STRATEGY', 'parquet').lower()
 
         date_str = f"{self.start_ts.strftime('%Y%m%d')}_{self.end_ts.strftime('%Y%m%d')}"
-        self.cache_dir = os.path.join(project_root, "rl_agent", "data", "cache", date_str)
+        # --- REFACTORED PATH ---
+        # The cache is now stored in the top-level 'data/cache' directory,
+        # completely separate from the 'rl_agent' source code.
+        self.cache_dir = os.path.join(project_root, "data", "cache", date_str)
         self.manifest_path = os.path.join(self.cache_dir, "manifest.json")
 
         self.verbose = verbose
-        
+
         os.makedirs(self.cache_dir, exist_ok=True)
-        
+
     def _generate_fingerprint(self) -> str:
         """Generates a hash from relevant config params to detect changes."""
-        # Now reads from the instance's config dictionary
         config_params = {
             'DATA_START_DATE': self.rl_config.get('DATA_START_DATE'),
             'DATA_END_DATE': self.rl_config.get('DATA_END_DATE'),
@@ -59,39 +61,39 @@ class CacheManager:
     async def is_cache_valid(self, verbose: bool = True) -> bool:
         """Checks if a valid cache exists by comparing fingerprints."""
         if not os.path.exists(self.manifest_path):
-            if (verbose + self.verbose) == 2:
+            if (verbose and self.verbose):
                 logger.info(f"No cache manifest found for window. Preparation is required.")
             return False
 
         try:
             with open(self.manifest_path, 'r') as f:
                 manifest = json.load(f)
-            
+
             stored_fingerprint = manifest.get('fingerprint')
             current_fingerprint = self._generate_fingerprint()
 
             stored_strategy = manifest.get('strategy', 'pickle')
             if stored_strategy != self.strategy:
-                if (verbose + self.verbose) == 2:
+                if (verbose and self.verbose):
                     logger.info(f"Cache strategy changed from '{stored_strategy}' to '{self.strategy}'. Re-caching is required.")
                 return False
 
             if stored_fingerprint == current_fingerprint:
-                if (verbose + self.verbose) == 2:
+                if (verbose and self.verbose):
                     logger.info(f"Cache is valid (Strategy: {self.strategy}). Skipping data preparation.")
                 return True
             else:
-                if (verbose + self.verbose) == 2:
+                if (verbose and self.verbose):
                     logger.info("Config fingerprint mismatch. Cache is stale. Re-running data preparation.")
                 return False
         except Exception as e:
-            if (verbose + self.verbose) == 2:
+            if (verbose and self.verbose):
                 logger.warning(f"Could not validate cache manifest: {e}. Re-running data preparation.")
             return False
 
     def save_to_cache(self, fingerprint: str, data_to_cache: Dict[str, Any], verbose: bool = True):
         """Saves the processed dataframes and manifest using the configured strategy."""
-        if (verbose + self.verbose) == 2:
+        if (verbose and self.verbose):
             logger.info(f"Saving data to cache using '{self.strategy}' strategy...")
         start_time = time.time()
 
@@ -103,7 +105,7 @@ class CacheManager:
             raise ValueError(f"Unknown cache strategy: {self.strategy}")
 
         end_time = time.time()
-        if (verbose + self.verbose) == 2:
+        if (verbose and self.verbose):
             logger.info(f"Cache save operation took {end_time - start_time:.2f} seconds.")
 
         manifest = {
@@ -117,10 +119,10 @@ class CacheManager:
 
     def load_from_cache(self, verbose: bool = True) -> Dict[str, Any]:
         """Loads data from the cache using the configured strategy."""
-        if (verbose + self.verbose) == 2:
+        if (verbose and self.verbose):
             logger.info(f"Loading data from cache using '{self.strategy}' strategy...")
         start_time = time.time()
-        
+
         cached_data = {}
         if self.strategy == 'pickle':
             cached_data = self._load_from_pickle(verbose)
@@ -130,7 +132,7 @@ class CacheManager:
             raise ValueError(f"Unknown cache strategy: {self.strategy}")
 
         end_time = time.time()
-        if (verbose + self.verbose) == 2:
+        if (verbose and self.verbose):
             logger.info(f"Cache load operation took {end_time - start_time:.2f} seconds.")
         return cached_data
 
@@ -141,7 +143,7 @@ class CacheManager:
             with open(file_path, 'wb') as f:
                 pickle.dump(content, f)
             total_size_mb += os.path.getsize(file_path) / (1024 * 1024)
-        if (verbose + self.verbose) == 2:
+        if (verbose and self.verbose):
             logger.info(f"💾 Pickle Strategy: Saved {len(data)} key(s). Total size: {total_size_mb:.2f} MB")
 
     def _load_from_pickle(self, verbose: bool = True) -> Dict[str, Any]:
@@ -160,7 +162,7 @@ class CacheManager:
             if isinstance(content, dict) and all(isinstance(df, pd.DataFrame) for df in content.values()):
                 key_dir = os.path.join(self.cache_dir, key)
                 os.makedirs(key_dir, exist_ok=True)
-                
+
                 desc = f"Saving '{key}' to Parquet"
                 iterable = tqdm(content.items(), desc=desc, disable=not verbose)
 
@@ -170,11 +172,11 @@ class CacheManager:
                     df.to_parquet(file_path)
                     total_size_mb += os.path.getsize(file_path) / (1024 * 1024)
             else:
-                if (verbose + self.verbose) == 2:
+                if (verbose and self.verbose):
                     logger.warning(f"Content for key '{key}' is not a DataFrame dict. Falling back to pickle.")
                 self._save_as_pickle({key: content}, verbose)
-        
-        if (verbose + self.verbose) == 2:
+
+        if (verbose and self.verbose):
             logger.info(f"💾 Parquet Strategy: Save complete. Total size: {total_size_mb:.2f} MB")
 
     def _load_from_parquet(self, verbose: bool = True) -> Dict[str, Any]:
@@ -187,17 +189,17 @@ class CacheManager:
             if os.path.isdir(key_dir):
                 data_dict = {}
                 parquet_files = [f for f in os.listdir(key_dir) if f.endswith('.parquet')]
-                
+
                 desc = f"Loading '{key}' from Parquet"
                 iterable = tqdm(parquet_files, desc=desc, disable=not verbose)
-                
+
                 for filename in iterable:
                     mint = os.path.splitext(filename)[0]
                     file_path = os.path.join(key_dir, filename)
                     data_dict[mint] = pd.read_parquet(file_path)
                 loaded_data[key] = data_dict
             else:
-                if (verbose + self.verbose) == 2:
+                if (verbose and self.verbose):
                     logger.warning(f"Directory for key '{key}' not found. Attempting to load as pickle.")
                 file_path = os.path.join(self.cache_dir, f"{key}.pkl")
                 if os.path.exists(file_path):

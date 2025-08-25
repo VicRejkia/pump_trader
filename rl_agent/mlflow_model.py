@@ -60,6 +60,7 @@ def log_sb3_model(
     input_example: Optional[Any] = None,
     extra_artifacts: Optional[Dict[str, str]] = None,
     register_as: Optional[str] = None,
+    staging_path: Optional[str] = None
 ) -> str:
     """Logs a PPO model as an MLflow pyfunc and optionally registers it.
 
@@ -69,7 +70,8 @@ def log_sb3_model(
     if run is None:
         raise RuntimeError("log_sb3_model must be called inside an active MLflow run")
 
-    with tempfile.TemporaryDirectory() as tmp:
+    # Use the provided staging_path for the temporary directory
+    with tempfile.TemporaryDirectory(dir=staging_path) as tmp:
         sb3_zip = os.path.join(tmp, "model.zip")
         model.save(sb3_zip)
 
