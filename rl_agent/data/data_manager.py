@@ -1,291 +1,162 @@
 # rl_agent/data/data_manager.py
 """
-Handles fetching, caching, splitting, and providing data for the RL environment.
+Handles assembling feature data from a pre-computed Parquet feature store
+for the RL environment.
 """
-from typing import Dict, Optional, Tuple, List # Add List
+import os
+import sys
+from typing import Dict, Optional, Tuple, List
 import pandas as pd
 from datetime import datetime
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
-import mlflow
 
-# Project-specific imports
-import os
-import sys
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from bot_logger import logger
-from database_handler import DatabaseClient
-from rl_agent.feature_engineering.features import calculate_all_features
-from rl_agent.data.cache_manager import CacheManager
+from config.rl_config import FEATURE_GROUPS, RL_FEATURE_STORE_PATH, RL_FEATURE_STORE_VERSION
+
+# Dynamically create the reverse mapping from the config to avoid redundancy
+FEATURE_TO_GROUP_MAP = {
+    feature: group_name
+    for group_name, features in FEATURE_GROUPS.items()
+    for feature in features
+}
 
 class DataManager:
     """
-    Manages the data lifecycle for RL training and evaluation.
-    - Manages caching of processed data.
-    - Fetches raw data if cache is invalid.
-    - Orchestrates feature engineering.
-    - Splits tokens randomly into training and evaluation sets.
+    Assembles feature data for RL training by reading from a partitioned Parquet store.
+    - Determines which feature groups to load based on the active features.
+    - Loads and merges data for a specified list of tokens and a date range.
+    - Splits available tokens into training and evaluation sets.
     - Combines token data into chronological DataFrames for the Gym environment.
     """
-    # --- MODIFICATION START ---
-    # Allow initialization with just one of db_client or cache_manager
-    def __init__(self, rl_config: dict, db_client: Optional[DatabaseClient] = None, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None, training_df: Optional[pd.DataFrame] = None, evaluation_df: Optional[pd.DataFrame] = None, cache_manager: Optional[CacheManager] = None):
-    # --- MODIFICATION END ---
+    def __init__(self, rl_config: dict):
         self.rl_config = rl_config
-        self.training_set_dict: Optional[Dict[str, pd.DataFrame]] = None
-        self.evaluation_set_dict: Optional[Dict[str, pd.DataFrame]] = None
-
-        # Allow for initialization with pre-loaded data
-        if training_df is not None:
-            self.db_client = None
-            self.training_data = training_df
-            self.evaluation_data = evaluation_df
-            self.use_training_data() # Default to providing training data
-            self._is_preloaded = True
-            self.cache_manager = None
-        else:
-            # MODIFICATION: Allow either db_client or cache_manager to be None initially
-            if not db_client and not cache_manager and not (start_date and end_date):
-                 raise ValueError("For non-preloaded data, cache_manager or db_client must be provided.")
-            
-            self.training_data: Optional[pd.DataFrame] = None
-            self.evaluation_data: Optional[pd.DataFrame] = None
-            self.db_client = db_client
-            self.start_date = start_date
-            self.end_date = end_date
-            self.min_trade_count = self.rl_config.get('MIN_TRADE_COUNT_FOR_DATASET')
-
-            if cache_manager is not None:
-                self.cache_manager = cache_manager
-            elif db_client is not None and start_date is not None and end_date is not None:
-                self.cache_manager = CacheManager(self.db_client, self.start_date, self.end_date, rl_config=self.rl_config)
-            else:
-                # This will be the case for child processes that create their own manager
-                self.cache_manager = None
-
-
-            self._is_preloaded = False
+        self.feature_store_path = os.path.join(project_root, RL_FEATURE_STORE_PATH, f"v{RL_FEATURE_STORE_VERSION}")
+        
+        self.training_data: Optional[pd.DataFrame] = None
+        self.evaluation_data: Optional[pd.DataFrame] = None
+        self.training_set_mints: List[str] = []
+        self.evaluation_set_mints: List[str] = []
 
         self._current_dataset_iterator = None
-        self._columns = None # NEW: Add instance attribute for columns
+        self._columns = None
 
-    # resturn the `training_data` as a pandas DataFrame
-    def get_training_data(self) -> pd.DataFrame:
-        """Returns the training data as a DataFrame."""
-        return self.training_data
-    
-    def get_evaluation_data(self) -> pd.DataFrame:
-        """Returns the evaluation data as a DataFrame."""
-        return self.evaluation_data
+    def get_training_data(self) -> Optional[pd.DataFrame]: return self.training_data
+    def get_evaluation_data(self) -> Optional[pd.DataFrame]: return self.evaluation_data
+    def get_split_token_mints(self) -> Tuple[List[str], List[str]]: return self.training_set_mints, self.evaluation_set_mints
 
-    def use_single_token_data(self, token_df: pd.DataFrame):
-        """
-        Temporarily sets the iterator to a single token's DataFrame for evaluation.
-        """
-        if token_df is not None and not token_df.empty:
-            self._current_dataset_iterator = token_df.itertuples()
-            self._columns = token_df.columns
-        else:
-            self._current_dataset_iterator = iter([])
+    def _load_data_for_mints(
+        self,
+        mints_to_load: List[str],
+        start_date: datetime,
+        end_date: datetime,
+        active_features: List[str],
+        verbose: bool = True
+    ) -> Optional[Dict[str, pd.DataFrame]]:
+        if not mints_to_load: return {}
 
-    # --- NEW METHOD ---
-    def get_split_token_mints(self, verbose: bool = True) -> Optional[Tuple[List[str], List[str]]]:
-        """
-        [MODIFIED] Returns the lists of mints for training and evaluation.
-        It first checks for in-memory dictionaries before loading from cache.
-        """
-        # --- MODIFICATION START ---
-        if self.training_set_dict is not None and self.evaluation_set_dict is not None:
-            if verbose:
-                logger.info("Getting token mint lists from in-memory cache.")
-            train_mints = list(self.training_set_dict.keys())
-            eval_mints = list(self.evaluation_set_dict.keys())
-            if verbose:
-                logger.info(f"Found {len(train_mints)} training mints and {len(eval_mints)} evaluation mints.")
-            return train_mints, eval_mints
-        # --- MODIFICATION END ---
+        groups_to_load = {'base_ohlcv'}
+        for feature in active_features:
+            if feature in FEATURE_TO_GROUP_MAP:
+                groups_to_load.add(FEATURE_TO_GROUP_MAP[feature])
+            elif feature not in FEATURE_GROUPS['base_ohlcv']:
+                logger.warning(f"Feature '{feature}' not mapped to a group and will be ignored.")
+        if verbose: logger.info(f"Required feature groups: {sorted(list(groups_to_load))}")
 
-        if self.cache_manager.strategy != 'parquet':
-            logger.error("get_split_token_mints requires 'parquet' cache strategy.")
-            return None
+        date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+        all_mint_data = {mint: [] for mint in mints_to_load}
 
-        # --- MODIFICATION: Pass verbose flag ---
-        if verbose:
-            logger.info("Loading token mint lists from cache...")
-        cached_content = self.cache_manager.load_from_cache(verbose=verbose)
-        train_set = cached_content.get('training_set')
-        eval_set = cached_content.get('evaluation_set')
+        for group in groups_to_load:
+            for day in date_range:
+                group_path = os.path.join(self.feature_store_path, f"group={group}", f"date={day.strftime('%Y-%m-%d')}")
+                if not os.path.isdir(group_path): continue
+                for mint in mints_to_load:
+                    file_path = os.path.join(group_path, f"{mint}.parquet")
+                    if os.path.exists(file_path):
+                        try:
+                            all_mint_data[mint].append(pd.read_parquet(file_path))
+                        except Exception as e:
+                            if verbose: logger.warning(f"Could not read {file_path}: {e}")
 
-        if not train_set or not eval_set:
-            logger.error("Cache does not contain 'training_set' and 'evaluation_set'. Please regenerate the cache.")
-            return None
-
-        train_mints = list(train_set.keys())
-        eval_mints = list(eval_set.keys())
-        
-        if verbose:
-            logger.info(f"Found {len(train_mints)} training mints and {len(eval_mints)} evaluation mints.")
-        return train_mints, eval_mints
-
-    async def load_and_prepare_data(self, mints_to_load: Optional[List[str]] = None, verbose: bool = True) -> bool:
-        """
-        [MODIFIED] Loads data from cache or DB. If mints_to_load is provided,
-        it only loads and concatenates data for those specific mints, enabling lazy loading.
-        """
-        if self._is_preloaded:
-            if verbose:
-                logger.info("DataManager is using pre-loaded data. Skipping DB/cache operations.")
-            return True
-        
-        # MODIFICATION: If cache manager was not provided at init, create it now.
-        if self.cache_manager is None:
-            self.cache_manager = CacheManager(self.db_client, self.start_date, self.end_date, self.rl_config, verbose=verbose)
-
-
-        train_tokens_dict: Optional[Dict[str, pd.DataFrame]] = None
-        eval_tokens_dict: Optional[Dict[str, pd.DataFrame]] = None
-
-        if await self.cache_manager.is_cache_valid(verbose=verbose):
-            # --- MODIFICATION: Pass verbose flag ---
-            cached_content = self.cache_manager.load_from_cache(verbose=verbose)
-            train_tokens_dict = cached_content.get('training_set')
-            eval_tokens_dict = cached_content.get('evaluation_set')
-
-            self.training_set_dict = train_tokens_dict
-            self.evaluation_set_dict = eval_tokens_dict
-            if not train_tokens_dict:
-                logger.error("Could not load training set from cache.")
-                return False
-            if verbose:
-                logger.info(f"Loaded {len(train_tokens_dict)} tokens for training and {len(eval_tokens_dict)} for evaluation from cache.")
-        else:
-            # (The data generation part remains the same)
-            logger.info(f"Fetching raw data from {self.start_date} to {self.end_date}...")
-            raw_data = await self.db_client.get_raw_data_for_rl(
-                start_date=self.start_date,
-                end_date=self.end_date,
-                min_trade_count=self.min_trade_count
-            )
-
-            if raw_data is None: return False
-            trades_df, rugcheck_df, token_info_df, dexscreener_df = raw_data
+        assembled_dfs = {}
+        for mint, df_list in tqdm(all_mint_data.items(), desc="Assembling mint dataframes", disable=not verbose):
+            if df_list:
+                full_df = pd.concat(df_list).sort_index()
+                assembled_dfs[mint] = full_df.loc[~full_df.index.duplicated(keep='first')]
             
-            all_tokens_dict = await calculate_all_features(
-                trades_df, rugcheck_df, token_info_df, dexscreener_df
-            )
+        return assembled_dfs
+
+    def load_and_prepare_data(self, mints_to_load: Optional[List[str]] = None, verbose: bool = True) -> bool:
+        start_date = datetime.fromisoformat(self.rl_config['DATA_START_DATE'].replace("Z", "+00:00"))
+        end_date = datetime.fromisoformat(self.rl_config['DATA_END_DATE'].replace("Z", "+00:00"))
+        active_features = [f for f, is_active in self.rl_config['FEATURES_CONFIG'].items() if is_active]
+
+        if not os.path.isdir(self.feature_store_path):
+            logger.error(f"Feature store not found at: {self.feature_store_path}")
+            logger.error("Please run `rl_agent/etl/prepare_rl_dataset.py` first.")
+            return False
+
+        if not mints_to_load and not (self.training_set_mints or self.evaluation_set_mints):
+            logger.info("Discovering available tokens in the feature store...")
+            base_path = os.path.join(self.feature_store_path, "group=base_ohlcv")
+            available_mints = set(os.path.splitext(f)[0] for root, _, files in os.walk(base_path) for f in files if f.endswith(".parquet"))
             
-            if not all_tokens_dict:
-                logger.error("Data preparation resulted in no processable tokens.")
+            if not available_mints:
+                logger.error("No token data found in the feature store. Aborting.")
                 return False
 
-            logger.info("Splitting tokens into training and evaluation sets...")
-            token_mints = list(all_tokens_dict.keys())
-            
+            logger.info(f"Found {len(available_mints)} unique tokens. Splitting into train/eval sets.")
             train_ratio, eval_ratio = self.rl_config.get('DATA_SPLIT_RATIO')
-            if not (train_ratio + eval_ratio == 1.0):
-                    raise ValueError("DATA_SPLIT_RATIO must sum to 1.0")
-
-            train_mints, eval_mints = train_test_split(
-                token_mints,
-                train_size=train_ratio,
-                test_size=eval_ratio,
-                random_state=self.rl_config.get('DATA_SPLIT_RANDOM_SEED'),
-                shuffle=True
+            self.training_set_mints, self.evaluation_set_mints = train_test_split(
+                list(available_mints), train_size=train_ratio, test_size=eval_ratio,
+                random_state=self.rl_config.get('DATA_SPLIT_RANDOM_SEED'), shuffle=True
             )
-            
-            train_tokens_dict = {m: all_tokens_dict[m] for m in tqdm(train_mints, desc="Building Training Set")}
-            eval_tokens_dict = {m: all_tokens_dict[m] for m in tqdm(eval_mints, desc="Building Evaluation Set")}
-
-            self.training_set_dict = train_tokens_dict
-            self.evaluation_set_dict = eval_tokens_dict
-            
-            logger.info(f"Split complete: {len(train_tokens_dict)} training tokens, {len(eval_tokens_dict)} evaluation tokens.")
-
-            fingerprint = self.cache_manager._generate_fingerprint()
-            data_to_cache = {
-                'training_set': train_tokens_dict,
-                'evaluation_set': eval_tokens_dict
-            }
-            self.cache_manager.save_to_cache(fingerprint, data_to_cache)
         
-        # --- LAZY LOADING LOGIC ---
-        if mints_to_load:
-            if verbose:
-                logger.info(f"Lazy loading data for {len(mints_to_load)} specific mints.")
-            
-            # --- FIX START ---
-            # Search for the provided mints in both the training and evaluation sets
-            # loaded from the cache to ensure the correct data is found.
-            dataframes_to_concat = []
-            if train_tokens_dict:
-                dataframes_to_concat.extend([train_tokens_dict[m] for m in mints_to_load if m in train_tokens_dict])
-            if eval_tokens_dict:
-                dataframes_to_concat.extend([eval_tokens_dict[m] for m in mints_to_load if m in eval_tokens_dict])
+        mints_for_training = mints_to_load or self.training_set_mints
+        mints_for_evaluation = [] if mints_to_load else self.evaluation_set_mints
 
-            # We assume we are loading a subset for a single dataset (e.g., training)
-            self.training_data = pd.concat(dataframes_to_concat).sort_index()
-            # --- FIX END ---
-
-            # For evaluation, you might do the same with an eval_mints list
-            self.evaluation_data = None # Or load a subset of eval tokens if needed
-            if verbose:
-                logger.info(f"Lazy load complete. Total steps: {len(self.training_data)}")
-        else:
-            # Original behavior: load everything
-            logger.info("Combining all training dataframes...")
-            self.training_data = pd.concat(tqdm(train_tokens_dict.values(), desc="Combining Training DataFrames", total=len(train_tokens_dict))).sort_index()
-            logger.info(f"Training data prepared. Total time steps: {len(self.training_data)}")
-            
-            if eval_tokens_dict:
-                logger.info("Combining all evaluation dataframes...")
-                self.evaluation_data = pd.concat(tqdm(eval_tokens_dict.values(), desc="Combining Evaluation DataFrames", total=len(eval_tokens_dict))).sort_index()
-                logger.info(f"Evaluation data prepared. Total time steps: {len(self.evaluation_data)}")
-
+        training_dict = self._load_data_for_mints(mints_for_training, start_date, end_date, active_features, verbose)
+        if training_dict:
+            self.training_data = pd.concat(training_dict.values()).sort_index()
+            if verbose: logger.info(f"Training data prepared. Total steps: {len(self.training_data)}")
+        
+        if mints_for_evaluation:
+            eval_dict = self._load_data_for_mints(mints_for_evaluation, start_date, end_date, active_features, verbose)
+            if eval_dict:
+                self.evaluation_data = pd.concat(eval_dict.values()).sort_index()
+                if verbose: logger.info(f"Evaluation data prepared. Total steps: {len(self.evaluation_data)}")
+        
         self.use_training_data()
         return True
 
     def use_training_data(self):
-        """Sets the iterator to the training dataset using memory-efficient itertuples."""
         if self.training_data is not None:
-            self._current_dataset_iterator = self.training_data.itertuples()
-            self._columns = self.training_data.columns
-        else:
-            self._current_dataset_iterator = iter([])
+            self._current_dataset_iterator, self._columns = self.training_data.itertuples(), self.training_data.columns
+        else: self._current_dataset_iterator = iter([])
 
     def use_evaluation_data(self):
-        """Sets the iterator to the evaluation dataset using memory-efficient itertuples."""
         if self.evaluation_data is not None:
-            self._current_dataset_iterator = self.evaluation_data.itertuples()
-            self._columns = self.evaluation_data.columns
-        else:
-            self._current_dataset_iterator = iter([])
+            self._current_dataset_iterator, self._columns = self.evaluation_data.itertuples(), self.evaluation_data.columns
+        else: self._current_dataset_iterator = iter([])
+            
+    def use_single_token_data(self, token_df: pd.DataFrame):
+        if token_df is not None and not token_df.empty:
+            self._current_dataset_iterator, self._columns = token_df.itertuples(), token_df.columns
+        else: self._current_dataset_iterator = iter([])
 
     def __iter__(self):
-        self.reset()
-        return self
+        self.reset(); return self
 
     def __next__(self) -> Optional[Tuple[pd.Timestamp, pd.Series]]:
-        """
-        Gets the next data point, converting itertuples output to the required format.
-        """
-        if self._current_dataset_iterator is None:
-            return None
+        if self._current_dataset_iterator is None: return None
         try:
-            # row_tuple from itertuples() is (Index, col1, col2, ...)
             row_tuple = next(self._current_dataset_iterator)
-
-            # Reconstruct the (timestamp, Series) format expected by the environment
             timestamp = row_tuple[0]
-            data = pd.Series(row_tuple[1:], index=self._columns, name=timestamp)
-            return timestamp, data
-        except StopIteration:
-            return None
+            return timestamp, pd.Series(row_tuple[1:], index=self._columns, name=timestamp)
+        except StopIteration: return None
 
-    def reset(self) -> None:
-        if self.training_data is not None:
-            self.use_training_data()
-        elif self.evaluation_data is not None:
-            self.use_evaluation_data()
+    def reset(self) -> None: self.use_training_data()

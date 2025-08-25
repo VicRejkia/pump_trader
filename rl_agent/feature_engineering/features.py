@@ -7,11 +7,9 @@ with one DataFrame per token.
 import pandas as pd
 import numpy as np
 import warnings
-import pandas_ta as ta
-from typing import Dict
+from typing import Dict, List
 from tqdm import tqdm
 
-# Project-specific imports
 import sys
 import os
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -19,8 +17,8 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from bot_logger import logger
+from config.rl_config import FEATURE_GROUPS
 
-# Suppress known pandas warning
 warnings.filterwarnings(
     "ignore",
     message="The 'grouped' keyword is deprecated and will be removed in a future version of pandas.",
@@ -212,10 +210,10 @@ async def calculate_all_features(
     rugcheck_df: pd.DataFrame,
     token_info_df: pd.DataFrame,
     dexscreener_df: pd.DataFrame
-) -> Dict[str, pd.DataFrame]:
+) -> Dict[str, Dict[str, pd.DataFrame]]:
     """
-    Main pipeline: Processes raw data into a dictionary of feature-rich
-    DataFrames, one for each token (mint).
+    Main pipeline: Processes raw data and returns a nested dictionary of
+    feature group DataFrames, structured as {group_name: {mint: df}}.
     """
     if trades_df.empty:
         logger.warning("Trades DataFrame is empty. Cannot perform feature engineering.")
@@ -231,44 +229,29 @@ async def calculate_all_features(
         if not trades_df.empty and col in trades_df.columns:
             trades_df[col] = pd.to_numeric(trades_df[col], errors='coerce')
         
-    # Keep only rows where price_sol is > 0 and not NaN
     if not trades_df.empty and 'price_sol' in trades_df.columns:
-        initial_len = len(trades_df)
-        trades_df = trades_df[trades_df['price_sol'] > 0]  # Excludes 0, negatives, and NaN (NaN > 0 → False)
-        cleaned_len = len(trades_df)
-        logger.info(f"Removed {initial_len - cleaned_len} trades with invalid price_sol (≤0 or NaN)")
-
+        trades_df = trades_df[trades_df['price_sol'] > 0]
     trades_df.dropna(subset=['timestamp', 'price_sol', 'volume_usd', 'mint'], inplace=True)
 
-    # --- Create separate columns for buy and sell volume before aggregation ---
     trades_df['buy_volume_usd'] = trades_df.apply(lambda row: row['volume_usd'] if row['tx_type'] == 'buy' else 0, axis=1)
     trades_df['sell_volume_usd'] = trades_df.apply(lambda row: row['volume_usd'] if row['tx_type'] == 'sell' else 0, axis=1)
-
     trades_df['tx_buy_count'] = trades_df['tx_type'].apply(lambda x: 1 if x == 'buy' else 0)
     trades_df['tx_sell_count'] = trades_df['tx_type'].apply(lambda x: 1 if x == 'sell' else 0)
 
-    processed_token_data = {}
+    grouped_feature_data = {group_name: {} for group_name in FEATURE_GROUPS.keys()}
     unique_mints = trades_df['mint'].unique()
     
     logger.info(f"Starting feature engineering for {len(unique_mints)} tokens...")
 
     for mint in tqdm(unique_mints, desc="Processing Tokens"):
-        # --- 2. Isolate Data for a Single Token ---
         mint_trades = trades_df[trades_df['mint'] == mint].set_index('timestamp').sort_index()
-        if mint_trades.empty:
-            continue
+        if mint_trades.empty: continue
             
-        # --- 3. Resample to 5-Second OHLCV ---
         resampler = mint_trades.resample('5s')
         ohlcv = resampler['price_sol'].ohlc()
-        # Sum total volume AND separated buy/sell volumes
         agg_dict = {
-            'volume_usd': 'sum',
-            'buy_volume_usd': 'sum',
-            'sell_volume_usd': 'sum',
-            'market_cap_sol': 'last',
-            'tx_buy_count': 'sum', 
-            'tx_sell_count': 'sum',
+            'volume_usd': 'sum', 'buy_volume_usd': 'sum', 'sell_volume_usd': 'sum',
+            'market_cap_sol': 'last', 'tx_buy_count': 'sum', 'tx_sell_count': 'sum',
             'sol_price_usd': 'mean' 
         }
         aggregated_data = resampler.agg(agg_dict)
@@ -280,23 +263,17 @@ async def calculate_all_features(
         mint_df[['volume_usd', 'buy_volume_usd', 'sell_volume_usd']] = mint_df[['volume_usd', 'buy_volume_usd', 'sell_volume_usd']].fillna(0)
         mint_df.dropna(subset=['Close'], inplace=True)
 
-        # Skip to the next token if the DataFrame is empty or has too few rows for feature calculation.
-        if mint_df.empty or len(mint_df) < 20:
-            continue
+        if mint_df.empty or len(mint_df) < 20: continue
             
-        # --- 4. Calculate Time-Based Features ---
         pump_features = _calculate_pump_features(mint_df.copy())
         mint_df = mint_df.join(pump_features, how='left')
 
-        # --- 5. Merge Time-Aware Rugcheck & Socials ---
         if not rugcheck_df.empty:
             mint_rugcheck = rugcheck_df[rugcheck_df['mint'] == mint].set_index('timestamp').sort_index()
             if not mint_rugcheck.empty:
                 mint_df = pd.merge_asof(mint_df, mint_rugcheck[['rugcheck_score']], left_index=True, right_index=True, direction='backward')
-            else:
-                mint_df['rugcheck_score'] = np.nan
+            else: mint_df['rugcheck_score'] = np.nan
         
-        # --- 6. Merge Static Info & Calculate Age ---
         if not token_info_df.empty:
             mint_info = token_info_df[token_info_df['mint'] == mint].iloc[0] if not token_info_df[token_info_df['mint'] == mint].empty else None
             if mint_info is not None:
@@ -304,33 +281,18 @@ async def calculate_all_features(
                 mint_df['token_creation_time'] = mint_info['token_creation_time']
                 mint_df['token_age_seconds'] = (mint_df.index - mint_info['token_creation_time']).total_seconds()
 
-        # --- 7. Final Cleanup and Normalization ---
         final_df = mint_df.copy()
-        final_df['mint'] = mint
-        
-        # Fill NaNs and normalize scores
-        final_df['rugcheck_score'] = final_df['rugcheck_score'].fillna(2500)
-        final_df['socials_score'] = final_df['socials_score'].fillna(100)
+        final_df['rugcheck_score'] = final_df['rugcheck_score'].fillna(2500) / 2500.0
+        final_df['socials_score'] = final_df['socials_score'].fillna(100) / 100.0
         final_df.fillna(0, inplace=True)
+        
+        for group_name, features in FEATURE_GROUPS.items():
+            group_cols = [f for f in features if f in final_df.columns]
+            missing_cols = set(features) - set(group_cols)
+            group_df = final_df[group_cols].copy()
+            for col in missing_cols: group_df[col] = 0.0
+            for col in group_df.columns: group_df[col] = group_df[col].astype(np.float32)
+            grouped_feature_data[group_name][mint] = group_df
 
-        # --- MODIFICATION START for MLFlow (Handling Integers With Missing Values) ---
-        # Explicitly cast all numeric feature columns to float32 to prevent MLflow warnings
-        # and ensure consistency for the model.
-        numeric_feature_cols = final_df.select_dtypes(include=np.number).columns.tolist()
-        # Exclude columns that should remain integers if any, but for this case, casting all is safe.
-        # Remove 'mint' if it was accidentally included
-        if 'mint' in numeric_feature_cols:
-            numeric_feature_cols.remove('mint')
-
-        for col in numeric_feature_cols:
-            final_df[col] = final_df[col].astype(np.float32)
-        # --- MODIFICATION END ---
-
-        # Normalize scores to a 0-1 range
-        final_df['rugcheck_score'] = final_df['rugcheck_score'] / 2500.0
-        final_df['socials_score'] = final_df['socials_score'] / 100.0
-
-        processed_token_data[mint] = final_df
-
-    logger.info(f"Finished feature engineering. Processed data for {len(processed_token_data)} tokens.")
-    return processed_token_data
+    logger.info(f"Finished feature engineering for {len(unique_mints)} tokens into {len(FEATURE_GROUPS)} groups.")
+    return grouped_feature_data

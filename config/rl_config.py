@@ -6,6 +6,43 @@ operational modes like tuning, training, and fine-tuning.
 """
 import torch as th
 
+# --- NEW: Feature Store Configuration ---
+# Defines the location and version of the pre-computed Parquet feature data lake.
+RL_FEATURE_STORE_PATH = "data/rl_feature_store"
+RL_FEATURE_STORE_VERSION = "0.1"
+
+# --- NEW: Feature Group Definitions ---
+# Logically groups features for modular storage and loading in the ETL pipeline.
+# This dictionary drives how data is partitioned in the feature store.
+FEATURE_GROUPS = {
+    'base_ohlcv': [
+        'Open', 'High', 'Low', 'Close', 'volume_usd', 'buy_volume_usd',
+        'sell_volume_usd', 'market_cap_sol', 'tx_buy_count', 'tx_sell_count', 'sol_price_avg'
+    ],
+    'static_and_age': [
+        'rugcheck_score', 'socials_score', 'token_age_seconds'
+    ],
+    'price_change_and_volatility': [
+        'price_change_15s', 'price_change_30s', 'volatility_15s',
+        'atr_7', 'atr_14', 'bollinger_width'
+    ],
+    'momentum_indicators': [
+        'rsi_3', 'rsi_6', 'cci_20', 'macd', 'macd_signal',
+        'macd_histogram', 'adx_15s'
+    ],
+    'volume_and_flow': [
+        'volume_change_15s', 'buy_sell_ratio', 'buy_sell_ratio_15s',
+        'tx_buy_count_15s', 'tx_sell_count_15s', 'tx_total_count_15s',
+        'ad_line', 'obv'
+    ],
+    'bollinger_bands': [
+        'bollinger_upper', 'bollinger_lower'
+    ],
+    'emas': [
+        'ema_short', 'ema_long'
+    ]
+}
+
 # --- Central Configuration Dictionary ---
 RL_CONFIG = {
     "common": {
@@ -15,12 +52,7 @@ RL_CONFIG = {
         # --- Training Data Configuration ---
         "DATA_START_DATE": "2025-06-26T00:00:00Z",
         "DATA_END_DATE": "2025-07-20T00:00:00Z",
-        "MIN_TRADE_COUNT_FOR_DATASET": 100,
-
-        # --- Model & Data Paths (OBSOLETE - Kept for reference, but not used) ---
-        # "RL_MODELS_DIR": "data/rl_models", # This is now managed by MLflow
-        # "RL_LOGS_DIR": "data/rl_logs",     # This is now managed by MLflow
-        "BEST_MODEL_PATH": "data/rl_models/best_model.zip", # Legacy, might be used by older scripts
+        "MIN_TRADE_COUNT_FOR_DATASET": 50,
 
         # --- Caching and Data Splitting ---
         "CACHE_STRATEGY": "parquet",
@@ -29,8 +61,8 @@ RL_CONFIG = {
 
         # --- Environment Configuration ---
         "ENV_INITIAL_BALANCE": 100.0,
-        "ENV_MAX_CONCURRENT_POSITIONS": 10,
-        "ENV_NUM_TOP_TOKENS_TO_OBSERVE": 15,
+        "ENV_MAX_CONCURRENT_POSITIONS": 5,
+        "ENV_NUM_TOP_TOKENS_TO_OBSERVE": 10,
         "ENV_ACTION_BUY_THRESHOLD": 0.2,
         "ENV_ACTION_SELL_THRESHOLD": -0.2,
         "ENV_CAPITAL_PER_BUY_PERCENT": 0.95,

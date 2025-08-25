@@ -1,8 +1,19 @@
 # rl_agent/data/cache_manager.py
 """
-Utility for managing cached data preparation assets to avoid re-computation.
-The cache is aware of the data window (start/end dates) and can use
-different storage strategies (single pickle vs. multi-file parquet).
+DEPRECATED: This module is part of the legacy data preparation pipeline.
+
+This CacheManager was used to compute and cache features on-the-fly during
+the training script's execution. This approach has been replaced by a more
+robust, offline ETL pipeline.
+
+The new workflow is as follows:
+1.  Run `rl_agent/etl/prepare_rl_dataset.py` to pre-compute all features and save
+    them to a versioned Parquet data lake (`data/rl_feature_store/`).
+2.  The `rl_agent.data.data_manager.DataManager` now acts as a feature
+    assembler, reading directly from this pre-computed store.
+
+This file is kept for historical reference but should not be used for any
+new development.
 """
 import os
 import hashlib

@@ -18,19 +18,16 @@ import mlflow
 from mlflow.tracking import MlflowClient
 from mlflow.exceptions import MlflowException
 import tempfile
-
 from datetime import datetime
 
-# --- Set the MLflow tracking URI at the very beginning ---
-# This ensures all subsequent MLflow calls use this custom directory.
+# --- Set MLflow tracking URI at the beginning ---
 mlflow.set_tracking_uri("file:./data/rl_runs")
 
-
 # --- Constants for MLflow Experiment Names ---
-# These names must match those in your training scripts
 MLFLOW_EXPERIMENT_TUNING = "PumpTrader.RL Hyperparameter Tuning"
 MLFLOW_EXPERIMENT_TRAINING = "PumpTrader.RL PPO Training"
 MLFLOW_EXPERIMENT_ANALYSIS = "PumpTrader.RL Feature Analysis"
+MLFLOW_EXPERIMENT_DATASET = "PumpTrader.RL Dataset Generation"
 
 
 # --- Helper Functions ---
@@ -182,6 +179,18 @@ def get_artifact_path(run_id: str, artifact_name: str, dst_path: str):
     except MlflowException as e:
         print(f"❌ Error downloading artifact '{artifact_name}': {e}")
         return None
+    
+def generate_dataset():
+    """Starts the ETL process to generate the feature store."""
+    print("\n--- Phase 0: Generate/Update Feature Store (ETL) ---")
+    start_date = input("Enter start date (e.g., 2025-06-26T00:00:00Z): ")
+    end_date = input("Enter end date (e.g., 2025-07-20T00:00:00Z): ")
+    version = input("Enter dataset version (e.g., 1.0): ")
+    if not all([start_date, end_date, version]):
+        print("Aborted: All fields are required.")
+        return
+    command = ["python", "rl_agent/etl/prepare_rl_dataset.py", "--start-date", start_date, "--end-date", end_date, "--output-version", version]
+    run_command(command)
 
 # --- Main Menu Functions ---
 
@@ -311,39 +320,34 @@ def main_menu():
     while True:
         questions = [
             inquirer.List('action',
-                          message="MLOps Command Center - What would you like to do?",
-                          choices=[
-                              ('1) Start Hyperparameter Tuning (Optuna)', 'tune'),
-                              ('2) Train a New Model', 'train'),
-                              ('3) Continue Training a Model', 'continue'),
-                              ('4) Perform Model Fine-Tuning', 'finetune'),
-                              ('5) Start Feature Importance Analysis', 'analyze'),
-                              ('6) Exit', 'exit')
-                          ],
-                          carousel=True
-                          ),
+                message="MLOps Command Center",
+                choices=[
+                    ('0) Generate/Update Feature Store (ETL)', 'etl'),
+                    ('1) Start Hyperparameter Tuning (Optuna)', 'tune'),
+                    ('2) Train a New Model', 'train'),
+                    ('3) Continue Training a Model', 'continue'),
+                    ('4) Perform Model Fine-Tuning', 'finetune'),
+                    ('5) Start Feature Importance Analysis', 'analyze'),
+                    ('6) Exit', 'exit')
+                ],
+                carousel=True
+            ),
         ]
         answer = inquirer.prompt(questions)
         action = answer['action'] if answer else 'exit'
 
-        if action == 'tune':
-            start_tuning()
-        elif action == 'train':
-            start_training()
-        elif action == 'continue':
-            continue_or_finetune_training('continue')
-        elif action == 'finetune':
-            continue_or_finetune_training('finetune')
-        elif action == 'analyze':
-            start_feature_analysis()
-        elif action == 'exit':
-            print("👋 Goodbye!")
-            break
+        if action == 'etl': generate_dataset()
+        elif action == 'tune': start_tuning()
+        elif action == 'train': start_training()
+        elif action == 'continue': continue_or_finetune_training('continue')
+        elif action == 'finetune': continue_or_finetune_training('finetune')
+        elif action == 'analyze': start_feature_analysis()
+        elif action == 'exit': print("👋 Goodbye!"); break
 
         input("\nPress Enter to return to the main menu...")
         os.system('cls' if os.name == 'nt' else 'clear')
 
-
 if __name__ == "__main__":
+    os.makedirs("./.rl_staging", exist_ok=True)
     check_mlflow_ui()
     main_menu()
