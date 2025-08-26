@@ -243,6 +243,10 @@ async def calculate_all_features(
     
     logger.info(f"Starting feature engineering for {len(unique_mints)} tokens...")
 
+    # We'll collect final column names across all tokens
+    # Use a set to avoid duplicates if different mints produce different columns
+    final_columns = set()
+
     for mint in tqdm(unique_mints, desc="Processing Tokens"):
         mint_trades = trades_df[trades_df['mint'] == mint].set_index('timestamp').sort_index()
         if mint_trades.empty: continue
@@ -286,6 +290,9 @@ async def calculate_all_features(
         final_df['socials_score'] = final_df['socials_score'].fillna(100) / 100.0
         final_df.fillna(0, inplace=True)
         
+        # Add columns from this mint to the global set
+        final_columns.update(final_df.columns)
+
         for group_name, features in FEATURE_GROUPS.items():
             group_cols = [f for f in features if f in final_df.columns]
             missing_cols = set(features) - set(group_cols)
@@ -295,4 +302,6 @@ async def calculate_all_features(
             grouped_feature_data[group_name][mint] = group_df
 
     logger.info(f"Finished feature engineering for {len(unique_mints)} tokens into {len(FEATURE_GROUPS)} groups.")
-    return grouped_feature_data
+
+    final_column_list = sorted(final_columns)
+    return grouped_feature_data, final_column_list
