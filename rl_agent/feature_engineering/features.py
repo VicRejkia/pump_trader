@@ -7,7 +7,7 @@ with one DataFrame per token.
 import pandas as pd
 import numpy as np
 import warnings
-from typing import Dict, List
+from typing import Dict, List, Tuple
 from tqdm import tqdm
 
 import sys
@@ -17,7 +17,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from bot_logger import logger
-from config.rl_config import FEATURE_GROUPS
+from config.rl_config import FEATURE_GROUPS, get_active_features
 
 warnings.filterwarnings(
     "ignore",
@@ -210,14 +210,14 @@ async def calculate_all_features(
     rugcheck_df: pd.DataFrame,
     token_info_df: pd.DataFrame,
     dexscreener_df: pd.DataFrame
-) -> Dict[str, Dict[str, pd.DataFrame]]:
+) -> Tuple[Dict[str, Dict[str, pd.DataFrame]], List[str]]:
     """
     Main pipeline: Processes raw data and returns a nested dictionary of
     feature group DataFrames, structured as {group_name: {mint: df}}.
     """
     if trades_df.empty:
         logger.warning("Trades DataFrame is empty. Cannot perform feature engineering.")
-        return {}
+        return {}, []
 
     # --- 1. Data Cleaning & Type Conversion ---
     for df, date_col in [(trades_df, 'timestamp'), (rugcheck_df, 'timestamp'), 
@@ -242,10 +242,7 @@ async def calculate_all_features(
     unique_mints = trades_df['mint'].unique()
     
     logger.info(f"Starting feature engineering for {len(unique_mints)} tokens...")
-
-    # We'll collect final column names across all tokens
-    # Use a set to avoid duplicates if different mints produce different columns
-    final_columns = set()
+    all_feature_columns = set()
 
     for mint in tqdm(unique_mints, desc="Processing Tokens"):
         mint_trades = trades_df[trades_df['mint'] == mint].set_index('timestamp').sort_index()
@@ -290,18 +287,18 @@ async def calculate_all_features(
         final_df['socials_score'] = final_df['socials_score'].fillna(100) / 100.0
         final_df.fillna(0, inplace=True)
         
-        # Add columns from this mint to the global set
-        final_columns.update(final_df.columns)
+        # *** CRITICAL FIX: Add mint as a column for identification later ***
+        final_df['mint'] = mint
+        all_feature_columns.update(final_df.columns)
 
         for group_name, features in FEATURE_GROUPS.items():
             group_cols = [f for f in features if f in final_df.columns]
-            missing_cols = set(features) - set(group_cols)
             group_df = final_df[group_cols].copy()
-            for col in missing_cols: group_df[col] = 0.0
-            for col in group_df.columns: group_df[col] = group_df[col].astype(np.float32)
+            for col in group_df.columns: 
+                group_df[col] = group_df[col].astype(np.float32) if pd.api.types.is_numeric_dtype(group_df[col]) else group_df[col]
             grouped_feature_data[group_name][mint] = group_df
 
     logger.info(f"Finished feature engineering for {len(unique_mints)} tokens into {len(FEATURE_GROUPS)} groups.")
 
-    final_column_list = sorted(final_columns)
-    return grouped_feature_data, final_column_list
+    # Return the full list of generated columns
+    return grouped_feature_data, sorted(list(all_feature_columns))

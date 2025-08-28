@@ -1,24 +1,27 @@
 # rl_agent/data/data_manager.py
 """
-Handles assembling feature data from a pre-computed Parquet feature store
-for the RL environment.
+Handles assembling feature data by directly accessing the MLflow artifact store path.
+NOTE: This approach is optimized for a local 'file://' MLflow backend.
 """
 import os
 import sys
 from typing import Dict, Optional, Tuple, List
 import pandas as pd
-from datetime import datetime
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
+import mlflow
+from mlflow.tracking import MlflowClient
+from urllib.parse import urlparse
+import platform
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from bot_logger import logger
-from config.rl_config import FEATURE_GROUPS, RL_FEATURE_STORE_PATH, RL_FEATURE_STORE_VERSION
+from config.rl_config import FEATURE_GROUPS, get_active_features
 
-# Dynamically create the reverse mapping from the config to avoid redundancy
+# Dynamically create the reverse mapping from the config
 FEATURE_TO_GROUP_MAP = {
     feature: group_name
     for group_name, features in FEATURE_GROUPS.items()
@@ -27,16 +30,18 @@ FEATURE_TO_GROUP_MAP = {
 
 class DataManager:
     """
-    Assembles feature data for RL training by reading from a partitioned Parquet store.
-    - Determines which feature groups to load based on the active features.
-    - Loads and merges data for a specified list of tokens and a date range.
+    Manages RL feature data by linking to a versioned dataset in MLflow.
+    - Determines the direct local path to the artifact store for a given run.
+    - Loads and merges data for specified tokens from the Parquet store.
     - Splits available tokens into training and evaluation sets.
-    - Combines token data into chronological DataFrames for the Gym environment.
     """
-    def __init__(self, rl_config: dict):
+    def __init__(self, rl_config: dict, dataset_run_id: str):
         self.rl_config = rl_config
-        self.feature_store_path = os.path.join(project_root, RL_FEATURE_STORE_PATH, f"v{RL_FEATURE_STORE_VERSION}")
+        self.dataset_run_id = dataset_run_id
         
+        # The path will be populated dynamically by resolving the artifact URI.
+        self.feature_store_path: Optional[str] = None
+
         self.training_data: Optional[pd.DataFrame] = None
         self.evaluation_data: Optional[pd.DataFrame] = None
         self.training_set_mints: List[str] = []
@@ -49,33 +54,64 @@ class DataManager:
     def get_evaluation_data(self) -> Optional[pd.DataFrame]: return self.evaluation_data
     def get_split_token_mints(self) -> Tuple[List[str], List[str]]: return self.training_set_mints, self.evaluation_set_mints
 
+    def _resolve_artifact_path(self) -> bool:
+        """
+        Gets the direct, local filesystem path to the 'feature_store' artifact.
+        This method is suitable for 'file://' MLflow backends.
+        """
+        try:
+            logger.info(f"Resolving direct artifact path for run '{self.dataset_run_id}'...")
+            client = MlflowClient()
+            run = client.get_run(self.dataset_run_id)
+            artifact_uri = run.info.artifact_uri
+            
+            # The artifact_uri is the root of the artifacts for the run.
+            # We need to append our specific artifact's path.
+            parsed_uri = urlparse(artifact_uri)
+            
+            # For local file URIs (e.g., 'file:///C:/path'), extract the path correctly.
+            if parsed_uri.scheme == 'file':
+                # On Windows, urlparse might add an extra leading '/' (e.g., /C:/...).
+                # We need to remove it.
+                local_artifact_root = parsed_uri.path
+                if platform.system() == "Windows" and local_artifact_root.startswith('/'):
+                    local_artifact_root = local_artifact_root[1:]
+                
+                self.feature_store_path = os.path.join(local_artifact_root, "feature_store")
+                logger.info(f"✅ Resolved artifact path to: {self.feature_store_path}")
+                return True
+            else:
+                logger.error(f"Cannot resolve direct path for non-file URI: {artifact_uri}. This method only works for local MLflow stores.")
+                return False
+
+        except Exception as e:
+            logger.error(f"Failed to resolve artifact path for run '{self.dataset_run_id}': {e}", exc_info=True)
+            return False
+
     def _load_data_for_mints(
         self,
         mints_to_load: List[str],
-        start_date: datetime,
-        end_date: datetime,
         active_features: List[str],
         verbose: bool = True
-    ) -> Optional[Dict[str, pd.DataFrame]]:
-        if not mints_to_load: return {}
+    ) -> Dict[str, pd.DataFrame]:
+        if not mints_to_load or self.feature_store_path is None: return {}
 
         groups_to_load = {'base_ohlcv'}
         for feature in active_features:
             if feature in FEATURE_TO_GROUP_MAP:
                 groups_to_load.add(FEATURE_TO_GROUP_MAP[feature])
-            elif feature not in FEATURE_GROUPS['base_ohlcv']:
-                logger.warning(f"Feature '{feature}' not mapped to a group and will be ignored.")
         if verbose: logger.info(f"Required feature groups: {sorted(list(groups_to_load))}")
 
-        date_range = pd.date_range(start=start_date, end=end_date, freq='D')
         all_mint_data = {mint: [] for mint in mints_to_load}
-
         for group in groups_to_load:
-            for day in date_range:
-                group_path = os.path.join(self.feature_store_path, f"group={group}", f"date={day.strftime('%Y-%m-%d')}")
-                if not os.path.isdir(group_path): continue
+            group_root_path = os.path.join(self.feature_store_path, f"group={group}")
+            if not os.path.isdir(group_root_path): continue
+
+            for date_dir in os.listdir(group_root_path):
+                date_path = os.path.join(group_root_path, date_dir)
+                if not os.path.isdir(date_path): continue
                 for mint in mints_to_load:
-                    file_path = os.path.join(group_path, f"{mint}.parquet")
+                    file_path = os.path.join(date_path, f"{mint}.parquet")
                     if os.path.exists(file_path):
                         try:
                             all_mint_data[mint].append(pd.read_parquet(file_path))
@@ -83,49 +119,54 @@ class DataManager:
                             if verbose: logger.warning(f"Could not read {file_path}: {e}")
 
         assembled_dfs = {}
-        for mint, df_list in tqdm(all_mint_data.items(), desc="Assembling mint dataframes", disable=not verbose):
+        desc = "Assembling mint dataframes"
+        for mint, df_list in tqdm(all_mint_data.items(), desc=desc, disable=not verbose):
             if df_list:
                 full_df = pd.concat(df_list).sort_index()
-                assembled_dfs[mint] = full_df.loc[~full_df.index.duplicated(keep='first')]
+                full_df = full_df.loc[~full_df.index.duplicated(keep='first')]
+                assembled_dfs[mint] = full_df
             
         return assembled_dfs
 
     def load_and_prepare_data(self, mints_to_load: Optional[List[str]] = None, verbose: bool = True) -> bool:
-        start_date = datetime.fromisoformat(self.rl_config['DATA_START_DATE'].replace("Z", "+00:00"))
-        end_date = datetime.fromisoformat(self.rl_config['DATA_END_DATE'].replace("Z", "+00:00"))
-        active_features = [f for f, is_active in self.rl_config['FEATURES_CONFIG'].items() if is_active]
-
-        if not os.path.isdir(self.feature_store_path):
-            logger.error(f"Feature store not found at: {self.feature_store_path}")
-            logger.error("Please run `rl_agent/etl/prepare_rl_dataset.py` first.")
-            return False
+        if self.feature_store_path is None:
+            if not self._resolve_artifact_path():
+                return False
+        
+        active_features = get_active_features(self.rl_config)
+        active_features_with_mint = active_features + ['mint']
 
         if not mints_to_load and not (self.training_set_mints or self.evaluation_set_mints):
-            logger.info("Discovering available tokens in the feature store...")
+            if verbose: logger.info("Discovering available tokens in the feature store...")
             base_path = os.path.join(self.feature_store_path, "group=base_ohlcv")
+            
+            if not os.path.isdir(base_path):
+                 logger.error(f"Critical error: 'group=base_ohlcv' not found at path {base_path}")
+                 return False
+
             available_mints = set(os.path.splitext(f)[0] for root, _, files in os.walk(base_path) for f in files if f.endswith(".parquet"))
             
             if not available_mints:
                 logger.error("No token data found in the feature store. Aborting.")
                 return False
 
-            logger.info(f"Found {len(available_mints)} unique tokens. Splitting into train/eval sets.")
-            train_ratio, eval_ratio = self.rl_config.get('DATA_SPLIT_RATIO')
+            if verbose: logger.info(f"Found {len(available_mints)} unique tokens. Splitting into train/eval sets.")
+            train_ratio = self.rl_config.get('DATA_SPLIT_RATIO')[0]
             self.training_set_mints, self.evaluation_set_mints = train_test_split(
-                list(available_mints), train_size=train_ratio, test_size=eval_ratio,
+                list(available_mints), train_size=train_ratio,
                 random_state=self.rl_config.get('DATA_SPLIT_RANDOM_SEED'), shuffle=True
             )
         
         mints_for_training = mints_to_load or self.training_set_mints
         mints_for_evaluation = [] if mints_to_load else self.evaluation_set_mints
 
-        training_dict = self._load_data_for_mints(mints_for_training, start_date, end_date, active_features, verbose)
+        training_dict = self._load_data_for_mints(mints_for_training, active_features_with_mint, verbose)
         if training_dict:
             self.training_data = pd.concat(training_dict.values()).sort_index()
             if verbose: logger.info(f"Training data prepared. Total steps: {len(self.training_data)}")
         
         if mints_for_evaluation:
-            eval_dict = self._load_data_for_mints(mints_for_evaluation, start_date, end_date, active_features, verbose)
+            eval_dict = self._load_data_for_mints(mints_for_evaluation, active_features_with_mint, verbose)
             if eval_dict:
                 self.evaluation_data = pd.concat(eval_dict.values()).sort_index()
                 if verbose: logger.info(f"Evaluation data prepared. Total steps: {len(self.evaluation_data)}")

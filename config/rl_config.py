@@ -6,10 +6,10 @@ operational modes like tuning, training, and fine-tuning.
 """
 import torch as th
 
-# --- NEW: Feature Store Configuration ---
-# Defines the location and version of the pre-computed Parquet feature data lake.
-RL_FEATURE_STORE_PATH = "data/rl_feature_store"
-RL_FEATURE_STORE_VERSION = "0.1"
+# --- NEW: Local cache for downloaded MLflow datasets ---
+# Defines the local directory where feature stores downloaded from MLflow runs will be cached.
+RL_LOCAL_CACHE_PATH = "data/rl_cache"
+RL_FEATURE_STORE_VERSION = "0.1" # Kept for compatibility with ETL script versioning
 
 # --- NEW: Feature Group Definitions ---
 # Logically groups features for modular storage and loading in the ETL pipeline.
@@ -17,7 +17,8 @@ RL_FEATURE_STORE_VERSION = "0.1"
 FEATURE_GROUPS = {
     'base_ohlcv': [
         'Open', 'High', 'Low', 'Close', 'volume_usd', 'buy_volume_usd',
-        'sell_volume_usd', 'market_cap_sol', 'tx_buy_count', 'tx_sell_count', 'sol_price_avg'
+        'sell_volume_usd', 'market_cap_sol', 'tx_buy_count', 'tx_sell_count', 'sol_price_avg',
+        'mint' # IMPORTANT: Ensure 'mint' is part of the base features
     ],
     'static_and_age': [
         'rugcheck_score', 'socials_score', 'token_age_seconds'
@@ -50,8 +51,8 @@ RL_CONFIG = {
         "DEVICE": "cuda" if th.cuda.is_available() else "cpu",
 
         # --- Training Data Configuration ---
-        "DATA_START_DATE": "2025-06-26T00:00:00Z",
-        "DATA_END_DATE": "2025-07-20T00:00:00Z",
+        # DATA_START_DATE and DATA_END_DATE are now obsolete and removed.
+        # The data source is determined by the selected MLflow dataset run.
         "MIN_TRADE_COUNT_FOR_DATASET": 50,
 
         # --- Caching and Data Splitting ---
@@ -130,19 +131,19 @@ RL_CONFIG = {
     "train": {
         "N_CPU": 3,
         "DEVICE": "cpu",
-        "PPO_FINAL_MODEL_TIMESTEPS": 2_000_000,
+        "PPO_FINAL_MODEL_TIMESTEPS": 50_000,
         "PPO_EVAL_FREQ": 2048,
     },
     "finetune": {
         "N_CPU": 3,
         "DEVICE": "cpu",
-        "PPO_FINAL_MODEL_TIMESTEPS": 500_000, # Shorter duration for fine-tuning
+        "PPO_FINAL_MODEL_TIMESTEPS": 50_000, # Shorter duration for fine-tuning
         "PPO_EVAL_FREQ": 2048,
     },
     "continue": {
         "N_CPU": 3,
         "DEVICE": "cpu",
-        "PPO_FINAL_MODEL_TIMESTEPS": 1_000_000,
+        "PPO_FINAL_MODEL_TIMESTEPS": 50_000,
         "PPO_EVAL_FREQ": 2048,
     }
 }
@@ -164,4 +165,5 @@ def get_active_features(config: dict) -> list[str]:
     and returns a list of feature names that are set to True.
     """
     features_config = config.get("FEATURES_CONFIG", {})
-    return [feature for feature, is_active in features_config.items() if is_active]
+    # Return all features except 'mint', which is an identifier, not a training feature
+    return [feature for feature, is_active in features_config.items() if is_active and feature != 'mint']

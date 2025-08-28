@@ -30,6 +30,7 @@ class MemeCoinEnv(gym.Env):
         self.rl_config = rl_config
         self.reward_function = RewardFunction(self.rl_config)
         self.silent = silent # MODIFIED: Use the passed argument
+        self.eps = self.rl_config.get('ENV_EPS', EPS)
 
         self.feature_columns = get_active_features(self.rl_config)
         
@@ -74,7 +75,8 @@ class MemeCoinEnv(gym.Env):
         self.current_step = 0
         self.reward_function.reset(self.initial_balance)
         self._steps = 0
-        self._warmup_left = WARMUP_STEPS
+        self._warmup_left = self.rl_config.get('ENV_WARMUP_STEPS', WARMUP_STEPS)
+        # --- NEW: Episode stats for logging ---
         self.episode_buys = 0
         self.episode_sells = 0
         
@@ -122,7 +124,7 @@ class MemeCoinEnv(gym.Env):
 
         next_step_data = next(self.data_manager, None)
         terminated = next_step_data is None
-        truncated = self._steps >= MAX_STEPS_PER_EPISODE
+        truncated = self._steps >= self.rl_config.get('ENV_MAX_STEPS_PER_EPISODE', MAX_STEPS_PER_EPISODE)
         
         if not terminated:
             self.current_timestamp, self.current_data_point = next_step_data
@@ -155,15 +157,15 @@ class MemeCoinEnv(gym.Env):
         return []
 
     def _get_observation(self) -> np.ndarray:
-        balance_norm = self.balance / max(self.portfolio_value, EPS)
-        portfolio_value_norm = self.portfolio_value / max(self.initial_balance, EPS)
+        balance_norm = self.balance / max(self.portfolio_value, self.eps)
+        portfolio_value_norm = self.portfolio_value / max(self.initial_balance, self.eps)
         num_positions_norm = len(self.positions) / self.max_concurrent_positions
         
         unrealized_pnl = sum(
-            (self._get_price_for_mint(mint) - pos['entry_price']) * (pos['size_sol'] / max(pos['entry_price'], EPS))
+            (self._get_price_for_mint(mint) - pos['entry_price']) * (pos['size_sol'] / max(pos['entry_price'], self.eps))
             for mint, pos in self.positions.items() if self._get_price_for_mint(mint) is not None
         )
-        unrealized_pnl_norm = unrealized_pnl / max(self.initial_balance, EPS)
+        unrealized_pnl_norm = unrealized_pnl / max(self.initial_balance, self.eps)
 
         portfolio_features = np.array([balance_norm, portfolio_value_norm, num_positions_norm, unrealized_pnl_norm], dtype=np.float32)
 
@@ -182,12 +184,12 @@ class MemeCoinEnv(gym.Env):
                     pos = self.positions[mint]
                     price = self._get_price_for_mint(mint)
                     time_in_pos = (self.current_timestamp - pos['timestamp']).total_seconds() if self.current_timestamp else 0
-                    pnl_ratio = (price - pos['entry_price']) / max(pos['entry_price'], EPS) if price is not None else 0
-                    highest_price_ratio = price / max(pos['highest_price'], EPS) if price is not None else 1.0
+                    pnl_ratio = (price - pos['entry_price']) / max(pos['entry_price'], self.eps) if price is not None else 0
+                    highest_price_ratio = price / max(pos['highest_price'], self.eps) if price is not None else 1.0
 
                     position_features = np.array([
                         1.0, 
-                        pos['size_sol'] / max(self.portfolio_value, EPS),
+                        pos['size_sol'] / max(self.portfolio_value, self.eps),
                         pnl_ratio,
                         min(time_in_pos / self.time_norm_seconds, 1.0),
                         highest_price_ratio
@@ -215,7 +217,7 @@ class MemeCoinEnv(gym.Env):
                 current_price = token_data.get('Close')
                 if current_price is None: continue
 
-                sell_value_sol = position['size_sol'] * (current_price / max(position['entry_price'], EPS))
+                sell_value_sol = position['size_sol'] * (current_price / max(position['entry_price'], self.eps))
                 pnl = sell_value_sol - position['size_sol']
                 self.balance += sell_value_sol
                 del self.positions[mint]
@@ -259,7 +261,7 @@ class MemeCoinEnv(gym.Env):
                 continue
 
             position['highest_price'] = max(position['highest_price'], current_price)
-            held_value += position['size_sol'] * (current_price / max(position['entry_price'], EPS))
+            held_value += position['size_sol'] * (current_price / max(position['entry_price'], self.eps))
         
         self.portfolio_value = self.balance + held_value
         

@@ -11,27 +11,30 @@ WORKFLOW INSTRUCTIONS
 --------------------------------------------------------------------------------------
 PRE-REQUISITE: DATA PREPARATION
 Before running any training, the feature store must be populated using the ETL script.
+This creates a dataset run in MLflow.
 
-    Command:
-    python rl_agent/etl/prepare_rl_dataset.py --start-date <START> --end-date <END> --output-version 1.0
+    Command (via rl_main.py):
+    > 0) Generate/Update Feature Store (ETL)
 
 PHASE 1: HYPERPARAMETER TUNING (tune)
 Find the best model settings using Optuna, with all trials logged to MLflow.
+Requires a dataset run ID to source the data.
 
-    Command:
-    python rl_agent/training/train.py tune
+    Command (via rl_main.py):
+    > 1) Start Hyperparameter Tuning (Optuna)
 
 PHASE 2: NEW MODEL TRAINING (train)
 Train a new model from scratch using the best parameters from a tuning run.
 
-    Command:
-    python rl_agent/training/train.py train --params-path <PATH_TO_DOWNLOADED_JSON> --name <MODEL_NAME>
+    Command (via rl_main.py):
+    > 2) Train a New Model
 
 PHASE 3 & 4: CONTINUE OR FINETUNE
 Resume a previous training run or fine-tune an existing model.
 
-    Command:
-    python rl_agent/training/train.py continue --model-path <PATH_TO_MODEL.zip> --parent-run-id <RUN_ID> --name <NEW_NAME>
+    Command (via rl_main.py):
+    > 3) Continue Training a Model
+    > 4) Perform Model Fine-Tuning
 """
 import asyncio
 import json
@@ -60,7 +63,7 @@ import torch as th
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback, CallbackList
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecNormalize
+from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
 from stable_baselines3.common.evaluation import evaluate_policy
 from optuna.samplers import TPESampler
 from stable_baselines3.common.logger import configure
@@ -69,18 +72,21 @@ from stable_baselines3.common.logger import configure
 import mlflow
 from mlflow.tracking import MlflowClient
 from rl_agent.mlflow_model import log_sb3_model
+from mlflow.data.pandas_dataset import PandasDataset
+from mlflow.entities import RunStatus
 
 # --- Local Application Imports ---
 import nest_asyncio
-from config.rl_config import get_config_for_mode, get_active_features
+from config.rl_config import get_config_for_mode
 from bot_logger import logger, setup_logging
 from rl_agent.agents.ppo_agent import create_ppo_agent
 from rl_agent.data.data_manager import DataManager
 from rl_agent.environments.meme_coin_env import MemeCoinEnv
+from rl_agent.utils.mlflow_utils import get_parent_run_info, build_tensorboard_command, find_mlflow_entity_by_run_id
+from rl_agent.utils.script_utils import generate_tensorboard_launch_scripts, generate_readme, generate_config_json
 
 # Apply asyncio patch for environments that use it internally
 nest_asyncio.apply()
-
 
 # ==============================================================================
 # MLflow and Experiment Constants
@@ -101,22 +107,18 @@ class AdvancedMlflowCallback(EvalCallback):
         self._last_eval_reward = -np.inf
 
     def _on_step(self) -> bool:
-        # Log training loss from the SB3 logger buffer
         for key in ["train/entropy_loss", "train/value_loss", "train/policy_gradient_loss", "train/approx_kl", "train/clip_fraction", "train/learning_rate"]:
             if key in self.logger.name_to_value:
                 mlflow.log_metric(key.replace("/", "_"), self.logger.name_to_value[key], step=self.num_timesteps)
 
-        # Log mean reward and length for episodes completed during training rollouts
         for info in self.locals.get("infos", []):
             if "episode" in info:
                 mlflow.log_metric("rollout_ep_rew_mean", info["episode"]["r"], step=self.num_timesteps)
                 mlflow.log_metric("rollout_ep_len_mean", info["episode"]["l"], step=self.num_timesteps)
         
-        # Trigger the parent class's evaluation logic
         if not super()._on_step():
             return False
 
-        # Log evaluation metrics only when a new evaluation has been performed
         if self.last_mean_reward != self._last_eval_reward:
             mlflow.log_metric("eval_mean_reward", self.last_mean_reward, step=self.num_timesteps)
             ep_lengths = self.eval_env.get_attr("episode_lengths")
@@ -125,6 +127,8 @@ class AdvancedMlflowCallback(EvalCallback):
             self._last_eval_reward = self.last_mean_reward
         return True
 
+
+# wher is this needed?
 def find_latest_dataset_run() -> mlflow.entities.Run | None:
     """Finds the most recent successful MLflow run from the dataset generation experiment."""
     client = MlflowClient()
@@ -145,6 +149,7 @@ def find_latest_dataset_run() -> mlflow.entities.Run | None:
     except Exception as e:
         logger.error(f"Could not fetch dataset run from MLflow: {e}", exc_info=True)
         return None
+
 
 # ==============================================================================
 # Optuna Objective for Hyperparameter Tuning
@@ -183,30 +188,27 @@ def sample_ppo_params(trial: optuna.trial.Trial, n_envs: int) -> Dict[str, Any]:
         },
     }
 
-def objective(trial: optuna.trial.Trial, rl_config: Dict, train_mints: List[str], eval_mints: List[str]) -> float:
+def objective(trial: optuna.trial.Trial, rl_config: Dict, train_mints: List[str], eval_mints: List[str], dataset_run_id: str) -> float:
     """An Optuna objective function that trains and evaluates a model for one trial."""
-    with mlflow.start_run(nested=True):
+    with mlflow.start_run(nested=True, log_system_metrics=True):
         train_env, eval_env = None, None
         try:
-            # Create a DataManager for a small, random subset of tokens to speed up tuning
             train_subset = random.sample(train_mints, min(len(train_mints), 50))
             eval_subset = random.sample(eval_mints, min(len(eval_mints), 10))
-            train_dm = DataManager(rl_config)
+            
+            train_dm = DataManager(rl_config, dataset_run_id=dataset_run_id)
             train_dm.load_and_prepare_data(mints_to_load=train_subset, verbose=False)
             train_env = DummyVecEnv([lambda: Monitor(MemeCoinEnv(train_dm, rl_config, silent=True))])
             
-            # Sample hyperparameters and log them
             params = sample_ppo_params(trial, n_envs=1)
             if params["policy_kwargs"]["activation_fn"] == 'ReLU':
                 params["policy_kwargs"]["activation_fn"] = th.nn.ReLU
             mlflow.log_params(params)
             
-            # Train the model
             model = PPO("MlpPolicy", train_env, device=rl_config.get('DEVICE', 'cpu'), verbose=0, **params)
             model.learn(total_timesteps=rl_config['PPO_TIMESTEPS_PER_TRIAL'])
             
-            # Evaluate the model
-            eval_dm = DataManager(rl_config)
+            eval_dm = DataManager(rl_config, dataset_run_id=dataset_run_id)
             eval_dm.load_and_prepare_data(mints_to_load=eval_subset, verbose=False)
             eval_env = DummyVecEnv([lambda: Monitor(MemeCoinEnv(eval_dm, rl_config, silent=True))])
             
@@ -226,43 +228,44 @@ def objective(trial: optuna.trial.Trial, rl_config: Dict, train_mints: List[str]
 # Main Workflow Functions
 # ==============================================================================
 
-async def run_hyperparameter_tuning(rl_config: Dict[str, Any]):
+async def run_hyperparameter_tuning(rl_config: Dict[str, Any], dataset_run_id: str):
     """Orchestrates the Optuna hyperparameter tuning process."""
     logger.info("PHASE 1: Starting Hyperparameter Tuning.")
     
-    # Load all available mints and split them for the tuning study
-    data_provider = DataManager(rl_config=rl_config)
+    data_provider = DataManager(rl_config=rl_config, dataset_run_id=dataset_run_id)
     if not data_provider.load_and_prepare_data():
-        logger.error("Failed to load data from feature store. Aborting tuning."); return
+        logger.error("Failed to load data. Aborting tuning."); return
     train_mints, eval_mints = data_provider.get_split_token_mints()
 
+    mlflow.set_tracking_uri('http://127.0.0.1:8080')
+
     mlflow.set_experiment(MLFLOW_EXPERIMENT_TUNING)
-    with mlflow.start_run(run_name=f"OptunaStudy_{datetime.now().strftime('%Y%m%d-%H%M%S')}"):
+    with mlflow.start_run(run_name=f"OptunaStudy_{datetime.now().strftime('%Y%m%d-%H%M%S')}", log_system_metrics=True):
         mlflow.log_params({"n_trials": rl_config['OPTUNA_N_TRIALS'], "timeout": rl_config['OPTUNA_TIMEOUT_SECONDS']})
+        mlflow.set_tag("source_dataset_run_id", dataset_run_id)
         
-        # Create and run the Optuna study
         study = optuna.create_study(direction="maximize", sampler=TPESampler(seed=42))
-        objective_with_args = partial(objective, rl_config=rl_config, train_mints=train_mints, eval_mints=eval_mints)
+        objective_with_args = partial(objective, rl_config=rl_config, train_mints=train_mints, eval_mints=eval_mints, dataset_run_id=dataset_run_id)
         study.optimize(objective_with_args, n_trials=rl_config['OPTUNA_N_TRIALS'], n_jobs=1, gc_after_trial=True)
 
         logger.info(f"Tuning finished. Best trial: #{study.best_trial.number} with reward: {study.best_trial.value:.4f}")
         mlflow.log_params(study.best_trial.params)
         mlflow.log_metric("best_trial_value", study.best_trial.value)
         
-        # Save the best parameters as a JSON artifact in MLflow
+        # --- FIX: Save best parameters using mlflow.log_dict for robustness ---
         best_params = study.best_trial.params
-        with tempfile.NamedTemporaryFile(mode='w', suffix=".json", delete=False) as tmp:
-            json.dump(best_params, tmp, indent=4); tmp_path = tmp.name
-        try:
-            mlflow.log_artifact(tmp_path, artifact_path="best_params.json")
-            logger.info("✅ Best hyperparameters logged to MLflow.")
-        finally: os.remove(tmp_path)
+        if 'policy_kwargs' in best_params and 'activation_fn' in best_params['policy_kwargs']:
+            if not isinstance(best_params['policy_kwargs']['activation_fn'], str):
+                 best_params['policy_kwargs']['activation_fn'] = 'ReLU'
 
-def make_env_lazy(rank: int, rl_config: Dict, mint_chunks: List[List[str]], seed: int = 0):
+        mlflow.log_dict(best_params, "best_params.json")
+        logger.info("✅ Best hyperparameters logged to MLflow as 'best_params.json'.")
+
+
+def make_env_lazy(rank: int, rl_config: Dict, mint_chunks: List[List[str]], dataset_run_id: str, seed: int = 0):
     """Factory function to create a lazy-loading environment for a subprocess."""
     def _init():
-        data_manager = DataManager(rl_config=rl_config)
-        # Each subprocess loads only its assigned slice of data
+        data_manager = DataManager(rl_config=rl_config, dataset_run_id=dataset_run_id)
         data_manager.load_and_prepare_data(mints_to_load=mint_chunks[rank], verbose=False)
         env = MemeCoinEnv(data_manager, rl_config, silent=True)
         env.reset(seed=seed + rank)
@@ -272,84 +275,154 @@ def make_env_lazy(rank: int, rl_config: Dict, mint_chunks: List[List[str]], seed
 async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace):
     """Orchestrates the main model training, continuation, or fine-tuning process."""
     mlflow.set_experiment(MLFLOW_EXPERIMENT_TRAINING)
+    client = MlflowClient()
     
-    with mlflow.start_run(run_name=f"{args.name}-{args.action}") as run:
+    with mlflow.start_run(run_name=f"{args.name}-{args.action}", log_system_metrics=True) as run:
         logger.info(f"Starting model '{args.action}' with MLflow run '{run.info.run_name}'.")
-        # Create a temporary local directory for this run's artifacts
         staging_dir = os.path.abspath(f"./.rl_staging/{run.info.run_id}")
         os.makedirs(staging_dir, exist_ok=True)
         
-        vec_env, eval_env = None, None  # Define to ensure they exist for the finally block
+        vec_env, eval_env = None, None
         try:
-            # --- 1. Log Run Parameters & Configs ---
+            
             mlflow.log_params(rl_config)
+
+            srl_config_staging = os.path.join(staging_dir, "config")
+            generate_config_json(rl_config, srl_config_staging)
+            mlflow.log_artifacts(srl_config_staging, artifact_path="config")
+
             mlflow.log_param("action", args.action)
+
+            # --- 1. Initial TensorBoard command (staging path) ---
+            current_run_name = run.data.tags.get("mlflow.runName", f"model_{run.info.run_id}")
+            tensorboard_staging_path = os.path.join(staging_dir, "tensorboard_logs")
+
+            parent_run_infos = []
+            if hasattr(args, 'parent_run_id') and args.parent_run_id:
+                parent_run_infos = get_parent_run_info(args.parent_run_id, client)
+
+            initial_cmd = build_tensorboard_command(
+                current_run_id=run.info.run_id,
+                current_run_name=current_run_name,
+                parent_run_infos=parent_run_infos,
+                current_tensorboard_path=tensorboard_staging_path,
+                client=client
+            )
+            # mlflow.log_param("tensorboard_log_command", initial_cmd)
+            logger.info(f"Run the Training TensorBoard UI with this command:\n`cmd:{initial_cmd}`")
+            print(initial_cmd)
+
+            mlflow.set_tag("source_dataset_run_id", args.dataset_run_id)
+
+            # --- Tags & Artifacts ---
             if hasattr(args, 'parent_run_id') and args.parent_run_id:
                 mlflow.set_tag("continued_from", args.parent_run_id)
             if hasattr(args, 'params_path') and args.params_path:
                 mlflow.log_artifact(args.params_path, "config")
-            
-            # --- 2. Log Dataset as Input (Best Practice) ---
-            logger.info("Finding and logging input dataset from ETL run...")
-            dataset_run = find_latest_dataset_run()
-            if dataset_run:
-                # This creates a traceable link between this training run and the data it used
-                mlflow.log_input(mlflow.get_run(dataset_run.info.run_id).inputs.dataset_inputs[0].dataset)
-            else:
-                logger.error("No dataset found from ETL runs. Please run the ETL first. Aborting.")
+
+            # --- 2. Retrieve Dataset & Prepare Data ---
+            dataset_run = find_mlflow_entity_by_run_id(args.dataset_run_id)
+            if not dataset_run:
+                logger.error("No dataset run found with ID: %s. Aborting.", args.dataset_run_id)
                 return
+            
+            datasets, contexts, tags_list = [], [], []
 
             # --- 3. Prepare Data & Environments ---
-            logger.info("Loading data from feature store and preparing environments...")
-            data_manager = DataManager(rl_config)
+            data_manager = DataManager(rl_config, dataset_run_id=args.dataset_run_id)
             if not data_manager.load_and_prepare_data(): return
+
             train_mints, eval_mints = data_manager.get_split_token_mints()
 
-            # Distribute training tokens across available CPU cores for parallelization
+            training_data = data_manager.get_training_data()
+            sample_train_df = training_data.iloc[0]
+            train_dataset: PandasDataset = mlflow.data.from_pandas(training_data, name=f"training_set")
+            datasets.append(train_dataset)
+            contexts.append(f"training_set")
+            tags_list.append({"num_tokens": str(len(train_mints))})
+
+            eval_data = data_manager.get_evaluation_data()
+            sample_eval_df = eval_data.iloc[0]
+            eval_dataset: PandasDataset = mlflow.data.from_pandas(eval_data, name=f"evaluation_set")
+            datasets.append(eval_dataset)
+            contexts.append(f"evaluation_set")
+            tags_list.append({"num_tokens": str(len(eval_mints))})
+
+
+            # Log all datasets
+            mlflow.log_inputs(
+                datasets=datasets,
+                contexts=contexts,
+                tags_list=tags_list
+            )
+
             n_cpu = rl_config['N_CPU']
             mint_chunks = [c.tolist() for c in np.array_split(train_mints, n_cpu) if c.size > 0]
-            vec_env = SubprocVecEnv([make_env_lazy(i, rl_config, mint_chunks) for i in range(len(mint_chunks))])
-            eval_env = DummyVecEnv([make_env_lazy(0, rl_config, [eval_mints])])
+            vec_env = SubprocVecEnv([make_env_lazy(i, rl_config, mint_chunks, args.dataset_run_id) for i in range(len(mint_chunks))])
+            eval_env = DummyVecEnv([make_env_lazy(0, rl_config, [eval_mints], args.dataset_run_id)])
 
-            # --- 4. Initialize or Load Model ---
             model, reset_num_timesteps = None, True
-            tensorboard_log_path = os.path.join(staging_dir, "tensorboard_logs")
 
             if args.action == 'train':
                 with open(args.params_path, 'r') as f: hyperparams = json.load(f)
-                model = create_ppo_agent(vec_env, hyperparams, rl_config['DEVICE'], tensorboard_log_path)
+                model = create_ppo_agent(vec_env, hyperparams, rl_config['DEVICE'], tensorboard_staging_path)
             elif args.action in ['continue', 'finetune']:
                 model = PPO.load(args.model_path, env=vec_env, device=rl_config['DEVICE'])
-                model.set_logger(configure(tensorboard_log_path, ["tensorboard"]))
+                model.set_logger(configure(tensorboard_staging_path, ["tensorboard"]))
                 reset_num_timesteps = False
                 if args.action == 'finetune' and hasattr(args, 'learning_rate') and args.learning_rate:
                     model.learning_rate = args.learning_rate
-            if not model: logger.error("Model could not be initialized. Aborting."); return
 
-            # --- 5. Set Up Callbacks & Start Training ---
+            if not model: 
+                logger.error("Model could not be initialized. Aborting.")
+                return
+
+            # --- 4. Callbacks & Training ---
             chk_cb = CheckpointCallback(max(rl_config['PPO_EVAL_FREQ']//n_cpu,1), os.path.join(staging_dir, "models"), "checkpoint")
             adv_cb = AdvancedMlflowCallback(eval_env, best_model_save_path=os.path.join(staging_dir, "models"), log_path=os.path.join(staging_dir, "logs"), eval_freq=max(rl_config['PPO_EVAL_FREQ']//n_cpu,1))
             
             logger.info("🚀 Starting model training...")
             model.learn(total_timesteps=rl_config['PPO_FINAL_MODEL_TIMESTEPS'], callback=CallbackList([chk_cb, adv_cb]), reset_num_timesteps=reset_num_timesteps)
 
-            # --- 6. Save, Log, and Register Final Model ---
+            # --- 5. Save Final Model ---
             final_model_path = os.path.join(staging_dir, "models", "final_model.zip")
             model.save(final_model_path)
-            mlflow.log_artifacts(staging_dir, artifact_path="training_outputs") # Log all artifacts
 
-            # Load the best performing model for registration
+             # --- 6. Log Artifacts ---
+            mlflow.log_artifacts(staging_dir, artifact_path="training_outputs")
+
+            # --- 7. Rebuild TensorBoard Command with Final Artifact Paths ---
+            current_artifact_uri = run.info.artifact_uri.rstrip("/")
+            final_tensorboard_path = f"{current_artifact_uri}/training_outputs/tensorboard_logs"
+
+            final_cmd = build_tensorboard_command(
+                current_run_id=run.info.run_id,
+                current_run_name=current_run_name,
+                parent_run_infos=parent_run_infos,
+                current_tensorboard_path=final_tensorboard_path,
+                client=client
+            )
+
+            # ✅ Update parameter with final command
+            mlflow.log_param("tensorboard_log_command", final_cmd)
+
+            # --- 8. Generate and Log Launch Scripts & Docs ---
+            scripts_staging = os.path.join(staging_dir, "scripts")
+            generate_tensorboard_launch_scripts(final_cmd, scripts_staging)
+            generate_readme(final_cmd, scripts_staging)
+
+            mlflow.log_artifacts(scripts_staging, artifact_path="scripts")
+
+             # --- 9. Log Model ---
             best_model_path = os.path.join(staging_dir, "models", "best_model.zip")
             model_to_log = PPO.load(best_model_path if os.path.exists(best_model_path) else final_model_path)
             
-            # Log the model to MLflow in the pyfunc format for serving
             obs = eval_env.reset()
             input_example = np.asarray(obs[0] if isinstance(obs, np.ndarray) and obs.ndim > 1 else obs)
             log_sb3_model(model_to_log, args.name, input_example=input_example, staging_path=staging_dir)
 
             logger.info("✅ Training finished. Model and results logged to MLflow.")
         finally:
-            # --- 7. Cleanup ---
             if os.path.exists(staging_dir): shutil.rmtree(staging_dir)
             if vec_env: vec_env.close()
             if eval_env: eval_env.close()
@@ -362,20 +435,25 @@ async def main():
     parser = argparse.ArgumentParser(description="RL Agent Training Workflow")
     subparsers = parser.add_subparsers(dest="action", required=True)
     
-    subparsers.add_parser("tune", help="Run hyperparameter tuning.")
+    p_tune = subparsers.add_parser("tune", help="Run hyperparameter tuning.")
+    p_tune.add_argument("--dataset-run-id", required=True, help="MLflow run ID of the dataset to use.")
+    
     p_train = subparsers.add_parser("train", help="Train a new model.")
     p_train.add_argument("--params-path", required=True); p_train.add_argument("--name", default="PPO_Model")
+    p_train.add_argument("--dataset-run-id", required=True, help="MLflow run ID of the dataset to use.")
     
     p_cont = subparsers.add_parser("continue", help="Continue training.")
     p_cont.add_argument("--model-path", required=True); p_cont.add_argument("--parent-run-id", required=True); p_cont.add_argument("--name", default="PPO_Model")
+    p_cont.add_argument("--dataset-run-id", required=True, help="MLflow run ID of the dataset to use.")
 
     p_fine = subparsers.add_parser("finetune", help="Fine-tune a model.")
     p_fine.add_argument("--model-path", required=True); p_fine.add_argument("--parent-run-id", required=True); p_fine.add_argument("--name", default="PPO_Model"); p_fine.add_argument("--learning-rate", type=float)
-    
+    p_fine.add_argument("--dataset-run-id", required=True, help="MLflow run ID of the dataset to use.")
+
     args = parser.parse_args()
     rl_config = get_config_for_mode(args.action)
 
-    if args.action == 'tune': await run_hyperparameter_tuning(rl_config)
+    if args.action == 'tune': await run_hyperparameter_tuning(rl_config, args.dataset_run_id)
     else: await run_model_training(rl_config, args)
 
 if __name__ == "__main__":

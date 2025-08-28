@@ -26,6 +26,9 @@ import sys
 from datetime import datetime
 import pandas as pd
 from tqdm import tqdm
+ # +++ Add this import
+import tempfile
+
 import mlflow
 from mlflow.data.pandas_dataset import PandasDataset
 
@@ -37,7 +40,7 @@ if project_root not in sys.path:
 
 from bot_logger import logger, setup_logging
 from database_handler import DatabaseClient
-from config.rl_config import RL_CONFIG, FEATURE_GROUPS, RL_FEATURE_STORE_PATH
+from config.rl_config import RL_CONFIG, FEATURE_GROUPS
 from rl_agent.feature_engineering.features import calculate_all_features
 
 MLFLOW_EXPERIMENT_DATASET = "PumpTrader.RL Dataset Generation"
@@ -47,7 +50,7 @@ async def run_etl(start_date: datetime, end_date: datetime, version: str):
     mlflow.set_experiment(MLFLOW_EXPERIMENT_DATASET)
     run_name = f"ETL_v{version}_{start_date.strftime('%Y%m%d')}-{end_date.strftime('%Y%m%d')}"
 
-    with mlflow.start_run(run_name=run_name) as run:
+    with tempfile.TemporaryDirectory() as temp_output_dir, mlflow.start_run(run_name=run_name, log_system_metrics=True) as run:
         logger.info(f"Starting ETL run '{run.info.run_name}' (ID: {run.info.run_id})")
         mlflow.log_params({"start_date": start_date, "end_date": end_date, "version": version})
 
@@ -89,9 +92,9 @@ async def run_etl(start_date: datetime, end_date: datetime, version: str):
             mlflow.log_metric("feature_count", len(feature_list))
             mlflow.log_param("features_used", feature_list)
             
-            base_output_dir = os.path.join(project_root, RL_FEATURE_STORE_PATH, f"v{version}")
-            os.makedirs(base_output_dir, exist_ok=True)
-            logger.info(f"Saving partitioned data to: {base_output_dir}")
+            
+            base_output_dir = os.path.join(temp_output_dir) # MODIFIED
+            logger.info(f"Saving partitioned data to: {temp_output_dir}")
 
             processed_mints = set()
             total_files = sum(len(mints) for _, mints in feature_groups_data.items())
@@ -102,7 +105,6 @@ async def run_etl(start_date: datetime, end_date: datetime, version: str):
                 sample_mint = next(iter(mint_data))
                 sample_df = mint_data[sample_mint]
 
-                source = f"{base_output_dir}/group={group_name}"
                 for mint, df in mint_data.items():
                     if df.empty: continue
                     processed_mints.add(mint)
@@ -117,7 +119,7 @@ async def run_etl(start_date: datetime, end_date: datetime, version: str):
 
                 dataset: PandasDataset = mlflow.data.from_pandas(
                     sample_df,
-                    source=source,  # optional: point to origin
+                    # source=source,  # optional: point to origin
                     name=f"features_{group_name}"
                 )
 
@@ -143,10 +145,12 @@ async def run_etl(start_date: datetime, end_date: datetime, version: str):
 
 
             # --- MLflow Dataset Logging (FIXED) ---
-            # The modern, simplified way to log a file-based dataset is to
-            # create a dataset object directly from the path. MLflow infers the source type.
-            logger.info(f"Logging feature store path to MLflow: {base_output_dir}")
-            mlflow.log_artifact(base_output_dir, artifact_path="feature_store")
+            active_run = mlflow.active_run()
+            if active_run:
+                run_id = active_run.info.run_id
+                artifact_uri = f"runs:/{run_id}/feature_store"
+                mlflow.log_artifacts(base_output_dir, artifact_path="feature_store")
+                logger.info(f"✅ Dataset successfully logged. Artifact URI: {artifact_uri}")
 
             mlflow.log_metric("processed_token_count", len(processed_mints))
             logger.info(f"✅ ETL process completed. Logged dataset to MLflow run.")
