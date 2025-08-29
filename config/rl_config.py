@@ -47,6 +47,13 @@ FEATURE_GROUPS = {
 # --- Central Configuration Dictionary ---
 RL_CONFIG = {
     "common": {
+
+        # --- MLFlow Experiment categories
+        "MLFLOW_EXPERIMENT_TUNING":     "PumpTrader.RL Hyperparameter Tuning",
+        "MLFLOW_EXPERIMENT_TRAINING":   "PumpTrader.RL PPO Training",
+        "MLFLOW_EXPERIMENT_DATASET":    "PumpTrader.RL Dataset Generation",
+        "MLFLOW_EXPERIMENT_ANALYSIS":   "PumpTrader.RL Feature Analysis",
+
         # --- Hardware & Performance ---
         "DEVICE": "cuda" if th.cuda.is_available() else "cpu",
 
@@ -67,9 +74,9 @@ RL_CONFIG = {
         "ENV_ACTION_BUY_THRESHOLD": 0.2,
         "ENV_ACTION_SELL_THRESHOLD": -0.2,
         "ENV_CAPITAL_PER_BUY_PERCENT": 0.95,
-        "ENV_TIME_IN_POSITION_NORM_SECONDS": 28800.0, # 8 hours
+        "ENV_TIME_IN_POSITION_NORM_SECONDS": 36000.0,
         "ENV_EPS": 1e-9,  # Epsilon for safe division
-        "ENV_MAX_STEPS_PER_EPISODE": 5000,
+        "ENV_MAX_STEPS_PER_EPISODE": 7200,
         "ENV_WARMUP_STEPS": 200,
 
         # --- Reward Function Configuration ---
@@ -122,29 +129,36 @@ RL_CONFIG = {
     "tune": {
         "N_CPU": 1,
         "DEVICE": "cuda",
-        "PPO_TIMESTEPS_PER_TRIAL": 500_000,
-        "OPTUNA_N_TRIALS": 30,
-        "OPTUNA_TIMEOUT_SECONDS": 14400, # 4 hours
+        "PPO_TIMESTEPS_PER_TRIAL": 250_000,
+        "OPTUNA_N_TRIALS": 50,
+        "OPTUNA_TIMEOUT_SECONDS": 5000, # 4 hours
         "OPTUNA_PRUNER_N_WARMUP_STEPS": 5,
         "OPTUNA_PRUNER_N_MIN_TRIALS": 5,
     },
     "train": {
-        "N_CPU": 3,
+        "N_CPU": 4,
         "DEVICE": "cpu",
         "PPO_FINAL_MODEL_TIMESTEPS": 50_000,
         "PPO_EVAL_FREQ": 2048,
     },
     "finetune": {
-        "N_CPU": 3,
+        "N_CPU": 4,
         "DEVICE": "cpu",
         "PPO_FINAL_MODEL_TIMESTEPS": 50_000, # Shorter duration for fine-tuning
         "PPO_EVAL_FREQ": 2048,
     },
     "continue": {
-        "N_CPU": 3,
+        "N_CPU": 4,
         "DEVICE": "cpu",
         "PPO_FINAL_MODEL_TIMESTEPS": 50_000,
         "PPO_EVAL_FREQ": 2048,
+    },
+    "importance": {
+        "N_CPU": 6,
+        "DEVICE": "cpu", # Inference is typically faster on CPU
+        # Use a very short number of steps, as we only need to complete single episodes
+        "PPO_FINAL_MODEL_TIMESTEPS": 10_000, 
+        "PPO_EVAL_FREQ": 1024, # Not critical for this mode, but good to have
     }
 }
 

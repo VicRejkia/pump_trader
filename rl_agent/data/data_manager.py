@@ -50,6 +50,8 @@ class DataManager:
         self._current_dataset_iterator = None
         self._columns = None
 
+        self.verbose = True
+
     def get_training_data(self) -> Optional[pd.DataFrame]: return self.training_data
     def get_evaluation_data(self) -> Optional[pd.DataFrame]: return self.evaluation_data
     def get_split_token_mints(self) -> Tuple[List[str], List[str]]: return self.training_set_mints, self.evaluation_set_mints
@@ -60,7 +62,8 @@ class DataManager:
         This method is suitable for 'file://' MLflow backends.
         """
         try:
-            logger.info(f"Resolving direct artifact path for run '{self.dataset_run_id}'...")
+            if self.verbose:
+                logger.info(f"Resolving direct artifact path for run '{self.dataset_run_id}'...")
             client = MlflowClient()
             run = client.get_run(self.dataset_run_id)
             artifact_uri = run.info.artifact_uri
@@ -78,7 +81,8 @@ class DataManager:
                     local_artifact_root = local_artifact_root[1:]
                 
                 self.feature_store_path = os.path.join(local_artifact_root, "feature_store")
-                logger.info(f"✅ Resolved artifact path to: {self.feature_store_path}")
+                if self.verbose:
+                    logger.info(f"✅ Resolved artifact path to: {self.feature_store_path}")
                 return True
             else:
                 logger.error(f"Cannot resolve direct path for non-file URI: {artifact_uri}. This method only works for local MLflow stores.")

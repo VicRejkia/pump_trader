@@ -43,12 +43,11 @@ from database_handler import DatabaseClient
 from config.rl_config import RL_CONFIG, FEATURE_GROUPS
 from rl_agent.feature_engineering.features import calculate_all_features
 
-MLFLOW_EXPERIMENT_DATASET = "PumpTrader.RL Dataset Generation"
 
 async def run_etl(start_date: datetime, end_date: datetime, version: str):
     """Main ETL orchestration function."""
-    mlflow.set_experiment(MLFLOW_EXPERIMENT_DATASET)
-    run_name = f"ETL_v{version}_{start_date.strftime('%Y%m%d')}-{end_date.strftime('%Y%m%d')}"
+    mlflow.set_experiment(RL_CONFIG["common"]["MLFLOW_EXPERIMENT_DATASET"])
+    run_name = f"bigDF_v{version}_{start_date.strftime('%Y%m%d')}-{end_date.strftime('%Y%m%d')}"
 
     with tempfile.TemporaryDirectory() as temp_output_dir, mlflow.start_run(run_name=run_name, log_system_metrics=True) as run:
         logger.info(f"Starting ETL run '{run.info.run_name}' (ID: {run.info.run_id})")
@@ -164,7 +163,10 @@ async def run_etl(start_date: datetime, end_date: datetime, version: str):
 
 if __name__ == "__main__":
     setup_logging(logger_name="rl_etl")
-    mlflow.set_tracking_uri("file:./data/rl_runs")
+    # --- MODIFICATION: Point to the MLflow server ---
+    # Assumes the server is running at the default location started by rl_main.py
+    mlflow.set_tracking_uri("http://127.0.0.1:8080")
+    #mlflow.set_tracking_uri("file:./data/rl_runs")
 
     parser = argparse.ArgumentParser(description="Run the ETL pipeline for RL feature generation.")
     parser.add_argument("--start-date", type=str, required=True, help="Start date in ISO format.")

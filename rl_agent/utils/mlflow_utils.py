@@ -1,13 +1,97 @@
 # utils/mlflow_utils.py or similar
 
 import os
+import subprocess
+import socket
+import time
 import logging
 from typing import List, Tuple
 import mlflow
 from mlflow.entities import RunStatus
 from mlflow.tracking import MlflowClient
+from mlflow.exceptions import MlflowException
+
 
 logger = logging.getLogger(__name__)
+
+def _is_port_in_use(port: int, host: str = "127.0.0.1") -> bool:
+    """Check if a port is already in use (to avoid starting multiple servers)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex((host, port)) == 0
+
+def start_mlflow_server(
+    backend_store_uri: str = "file:./data/rl_runs",
+    artifact_root: str = "./artifacts",
+    host: str = "127.0.0.1",
+    port: int = 8080,
+    wait_time: int = 5
+) -> str:
+    """
+    Starts an MLflow tracking server (if not already running) and sets the tracking URI.
+    Returns the tracking URI.
+    """
+    tracking_uri = f"http://{host}:{port}"
+
+    if _is_port_in_use(port, host):
+        logger.info(f"MLflow server already running at {tracking_uri}")
+    else:
+        cmd = [
+            "mlflow", "server",
+            "--backend-store-uri", backend_store_uri,
+            "--default-artifact-root", artifact_root,
+            "--host", host,
+            "--port", str(port)
+        ]
+        logger.info(f"Starting MLflow server with: {' '.join(cmd)}")
+        subprocess.Popen(cmd)
+
+        # Give it a few seconds to boot
+        time.sleep(wait_time)
+        if _is_port_in_use(port, host):
+            logger.info(f"✅ MLflow server is up at {tracking_uri}")
+        else:
+            logger.warning(f"⚠️ Could not verify MLflow server at {tracking_uri} after {wait_time}s")
+
+    # Set MLflow tracking URI globally
+    mlflow.set_tracking_uri(tracking_uri)
+    logger.info(f"MLflow tracking URI set to {tracking_uri}")
+    return tracking_uri
+
+def check_mlflow_ui() -> bool:
+    """
+    Check if the MLflow server is reachable.
+    
+    Returns:
+        bool: True if MLflow server is reachable, False otherwise.
+    """
+    try:
+        MlflowClient().search_experiments()
+        print("✅ MLflow Tracking Server is reachable.")
+        return True
+    except MlflowException:
+        print("\n❌ Warning: The MLflow Tracking Server does not seem to be running.")
+        print("   Please start it in a separate terminal with the command:")
+        print("\n   mlflow ui --backend-store-uri file:./data/rl_runs\n")
+        input("Press Enter to continue anyway...")
+        return False
+
+
+def start_mlflow_ui(backend_store_uri: str = "file:./data/rl_runs", port: int = 5000):
+    """
+    Optionally: lightweight mode to just start the UI for visualization.
+    """
+    if _is_port_in_use(port):
+        logger.info(f"MLflow UI already running at http://127.0.0.1:{port}")
+    else:
+        cmd = [
+            "mlflow", "ui",
+            "--backend-store-uri", backend_store_uri,
+            "--port", str(port)
+        ]
+        logger.info(f"Starting MLflow UI with: {' '.join(cmd)}")
+        subprocess.Popen(cmd)
+        time.sleep(2)
+        logger.info(f"MLflow UI available at http://127.0.0.1:{port}")
 
 def find_mlflow_entity_by_run_id(run_id: str) -> mlflow.entities.Run | None:
     client = MlflowClient()

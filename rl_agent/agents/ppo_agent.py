@@ -40,6 +40,7 @@ def create_ppo_agent(
     # Remove any lingering architecture keys from the top level
     agent_params.pop("pi_layers", None)
     agent_params.pop("vf_layers", None)
+    agent_params.pop("pi_vf_layers", None)
     
     # Instantiate and return the PPO agent
     model = PPO(

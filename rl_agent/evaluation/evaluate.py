@@ -107,6 +107,7 @@ async def run_evaluation(model_path: str, start_date_str: str, end_date_str: str
     """
     Main orchestration function for the evaluation process, wrapped in an MLflow run.
     """
+    mlflow.set_tracking_uri("http://127.0.0.1:8080")
     mlflow.set_experiment("PumpTrader.RL Backtesting")
     run_name = f"Eval_{os.path.basename(model_path)}_{start_date_str}_to_{end_date_str}"
 

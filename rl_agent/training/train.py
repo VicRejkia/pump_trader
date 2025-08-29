@@ -77,7 +77,7 @@ from mlflow.entities import RunStatus
 
 # --- Local Application Imports ---
 import nest_asyncio
-from config.rl_config import get_config_for_mode
+from config.rl_config import get_config_for_mode, RL_CONFIG
 from bot_logger import logger, setup_logging
 from rl_agent.agents.ppo_agent import create_ppo_agent
 from rl_agent.data.data_manager import DataManager
@@ -88,12 +88,8 @@ from rl_agent.utils.script_utils import generate_tensorboard_launch_scripts, gen
 # Apply asyncio patch for environments that use it internally
 nest_asyncio.apply()
 
-# ==============================================================================
-# MLflow and Experiment Constants
-# ==============================================================================
-MLFLOW_EXPERIMENT_TUNING = "PumpTrader.RL Hyperparameter Tuning"
-MLFLOW_EXPERIMENT_TRAINING = "PumpTrader.RL PPO Training"
-MLFLOW_EXPERIMENT_DATASET = "PumpTrader.RL Dataset Generation"
+MLFLOW_EXPERIMENT_DATASET = RL_CONFIG["common"]["MLFLOW_EXPERIMENT_DATASET"]
+
 
 
 # ==============================================================================
@@ -135,7 +131,7 @@ def find_latest_dataset_run() -> mlflow.entities.Run | None:
     try:
         exp = client.get_experiment_by_name(MLFLOW_EXPERIMENT_DATASET)
         if not exp:
-            logger.error(f"MLflow experiment '{MLFLOW_EXPERIMENT_DATASET}' not found.")
+            logger.error(f"MLflow experiment '{ MLFLOW_EXPERIMENT_DATASET }' not found.")
             return None
         
         # Search for the latest run that was successful
@@ -193,6 +189,9 @@ def objective(trial: optuna.trial.Trial, rl_config: Dict, train_mints: List[str]
     with mlflow.start_run(nested=True, log_system_metrics=True):
         train_env, eval_env = None, None
         try:
+            mlflow.log_params(rl_config)
+            mlflow.log_param("action", "tuning")
+
             train_subset = random.sample(train_mints, min(len(train_mints), 50))
             eval_subset = random.sample(eval_mints, min(len(eval_mints), 10))
             
@@ -212,6 +211,32 @@ def objective(trial: optuna.trial.Trial, rl_config: Dict, train_mints: List[str]
             eval_dm.load_and_prepare_data(mints_to_load=eval_subset, verbose=False)
             eval_env = DummyVecEnv([lambda: Monitor(MemeCoinEnv(eval_dm, rl_config, silent=True))])
             
+            ###
+
+            datasets, contexts, tags_list = [], [], []
+
+            training_data = train_dm.get_training_data()
+            sample_train_df = training_data.iloc[0]
+            train_dataset: PandasDataset = mlflow.data.from_pandas(training_data, name=f"training_set")
+            datasets.append(train_dataset)
+            contexts.append(f"training_set")
+            tags_list.append({"num_tokens": str(len(train_mints))})
+
+            eval_data = eval_dm.get_evaluation_data()
+            sample_eval_df = eval_data.iloc[0]
+            eval_dataset: PandasDataset = mlflow.data.from_pandas(eval_data, name=f"evaluation_set")
+            datasets.append(eval_dataset)
+            contexts.append(f"evaluation_set")
+            tags_list.append({"num_tokens": str(len(eval_mints))})
+
+            # Log all datasets
+            mlflow.log_inputs(
+                datasets=datasets,
+                contexts=contexts,
+                tags_list=tags_list
+            )
+            
+            ###
             mean_reward, _ = evaluate_policy(model, eval_env, n_eval_episodes=5, deterministic=True)
             if not np.isfinite(mean_reward):
                 raise optuna.exceptions.TrialPruned("Reward is not finite.")
@@ -237,9 +262,7 @@ async def run_hyperparameter_tuning(rl_config: Dict[str, Any], dataset_run_id: s
         logger.error("Failed to load data. Aborting tuning."); return
     train_mints, eval_mints = data_provider.get_split_token_mints()
 
-    mlflow.set_tracking_uri('http://127.0.0.1:8080')
-
-    mlflow.set_experiment(MLFLOW_EXPERIMENT_TUNING)
+    mlflow.set_experiment(RL_CONFIG["common"]["MLFLOW_EXPERIMENT_TUNING"])
     with mlflow.start_run(run_name=f"OptunaStudy_{datetime.now().strftime('%Y%m%d-%H%M%S')}", log_system_metrics=True):
         mlflow.log_params({"n_trials": rl_config['OPTUNA_N_TRIALS'], "timeout": rl_config['OPTUNA_TIMEOUT_SECONDS']})
         mlflow.set_tag("source_dataset_run_id", dataset_run_id)
@@ -274,7 +297,7 @@ def make_env_lazy(rank: int, rl_config: Dict, mint_chunks: List[List[str]], data
 
 async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace):
     """Orchestrates the main model training, continuation, or fine-tuning process."""
-    mlflow.set_experiment(MLFLOW_EXPERIMENT_TRAINING)
+    mlflow.set_experiment(RL_CONFIG["common"]["MLFLOW_EXPERIMENT_TRAINING"])
     client = MlflowClient()
     
     with mlflow.start_run(run_name=f"{args.name}-{args.action}", log_system_metrics=True) as run:
@@ -458,7 +481,10 @@ async def main():
 
 if __name__ == "__main__":
     setup_logging(logger_name='rl_training')
-    mlflow.set_tracking_uri("file:./data/rl_runs")
+    # --- Point to the MLflow server ---
+    # This ensures all actions (tune, train, etc.) log to the central server.
+    mlflow.set_tracking_uri("http://127.0.0.1:8080")
+    # mlflow.set_tracking_uri("file:./data/rl_runs")
     if sys.platform in ['win32', 'darwin']: multiprocessing.freeze_support()
     try: asyncio.run(main())
     except KeyboardInterrupt: logger.info("Process interrupted by user.")
