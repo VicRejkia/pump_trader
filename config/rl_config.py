@@ -53,6 +53,7 @@ RL_CONFIG = {
         "MLFLOW_EXPERIMENT_TRAINING":   "PumpTrader.RL PPO Training",
         "MLFLOW_EXPERIMENT_DATASET":    "PumpTrader.RL Dataset Generation",
         "MLFLOW_EXPERIMENT_ANALYSIS":   "PumpTrader.RL Feature Analysis",
+        "MLFLOW_EXPERIMENT_BACKTESTING": "PumpTrader.RL Backtesting",
 
         # --- Hardware & Performance ---
         "DEVICE": "cuda" if th.cuda.is_available() else "cpu",
@@ -131,33 +132,33 @@ RL_CONFIG = {
         "DEVICE": "cuda",
         "PPO_TIMESTEPS_PER_TRIAL": 250_000,
         "OPTUNA_N_TRIALS": 50,
-        "OPTUNA_TIMEOUT_SECONDS": 5000, # 4 hours
+        "OPTUNA_TIMEOUT_SECONDS": 7200, # 4 hours
         "OPTUNA_PRUNER_N_WARMUP_STEPS": 5,
         "OPTUNA_PRUNER_N_MIN_TRIALS": 5,
     },
     "train": {
-        "N_CPU": 4,
+        "N_CPU": 16,
         "DEVICE": "cpu",
-        "PPO_FINAL_MODEL_TIMESTEPS": 50_000,
+        "PPO_FINAL_MODEL_TIMESTEPS": 1_500_000,
         "PPO_EVAL_FREQ": 2048,
     },
     "finetune": {
-        "N_CPU": 4,
+        "N_CPU": 16,
         "DEVICE": "cpu",
-        "PPO_FINAL_MODEL_TIMESTEPS": 50_000, # Shorter duration for fine-tuning
+        "PPO_FINAL_MODEL_TIMESTEPS": 150_000, # Shorter duration for fine-tuning
         "PPO_EVAL_FREQ": 2048,
     },
     "continue": {
-        "N_CPU": 4,
+        "N_CPU": 16,
         "DEVICE": "cpu",
-        "PPO_FINAL_MODEL_TIMESTEPS": 50_000,
+        "PPO_FINAL_MODEL_TIMESTEPS": 1_500_000,
         "PPO_EVAL_FREQ": 2048,
     },
     "importance": {
-        "N_CPU": 6,
+        "N_CPU": 16,
         "DEVICE": "cpu", # Inference is typically faster on CPU
         # Use a very short number of steps, as we only need to complete single episodes
-        "PPO_FINAL_MODEL_TIMESTEPS": 10_000, 
+        "PPO_FINAL_MODEL_TIMESTEPS": 50_000, 
         "PPO_EVAL_FREQ": 1024, # Not critical for this mode, but good to have
     }
 }

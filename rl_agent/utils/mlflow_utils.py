@@ -5,7 +5,8 @@ import subprocess
 import socket
 import time
 import logging
-from typing import List, Tuple
+from typing import List, Tuple, Optional, Any
+from datetime import datetime
 import mlflow
 from mlflow.entities import RunStatus
 from mlflow.tracking import MlflowClient
@@ -147,7 +148,7 @@ def build_tensorboard_command(
         try:
             parent_run = client.get_run(parent_id)
             parent_uri = parent_run.info.artifact_uri.rstrip("/").lstrip("file:///")
-            tb_path = f"{parent_uri}/training_outputs/tensorboard_logs"
+            tb_path = f"{parent_uri}/tensorboard_logs"
             if use_forward_slashes:
                 tb_path = tb_path.replace("\\", "/")
             logdir_entries.append(f"{parent_name}:{tb_path}")
@@ -163,3 +164,77 @@ def build_tensorboard_command(
 
     logdir_arg = ",".join(logdir_entries)
     return f"tensorboard --logdir_spec={logdir_arg}"
+
+def find_artifact_in_run(
+    run_id: str,
+    file_prefix: str,
+    file_suffix: str = ".json"
+) -> Optional[str]:
+    """
+    Search for an artifact file in an MLflow run by prefix and suffix.
+    """
+    client = MlflowClient()
+    try:
+        stack = [""]
+        while stack:
+            current_path = stack.pop()
+            artifacts = client.list_artifacts(run_id, path=current_path)
+            for artifact in artifacts:
+                if artifact.is_dir:
+                    stack.append(artifact.path)
+                else:
+                    basename = os.path.basename(artifact.path)
+                    if basename.startswith(file_prefix) and basename.endswith(file_suffix):
+                        return artifact.path
+        return None
+    except MlflowException as e:
+        logger.error(f"❌ MLflow error while searching for artifact starting with '{file_prefix}': {e}")
+        return None
+
+def fetch_mlflow_parent_runs(
+    experiment_name: str,
+    num_runs: int = 15
+) -> List[Any]:
+    """
+    Fetch parent runs (non-child runs) from an MLflow experiment.
+    """
+    try:
+        client = MlflowClient()
+        experiment = client.get_experiment_by_name(experiment_name)
+        if not experiment:
+            logger.warning(f"⚠️ Experiment '{experiment_name}' not found.")
+            return []
+        
+        all_runs = client.search_runs(
+            experiment_ids=[experiment.experiment_id],
+            filter_string="attributes.status = 'FINISHED'",
+            order_by=["start_time DESC"],
+            max_results=num_runs * 10
+        )
+        
+        parent_runs = [
+            run for run in all_runs
+            if 'mlflow.parentRunId' not in run.data.tags
+        ]
+        return parent_runs[:num_runs]
+    except MlflowException as e:
+        logger.error(f"Error fetching MLflow runs: {e}")
+        return []
+
+def get_artifact_path(
+    run_id: str,
+    artifact_name: str,
+    dst_path: str
+) -> Optional[str]:
+    """
+    Download and get the local path of an artifact from an MLflow run.
+    """
+    try:
+        return mlflow.artifacts.download_artifacts(
+            run_id=run_id,
+            artifact_path=artifact_name,
+            dst_path=dst_path
+        )
+    except MlflowException as e:
+        logger.error(f"❌ Error downloading artifact '{artifact_name}': {e}")
+        return None

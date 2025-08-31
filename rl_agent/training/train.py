@@ -216,25 +216,27 @@ def objective(trial: optuna.trial.Trial, rl_config: Dict, train_mints: List[str]
             datasets, contexts, tags_list = [], [], []
 
             training_data = train_dm.get_training_data()
-            sample_train_df = training_data.iloc[0]
-            train_dataset: PandasDataset = mlflow.data.from_pandas(training_data, name=f"training_set")
-            datasets.append(train_dataset)
-            contexts.append(f"training_set")
-            tags_list.append({"num_tokens": str(len(train_mints))})
+            if training_data is not None and not training_data.empty:
+                train_dataset: PandasDataset = mlflow.data.from_pandas(training_data, name=f"training_set")
+                datasets.append(train_dataset)
+                contexts.append(f"training_set")
+                tags_list.append({"num_tokens": str(len(train_mints))})
 
             eval_data = eval_dm.get_evaluation_data()
-            sample_eval_df = eval_data.iloc[0]
-            eval_dataset: PandasDataset = mlflow.data.from_pandas(eval_data, name=f"evaluation_set")
-            datasets.append(eval_dataset)
-            contexts.append(f"evaluation_set")
-            tags_list.append({"num_tokens": str(len(eval_mints))})
+            if eval_data is not None and not eval_data.empty:
+                eval_dataset: PandasDataset = mlflow.data.from_pandas(eval_data, name=f"evaluation_set")
+                datasets.append(eval_dataset)
+                contexts.append(f"evaluation_set")
+                tags_list.append({"num_tokens": str(len(eval_mints))})
+
 
             # Log all datasets
-            mlflow.log_inputs(
-                datasets=datasets,
-                contexts=contexts,
-                tags_list=tags_list
-            )
+            if datasets:
+                mlflow.log_inputs(
+                    datasets=datasets,
+                    contexts=contexts,
+                    tags_list=tags_list
+                )
             
             ###
             mean_reward, _ = evaluate_policy(model, eval_env, n_eval_episodes=5, deterministic=True)
@@ -283,7 +285,6 @@ async def run_hyperparameter_tuning(rl_config: Dict[str, Any], dataset_run_id: s
 
         mlflow.log_dict(best_params, "best_params.json")
         logger.info("✅ Best hyperparameters logged to MLflow as 'best_params.json'.")
-
 
 def make_env_lazy(rank: int, rl_config: Dict, mint_chunks: List[List[str]], dataset_run_id: str, seed: int = 0):
     """Factory function to create a lazy-loading environment for a subprocess."""
@@ -358,29 +359,33 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
             train_mints, eval_mints = data_manager.get_split_token_mints()
 
             training_data = data_manager.get_training_data()
-            sample_train_df = training_data.iloc[0]
-            train_dataset: PandasDataset = mlflow.data.from_pandas(training_data, name=f"training_set")
-            datasets.append(train_dataset)
-            contexts.append(f"training_set")
-            tags_list.append({"num_tokens": str(len(train_mints))})
+            if training_data is not None and not training_data.empty:
+                train_dataset: PandasDataset = mlflow.data.from_pandas(training_data, name=f"training_set")
+                datasets.append(train_dataset)
+                contexts.append(f"training_set")
+                tags_list.append({"num_tokens": str(len(train_mints))})
 
             eval_data = data_manager.get_evaluation_data()
-            sample_eval_df = eval_data.iloc[0]
-            eval_dataset: PandasDataset = mlflow.data.from_pandas(eval_data, name=f"evaluation_set")
-            datasets.append(eval_dataset)
-            contexts.append(f"evaluation_set")
-            tags_list.append({"num_tokens": str(len(eval_mints))})
+            if eval_data is not None and not eval_data.empty:
+                eval_dataset: PandasDataset = mlflow.data.from_pandas(eval_data, name=f"evaluation_set")
+                datasets.append(eval_dataset)
+                contexts.append(f"evaluation_set")
+                tags_list.append({"num_tokens": str(len(eval_mints))})
 
 
             # Log all datasets
-            mlflow.log_inputs(
-                datasets=datasets,
-                contexts=contexts,
-                tags_list=tags_list
-            )
+            if datasets:
+                mlflow.log_inputs(
+                    datasets=datasets,
+                    contexts=contexts,
+                    tags_list=tags_list
+                )
 
             n_cpu = rl_config['N_CPU']
             mint_chunks = [c.tolist() for c in np.array_split(train_mints, n_cpu) if c.size > 0]
+            if not mint_chunks:
+                logger.error(f"Cannot train with N_CPU={n_cpu} as there are not enough tokens to split. Please reduce N_CPU or increase dataset size.")
+                return
             vec_env = SubprocVecEnv([make_env_lazy(i, rl_config, mint_chunks, args.dataset_run_id) for i in range(len(mint_chunks))])
             eval_env = DummyVecEnv([make_env_lazy(0, rl_config, [eval_mints], args.dataset_run_id)])
 
@@ -405,18 +410,26 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
             adv_cb = AdvancedMlflowCallback(eval_env, best_model_save_path=os.path.join(staging_dir, "models"), log_path=os.path.join(staging_dir, "logs"), eval_freq=max(rl_config['PPO_EVAL_FREQ']//n_cpu,1))
             
             logger.info("🚀 Starting model training...")
-            model.learn(total_timesteps=rl_config['PPO_FINAL_MODEL_TIMESTEPS'], callback=CallbackList([chk_cb, adv_cb]), reset_num_timesteps=reset_num_timesteps)
+            model.learn(
+                total_timesteps=rl_config['PPO_FINAL_MODEL_TIMESTEPS'], 
+                callback=CallbackList([chk_cb, adv_cb]), 
+                reset_num_timesteps=reset_num_timesteps,
+                tb_log_name=args.name
+            )
 
             # --- 5. Save Final Model ---
             final_model_path = os.path.join(staging_dir, "models", "final_model.zip")
             model.save(final_model_path)
 
-             # --- 6. Log Artifacts ---
-            mlflow.log_artifacts(staging_dir, artifact_path="training_outputs")
+             # --- 6. Log Artifacts (Flattened Structure) ---
+            for item in os.listdir(staging_dir):
+                item_path = os.path.join(staging_dir, item)
+                if os.path.isdir(item_path):
+                    mlflow.log_artifacts(item_path, artifact_path=item)
 
             # --- 7. Rebuild TensorBoard Command with Final Artifact Paths ---
             current_artifact_uri = run.info.artifact_uri.rstrip("/")
-            final_tensorboard_path = f"{current_artifact_uri}/training_outputs/tensorboard_logs"
+            final_tensorboard_path = f"{current_artifact_uri}/tensorboard_logs"
 
             final_cmd = build_tensorboard_command(
                 current_run_id=run.info.run_id,
@@ -442,7 +455,14 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
             
             obs = eval_env.reset()
             input_example = np.asarray(obs[0] if isinstance(obs, np.ndarray) and obs.ndim > 1 else obs)
-            log_sb3_model(model_to_log, args.name, input_example=input_example, staging_path=staging_dir)
+            
+            log_sb3_model(
+                model_to_log, 
+                args.name, 
+                input_example=input_example, 
+                staging_path=staging_dir,
+                register_as=args.register_as
+            )
 
             logger.info("✅ Training finished. Model and results logged to MLflow.")
         finally:
@@ -458,23 +478,39 @@ async def main():
     parser = argparse.ArgumentParser(description="RL Agent Training Workflow")
     subparsers = parser.add_subparsers(dest="action", required=True)
     
-    p_tune = subparsers.add_parser("tune", help="Run hyperparameter tuning.")
+    # --- Generic arguments for hardware override ---
+    common_parser = argparse.ArgumentParser(add_help=False)
+    common_parser.add_argument("--device", type=str, help="Override the computation device (e.g., 'cuda', 'cpu').")
+    common_parser.add_argument("--n-cpu", type=int, help="Override the number of CPU cores to use.")
+    
+    p_tune = subparsers.add_parser("tune", help="Run hyperparameter tuning.", parents=[common_parser])
     p_tune.add_argument("--dataset-run-id", required=True, help="MLflow run ID of the dataset to use.")
     
-    p_train = subparsers.add_parser("train", help="Train a new model.")
+    p_train = subparsers.add_parser("train", help="Train a new model.", parents=[common_parser])
     p_train.add_argument("--params-path", required=True); p_train.add_argument("--name", default="PPO_Model")
     p_train.add_argument("--dataset-run-id", required=True, help="MLflow run ID of the dataset to use.")
+    p_train.add_argument("--register-as", help="If provided, registers the model with this name.")
     
-    p_cont = subparsers.add_parser("continue", help="Continue training.")
+    p_cont = subparsers.add_parser("continue", help="Continue training.", parents=[common_parser])
     p_cont.add_argument("--model-path", required=True); p_cont.add_argument("--parent-run-id", required=True); p_cont.add_argument("--name", default="PPO_Model")
     p_cont.add_argument("--dataset-run-id", required=True, help="MLflow run ID of the dataset to use.")
+    p_cont.add_argument("--register-as", help="If provided, registers the model with this name.")
 
-    p_fine = subparsers.add_parser("finetune", help="Fine-tune a model.")
+    p_fine = subparsers.add_parser("finetune", help="Fine-tune a model.", parents=[common_parser])
     p_fine.add_argument("--model-path", required=True); p_fine.add_argument("--parent-run-id", required=True); p_fine.add_argument("--name", default="PPO_Model"); p_fine.add_argument("--learning-rate", type=float)
     p_fine.add_argument("--dataset-run-id", required=True, help="MLflow run ID of the dataset to use.")
+    p_fine.add_argument("--register-as", help="If provided, registers the model with this name.")
 
     args = parser.parse_args()
     rl_config = get_config_for_mode(args.action)
+
+    # --- Override config with command-line arguments if provided ---
+    if args.device:
+        rl_config['DEVICE'] = args.device
+        logger.info(f"Overriding DEVICE with command-line value: '{args.device}'")
+    if args.n_cpu is not None:
+        rl_config['N_CPU'] = args.n_cpu
+        logger.info(f"Overriding N_CPU with command-line value: {args.n_cpu}")
 
     if args.action == 'tune': await run_hyperparameter_tuning(rl_config, args.dataset_run_id)
     else: await run_model_training(rl_config, args)

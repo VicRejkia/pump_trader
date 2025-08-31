@@ -33,6 +33,7 @@ from database_handler import DatabaseClient
 from state_manager import GlobalState
 from rl_agent.data.data_manager import DataManager
 from rl_agent.environments.meme_coin_env import MemeCoinEnv
+from config.rl_config import RL_CONFIG
 
 
 def _run_backtest(model: PPO, env: MemeCoinEnv) -> pd.Series:
@@ -108,7 +109,7 @@ async def run_evaluation(model_path: str, start_date_str: str, end_date_str: str
     Main orchestration function for the evaluation process, wrapped in an MLflow run.
     """
     mlflow.set_tracking_uri("http://127.0.0.1:8080")
-    mlflow.set_experiment("PumpTrader.RL Backtesting")
+    mlflow.set_experiment(RL_CONFIG["common"]["MLFLOW_EXPERIMENT_BACKTESTING"])
     run_name = f"Eval_{os.path.basename(model_path)}_{start_date_str}_to_{end_date_str}"
 
     with mlflow.start_run(run_name=run_name):
