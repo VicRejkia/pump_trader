@@ -124,7 +124,6 @@ class AdvancedMlflowCallback(EvalCallback):
         return True
 
 
-# wher is this needed?
 def find_latest_dataset_run() -> mlflow.entities.Run | None:
     """Finds the most recent successful MLflow run from the dataset generation experiment."""
     client = MlflowClient()
@@ -134,7 +133,6 @@ def find_latest_dataset_run() -> mlflow.entities.Run | None:
             logger.error(f"MLflow experiment '{ MLFLOW_EXPERIMENT_DATASET }' not found.")
             return None
         
-        # Search for the latest run that was successful
         runs = client.search_runs(
             experiment_ids=[exp.experiment_id],
             filter_string="attributes.status = 'FINISHED'",
@@ -211,8 +209,6 @@ def objective(trial: optuna.trial.Trial, rl_config: Dict, train_mints: List[str]
             eval_dm.load_and_prepare_data(mints_to_load=eval_subset, verbose=False)
             eval_env = DummyVecEnv([lambda: Monitor(MemeCoinEnv(eval_dm, rl_config, silent=True))])
             
-            ###
-
             datasets, contexts, tags_list = [], [], []
 
             training_data = train_dm.get_training_data()
@@ -229,8 +225,6 @@ def objective(trial: optuna.trial.Trial, rl_config: Dict, train_mints: List[str]
                 contexts.append(f"evaluation_set")
                 tags_list.append({"num_tokens": str(len(eval_mints))})
 
-
-            # Log all datasets
             if datasets:
                 mlflow.log_inputs(
                     datasets=datasets,
@@ -238,7 +232,6 @@ def objective(trial: optuna.trial.Trial, rl_config: Dict, train_mints: List[str]
                     tags_list=tags_list
                 )
             
-            ###
             mean_reward, _ = evaluate_policy(model, eval_env, n_eval_episodes=5, deterministic=True)
             if not np.isfinite(mean_reward):
                 raise optuna.exceptions.TrialPruned("Reward is not finite.")
@@ -277,7 +270,6 @@ async def run_hyperparameter_tuning(rl_config: Dict[str, Any], dataset_run_id: s
         mlflow.log_params(study.best_trial.params)
         mlflow.log_metric("best_trial_value", study.best_trial.value)
         
-        # --- FIX: Save best parameters using mlflow.log_dict for robustness ---
         best_params = study.best_trial.params
         if 'policy_kwargs' in best_params and 'activation_fn' in best_params['policy_kwargs']:
             if not isinstance(best_params['policy_kwargs']['activation_fn'], str):
@@ -285,6 +277,7 @@ async def run_hyperparameter_tuning(rl_config: Dict[str, Any], dataset_run_id: s
 
         mlflow.log_dict(best_params, "best_params.json")
         logger.info("✅ Best hyperparameters logged to MLflow as 'best_params.json'.")
+
 
 def make_env_lazy(rank: int, rl_config: Dict, mint_chunks: List[List[str]], dataset_run_id: str, seed: int = 0):
     """Factory function to create a lazy-loading environment for a subprocess."""
@@ -317,7 +310,6 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
 
             mlflow.log_param("action", args.action)
 
-            # --- 1. Initial TensorBoard command (staging path) ---
             current_run_name = run.data.tags.get("mlflow.runName", f"model_{run.info.run_id}")
             tensorboard_staging_path = os.path.join(staging_dir, "tensorboard_logs")
 
@@ -332,19 +324,16 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
                 current_tensorboard_path=tensorboard_staging_path,
                 client=client
             )
-            # mlflow.log_param("tensorboard_log_command", initial_cmd)
             logger.info(f"Run the Training TensorBoard UI with this command:\n`cmd:{initial_cmd}`")
             print(initial_cmd)
 
             mlflow.set_tag("source_dataset_run_id", args.dataset_run_id)
 
-            # --- Tags & Artifacts ---
             if hasattr(args, 'parent_run_id') and args.parent_run_id:
                 mlflow.set_tag("continued_from", args.parent_run_id)
             if hasattr(args, 'params_path') and args.params_path:
                 mlflow.log_artifact(args.params_path, "config")
 
-            # --- 2. Retrieve Dataset & Prepare Data ---
             dataset_run = find_mlflow_entity_by_run_id(args.dataset_run_id)
             if not dataset_run:
                 logger.error("No dataset run found with ID: %s. Aborting.", args.dataset_run_id)
@@ -352,7 +341,6 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
             
             datasets, contexts, tags_list = [], [], []
 
-            # --- 3. Prepare Data & Environments ---
             data_manager = DataManager(rl_config, dataset_run_id=args.dataset_run_id)
             if not data_manager.load_and_prepare_data(): return
 
@@ -372,8 +360,6 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
                 contexts.append(f"evaluation_set")
                 tags_list.append({"num_tokens": str(len(eval_mints))})
 
-
-            # Log all datasets
             if datasets:
                 mlflow.log_inputs(
                     datasets=datasets,
@@ -383,9 +369,13 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
 
             n_cpu = rl_config['N_CPU']
             mint_chunks = [c.tolist() for c in np.array_split(train_mints, n_cpu) if c.size > 0]
+            
+            # --- SAFETY CHECK: Ensure N_CPU is not too high for the dataset size ---
             if not mint_chunks:
-                logger.error(f"Cannot train with N_CPU={n_cpu} as there are not enough tokens to split. Please reduce N_CPU or increase dataset size.")
+                logger.error(f"Cannot train with N_CPU={n_cpu} as there are not enough tokens to split ({len(train_mints)} available).")
+                logger.error("Please reduce N_CPU or use a larger dataset.")
                 return
+            
             vec_env = SubprocVecEnv([make_env_lazy(i, rl_config, mint_chunks, args.dataset_run_id) for i in range(len(mint_chunks))])
             eval_env = DummyVecEnv([make_env_lazy(0, rl_config, [eval_mints], args.dataset_run_id)])
 
@@ -405,7 +395,6 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
                 logger.error("Model could not be initialized. Aborting.")
                 return
 
-            # --- 4. Callbacks & Training ---
             chk_cb = CheckpointCallback(max(rl_config['PPO_EVAL_FREQ']//n_cpu,1), os.path.join(staging_dir, "models"), "checkpoint")
             adv_cb = AdvancedMlflowCallback(eval_env, best_model_save_path=os.path.join(staging_dir, "models"), log_path=os.path.join(staging_dir, "logs"), eval_freq=max(rl_config['PPO_EVAL_FREQ']//n_cpu,1))
             
@@ -417,17 +406,14 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
                 tb_log_name=args.name
             )
 
-            # --- 5. Save Final Model ---
             final_model_path = os.path.join(staging_dir, "models", "final_model.zip")
             model.save(final_model_path)
 
-             # --- 6. Log Artifacts (Flattened Structure) ---
             for item in os.listdir(staging_dir):
                 item_path = os.path.join(staging_dir, item)
                 if os.path.isdir(item_path):
                     mlflow.log_artifacts(item_path, artifact_path=item)
 
-            # --- 7. Rebuild TensorBoard Command with Final Artifact Paths ---
             current_artifact_uri = run.info.artifact_uri.rstrip("/")
             final_tensorboard_path = f"{current_artifact_uri}/tensorboard_logs"
 
@@ -439,17 +425,13 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
                 client=client
             )
 
-            # ✅ Update parameter with final command
             mlflow.log_param("tensorboard_log_command", final_cmd)
 
-            # --- 8. Generate and Log Launch Scripts & Docs ---
             scripts_staging = os.path.join(staging_dir, "scripts")
             generate_tensorboard_launch_scripts(final_cmd, scripts_staging)
             generate_readme(final_cmd, scripts_staging)
-
             mlflow.log_artifacts(scripts_staging, artifact_path="scripts")
 
-             # --- 9. Log Model ---
             best_model_path = os.path.join(staging_dir, "models", "best_model.zip")
             model_to_log = PPO.load(best_model_path if os.path.exists(best_model_path) else final_model_path)
             
@@ -478,49 +460,45 @@ async def main():
     parser = argparse.ArgumentParser(description="RL Agent Training Workflow")
     subparsers = parser.add_subparsers(dest="action", required=True)
     
-    # --- Generic arguments for hardware override ---
+    # --- Shared parser for hardware and common training arguments ---
     common_parser = argparse.ArgumentParser(add_help=False)
+    common_parser.add_argument("--dataset-run-id", required=True, help="MLflow run ID of the dataset to use.")
+    common_parser.add_argument("--register-as", help="If provided, registers the model with this name.")
     common_parser.add_argument("--device", type=str, help="Override the computation device (e.g., 'cuda', 'cpu').")
     common_parser.add_argument("--n-cpu", type=int, help="Override the number of CPU cores to use.")
     
-    p_tune = subparsers.add_parser("tune", help="Run hyperparameter tuning.", parents=[common_parser])
+    p_tune = subparsers.add_parser("tune", help="Run hyperparameter tuning.")
     p_tune.add_argument("--dataset-run-id", required=True, help="MLflow run ID of the dataset to use.")
     
     p_train = subparsers.add_parser("train", help="Train a new model.", parents=[common_parser])
     p_train.add_argument("--params-path", required=True); p_train.add_argument("--name", default="PPO_Model")
-    p_train.add_argument("--dataset-run-id", required=True, help="MLflow run ID of the dataset to use.")
-    p_train.add_argument("--register-as", help="If provided, registers the model with this name.")
     
     p_cont = subparsers.add_parser("continue", help="Continue training.", parents=[common_parser])
     p_cont.add_argument("--model-path", required=True); p_cont.add_argument("--parent-run-id", required=True); p_cont.add_argument("--name", default="PPO_Model")
-    p_cont.add_argument("--dataset-run-id", required=True, help="MLflow run ID of the dataset to use.")
-    p_cont.add_argument("--register-as", help="If provided, registers the model with this name.")
 
     p_fine = subparsers.add_parser("finetune", help="Fine-tune a model.", parents=[common_parser])
     p_fine.add_argument("--model-path", required=True); p_fine.add_argument("--parent-run-id", required=True); p_fine.add_argument("--name", default="PPO_Model"); p_fine.add_argument("--learning-rate", type=float)
-    p_fine.add_argument("--dataset-run-id", required=True, help="MLflow run ID of the dataset to use.")
-    p_fine.add_argument("--register-as", help="If provided, registers the model with this name.")
 
     args = parser.parse_args()
     rl_config = get_config_for_mode(args.action)
 
     # --- Override config with command-line arguments if provided ---
-    if args.device:
+    # This logic is now centralized here for all workflows
+    if hasattr(args, 'device') and args.device:
         rl_config['DEVICE'] = args.device
         logger.info(f"Overriding DEVICE with command-line value: '{args.device}'")
-    if args.n_cpu is not None:
+    if hasattr(args, 'n_cpu') and args.n_cpu is not None:
         rl_config['N_CPU'] = args.n_cpu
         logger.info(f"Overriding N_CPU with command-line value: {args.n_cpu}")
 
-    if args.action == 'tune': await run_hyperparameter_tuning(rl_config, args.dataset_run_id)
-    else: await run_model_training(rl_config, args)
+    if args.action == 'tune': 
+        await run_hyperparameter_tuning(rl_config, args.dataset_run_id)
+    else: 
+        await run_model_training(rl_config, args)
 
 if __name__ == "__main__":
     setup_logging(logger_name='rl_training')
-    # --- Point to the MLflow server ---
-    # This ensures all actions (tune, train, etc.) log to the central server.
     mlflow.set_tracking_uri("http://127.0.0.1:8080")
-    # mlflow.set_tracking_uri("file:./data/rl_runs")
     if sys.platform in ['win32', 'darwin']: multiprocessing.freeze_support()
     try: asyncio.run(main())
     except KeyboardInterrupt: logger.info("Process interrupted by user.")
