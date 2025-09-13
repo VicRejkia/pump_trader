@@ -27,10 +27,12 @@ class GlobalState:
 
         """Initialize state variables."""
         self.shutdown_event = asyncio.Event()  # 🚀 Interruptible sleep support
+
         self.websocket_handler = None  # 🚀 Store WebSocketHandler instance
         self.new_token_subscription = False  # WebSocket subscription status
         self.migration_stream_subscribed = False  # Migration stream subscription status 
         self.active_token_subscriptions = set()  # Active token subscriptions
+
         self.sol_price = None          # SOL price (updated hourly)
         self.db_client = None          # Database client instance
         self.is_buying_enabled = True # ADDED: Flag to control buy orders
@@ -91,6 +93,32 @@ class GlobalState:
                     os.remove(temp_file_path)
                 except OSError as ose:
                     logger.error(f"Error removing temporary subscription file {temp_file_path}: {ose}")
+
+    def remove_from_rugcheck_queue(self, mint: str):
+        """Remove mint from RugCheck queue."""
+        # Assuming self.rugcheck_queue is a priority queue; clear entries for mint
+        while True:
+            try:
+                priority, queued_mint = self.rugcheck_queue.get_nowait()
+                if queued_mint != mint:
+                    self.rugcheck_queue.put((priority, queued_mint))
+                else:
+                    logger.debug(f"Removed {mint} from RugCheck queue.")
+            except asyncio.QueueEmpty:
+                break
+
+    def remove_from_socials_queue(self, mint: str):
+        """Remove mint from Socials queue."""
+        # Similar to above
+        while True:
+            try:
+                priority, queued_mint = self.socials_queue.get_nowait()  # Assume exists
+                if queued_mint != mint:
+                    self.socials_queue.put((priority, queued_mint))
+                else:
+                    logger.debug(f"Removed {mint} from Socials queue.")
+            except asyncio.QueueEmpty:
+                break
 
     @classmethod
     def get_instance(cls):

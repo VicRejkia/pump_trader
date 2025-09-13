@@ -39,13 +39,15 @@ from config.rl_config import RL_CONFIG
 MLFLOW_EXPERIMENT_DATASET = RL_CONFIG["common"]["MLFLOW_EXPERIMENT_DATASET"]
 MLFLOW_EXPERIMENT_TRAINING = RL_CONFIG["common"]["MLFLOW_EXPERIMENT_TRAINING"]
 MLFLOW_EXPERIMENT_TUNING = RL_CONFIG["common"]["MLFLOW_EXPERIMENT_TUNING"]
+MLFLOW_EXPERIMENT_BACKTESTING = RL_CONFIG["common"]["MLFLOW_EXPERIMENT_BACKTESTING"]
 
 
 # --- MLflow Configuration & Console ---
 mlflow.set_tracking_uri("file:./data/rl_runs")
 console = Console()
 
-# --- Helper Functions ---
+# --- Helper Functions (run_command, select_run_from_list, _select_dataset_run, run_hardware_advisor) ---
+# ... (These functions remain unchanged from the previous version) ...
 def run_command(command: List[str]) -> None:
     """
     Execute a shell command and display the output.
@@ -179,9 +181,8 @@ def run_hardware_advisor(dataset_run_id: str) -> Optional[Dict[str, Any]]:
         print(f"Error running hardware advisor: {e}")
         return None
 
-
-# --- Main Menu Functions ---
-
+# --- Main Menu Functions (generate_dataset, start_tuning, start_training, etc.) ---
+# ... (These functions remain unchanged) ...
 def generate_dataset() -> None:
     """Start the ETL process to generate a new feature store dataset."""
     print("\n--- Phase 0: Generate Feature Store (ETL) ---")
@@ -411,6 +412,53 @@ def start_feature_analysis() -> None:
         ]
         run_command(command)
 
+# --- REFACTORED BACKTESTING FUNCTION ---
+def start_backtesting() -> None:
+    """Run a backtest on a trained model using a prepared, out-of-sample dataset."""
+    print("\n--- Phase 6: Backtest a Trained Model ---")
+
+    # 1. Select the trained model to evaluate
+    print("\n🔎 First, select a trained model to backtest.")
+    runs = fetch_mlflow_parent_runs(MLFLOW_EXPERIMENT_TRAINING)
+    if not runs:
+        print("No trained models found to backtest.")
+        return
+    
+    model_run_id = select_run_from_list(runs, "Select the trained model you want to backtest:")
+    if not model_run_id:
+        return
+
+    # 2. Select the dataset for backtesting
+    print("\n🔎 Next, select the prepared dataset to use for the backtest.")
+    print("⚠️  Ensure this dataset is from a different time period than the model's training data.")
+    dataset_run_id = _select_dataset_run()
+    if not dataset_run_id:
+        return
+
+    # 3. Download the model artifact to a temporary location
+    with tempfile.TemporaryDirectory(dir="./.rl_staging") as tmpdir:
+        model_artifact_path = (
+            find_artifact_in_run(model_run_id, "best_model", ".zip") or
+            find_artifact_in_run(model_run_id, "final_model", ".zip")
+        )
+        
+        if not model_artifact_path:
+            print("❌ Could not find a model artifact (.zip) in the selected model run.")
+            return
+        
+        model_path = get_artifact_path(model_run_id, model_artifact_path, dst_path=tmpdir)
+        if not model_path:
+            print("❌ Failed to download the model artifact.")
+            return
+
+        # 4. Construct and run the evaluation command
+        command = [
+            "python", "rl_agent/evaluation/evaluate.py",
+            "--model-path", model_path,
+            "--dataset-run-id", dataset_run_id
+        ]
+        run_command(command)
+
 
 # --- Main Workflow ---
 
@@ -428,7 +476,8 @@ def main_menu() -> None:
                     ('3) Continue Training a Model', 'continue'),
                     ('4) Perform Model Fine-Tuning', 'finetune'),
                     ('5) Start Feature Importance Analysis', 'analyze'),
-                    ('6) Exit', 'exit')
+                    ('6) Run Backtest on a Trained Model', 'backtest'),
+                    ('7) Exit', 'exit')
                 ],
                 carousel=True
             )
@@ -451,6 +500,8 @@ def main_menu() -> None:
             continue_or_finetune_training('finetune')
         elif action == 'analyze':
             start_feature_analysis()
+        elif action == 'backtest':
+            start_backtesting()
         
         input("\nPress Enter to return to the main menu...")
         os.system('cls' if os.name == 'nt' else 'clear')

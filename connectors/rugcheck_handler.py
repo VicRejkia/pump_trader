@@ -6,7 +6,7 @@ import asyncio
 import os
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import traceback
 import httpx
 import base58
@@ -17,7 +17,8 @@ from solders.keypair import Keypair # type: ignore
 
 from config.config import (
     _RUGCHECK_AUTH_API, _RUGCHECK_RATE_LIMIT, _RUGCHECK_API, _RUGCHECK_INTERVAL,
-    RUGCHECK_SCORE_THRESHOLD
+    RUGCHECK_SCORE_THRESHOLD, RUGCHECK_REQUEUE_PRIORITY_BOOST_PURCHASED,
+    RUGCHECK_REQUEUE_INTERVAL_MINUTES
 )
 from database_handler import DatabaseClient
 from bot_logger import logger
@@ -49,6 +50,8 @@ class Rugcheck:
         self.deprioritized_tokens_tracker = {} # Stores {mint: {'first_deprio_timestamp': datetime, 'reprocess_count': int}}
         self.jwt_token: str | None = None
         self.wallet: Keypair | None = None
+        self._last_requeue_check_time = 0
+
 
         # --- NEW State Variables for Maintenance Handling ---
         self.maintenance_mode_active = False
@@ -178,16 +181,16 @@ class Rugcheck:
                 try:
                     self.queue.get_nowait()
                     self.queue.task_done()
-                except asyncio.QueueEmpty: 
+                except asyncio.QueueEmpty:
                     break
-                except Exception as e: 
+                except Exception as e:
                     logger.error(f"Error clearing rugcheck queue item: {e}")
 
             async with self.db_client.pool.acquire() as conn:
                 # Updated query with new priority formula
                 rows = await conn.fetch("""
                     WITH ranked_tokens AS (
-                        SELECT 
+                        SELECT
                             t.mint,
                             t.timestamp,
                             COALESCE(SUM(tr.sol_amount), 0) AS total_volume,
@@ -200,33 +203,127 @@ class Rugcheck:
                         GROUP BY t.mint, t.timestamp
                     )
 
-                    SELECT 
+                    SELECT
                         mint,
                         (total_volume + buy_volume + (1.0 - row_num * 0.001)) AS priority_score
                     FROM ranked_tokens;
                 """)
-                
+
                 logger.debug(f"🔍 Found {len(rows)} active tokens missing RugCheck data for refresh.")
                 if rows:
                     tokens_added = 0
                     for row in rows:
                         mint = row["mint"]
                         priority_score = row["priority_score"] or Decimal(0)
-                        
+
                         # Convert to negative for min-heap priority queue
                         # Higher priority_score = higher urgency = more negative value
                         priority = -float(priority_score)
-                        
+
                         current_attempts = self.fetch_attempts.get(mint, 0)
                         if current_attempts < MAX_FETCH_ATTEMPTS:
                             await self.queue.put((priority, mint))
                             tokens_added += 1
-                            
+
                     logger.debug(f"🔄 Refreshed RugCheck queue. Added {tokens_added} tokens (current size: {self.queue.qsize()}).")
             return True
         except Exception as e:
             logger.error(f"❌ Critical error in _refresh_queue: {e}", exc_info=True)
             return False
+
+    async def _requeue_processed_tokens(self):
+        """
+        Identifies already-processed tokens that are candidates for a re-check and adds them back to the queue.
+        Prioritization is based on volatility, volume, purchase status, and previous check count.
+        """
+        try:
+            async with self.db_client.pool.acquire() as conn:
+                # --- START MODIFICATION ---
+                # This query is more complex. It joins multiple tables to gather all prioritization criteria.
+                requeue_candidates = await conn.fetch("""
+                    WITH TokenVolatility AS (
+                        -- Calculate volatility from recent trades (e.g., last 15 mins)
+                        SELECT
+                            mint,
+                            STDDEV(price) / AVG(price) as volatility
+                        FROM trades
+                        WHERE timestamp >= NOW() - INTERVAL '15 minutes' AND price > 0
+                        GROUP BY mint
+                        HAVING COUNT(*) > 5 -- Require a minimum number of trades for a reliable volatility metric
+                    ),
+                    TokenVolume AS (
+                        -- Calculate total volume in the same recent period
+                        SELECT mint, SUM(sol_amount) as volume
+                        FROM trades
+                        WHERE timestamp >= NOW() - INTERVAL '15 minutes'
+                        GROUP BY mint
+                    ),
+                    RugcheckCounts AS (
+                        -- NEW: Count the number of checks per mint directly from the table
+                        SELECT mint, COUNT(*) AS check_count
+                        FROM rugcheck
+                        GROUP BY mint
+                    )
+                    SELECT
+                        r.mint,
+                        COALESCE(rc.check_count, 0) as check_count, -- Use the new calculated count
+                        COALESCE(tv.volatility, 0) as volatility,
+                        COALESCE(tvl.volume, 0) as volume,
+                        -- Check if there's an active position in the portfolio
+                        CASE WHEN p.mint IS NOT NULL THEN TRUE ELSE FALSE END as is_purchased
+                    FROM rugcheck r
+                    JOIN tokens t ON r.mint = t.mint
+                    LEFT JOIN RugcheckCounts rc ON r.mint = rc.mint -- Join with the new counts
+                    LEFT JOIN TokenVolatility tv ON r.mint = tv.mint
+                    LEFT JOIN TokenVolume tvl ON r.mint = tvl.mint
+                    LEFT JOIN portfolio p ON r.mint = p.mint AND p.status = 'active'
+                    WHERE t.is_active = TRUE;
+                """)
+
+                if not requeue_candidates:
+                    logger.debug("Re-queue check: No processed tokens found to re-evaluate.")
+                    return
+
+                requeued_count = 0
+                for candidate in requeue_candidates:
+                    mint = candidate['mint']
+                    base_priority = 0
+
+                    # 1. Boost priority for purchased tokens (most important)
+                    if candidate['is_purchased']:
+                        base_priority += self.config.get('RUGCHECK_REQUEUE_PRIORITY_BOOST_PURCHASED', 1000.0)
+
+                    # 2. Add priority based on recent volume and volatility
+                    base_priority += float(candidate['volume']) * 10  # Weight volume
+                    base_priority += float(candidate['volatility']) * 50 # Weight volatility more
+                    
+                    # --- START MODIFICATION ---
+                    # 3. Apply PRIORITY DECAY based on the number of previous checks.
+                    # This replaces the subtractive penalty with a more effective divisional decay.
+                    check_count = candidate['check_count']
+                    if check_count > 0:
+                        # Divide the score by the square of the check count
+                        final_priority_score = base_priority / (check_count ** 2)
+                    else:
+                        # Fallback for the unlikely case of a zero count
+                        final_priority_score = base_priority
+                    # --- END MODIFICATION ---
+
+                    # Convert to negative for the min-heap queue
+                    priority = -final_priority_score
+                    
+                    # Only requeue if it has a meaningful priority
+                    if final_priority_score > 1.0:
+                        await self.queue.put((priority, mint))
+                        requeued_count += 1
+                        logger.debug(f"Re-queuing processed token {mint} with priority score: {final_priority_score:.2f}")
+
+                if requeued_count > 0:
+                    logger.info(f"Re-queued {requeued_count} processed tokens for another RugCheck.")
+
+        except Exception as e:
+            logger.error(f"Error during RugCheck re-queue process: {e}", exc_info=True)
+
 
     async def _fetch_and_store_data(self, mint: str, is_retry: bool = False) -> dict | None | str:
         """
@@ -306,7 +403,7 @@ class Rugcheck:
                                 )
                                 return 'TOKEN_DELETED_MID_FETCH' # Return a specific status
                             # --- END OF FIX ---
-                            # 
+                            #
                             await conn.execute('''
                                 INSERT INTO rugcheck
                                 (mint, tokenProgram, creator, token_mintAuthority, token_supply,
@@ -320,22 +417,6 @@ class Rugcheck:
                                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
                                         $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26,
                                         $27, $28, $29, $30, $31, NOW())
-                                ON CONFLICT (mint) DO UPDATE SET
-                                    tokenProgram = EXCLUDED.tokenProgram, creator = EXCLUDED.creator,
-                                    token_mintAuthority = EXCLUDED.token_mintAuthority, token_supply = EXCLUDED.token_supply,
-                                    token_decimals = EXCLUDED.token_decimals, token_isInitialized = EXCLUDED.token_isInitialized,
-                                    token_freezeAuthority = EXCLUDED.token_freezeAuthority, tokenMeta_name = EXCLUDED.tokenMeta_name,
-                                    tokenMeta_symbol = EXCLUDED.tokenMeta_symbol, tokenMeta_uri = EXCLUDED.tokenMeta_uri,
-                                    tokenMeta_mutable = EXCLUDED.tokenMeta_mutable, tokenMeta_updateAuthority = EXCLUDED.tokenMeta_updateAuthority,
-                                    freezeAuthority = EXCLUDED.freezeAuthority, mintAuthority = EXCLUDED.mintAuthority,
-                                    risks = EXCLUDED.risks, score = EXCLUDED.score, fileMeta_description = EXCLUDED.fileMeta_description,
-                                    fileMeta_name = EXCLUDED.fileMeta_name, fileMeta_symbol = EXCLUDED.fileMeta_symbol,
-                                    fileMeta_image = EXCLUDED.fileMeta_image, totalMarketLiquidity = EXCLUDED.totalMarketLiquidity,
-                                    totalLPProviders = EXCLUDED.totalLPProviders, rugged = EXCLUDED.rugged,
-                                    tokenType = EXCLUDED.tokenType, transferFee_pct = EXCLUDED.transferFee_pct,
-                                    transferFee_maxAmount = EXCLUDED.transferFee_maxAmount, transferFee_authority = EXCLUDED.transferFee_authority,
-                                    graphInsidersDetected = EXCLUDED.graphInsidersDetected, detectedAt = EXCLUDED.detectedAt,
-                                    full_data = EXCLUDED.full_data, last_checked = NOW()
                             ''',
                                 mint, data.get("tokenProgram"), data.get("creator"),
                                 token.get("mintAuthority"), token.get("supply"),
@@ -413,8 +494,12 @@ class Rugcheck:
             logger.debug(f"🚨 High RugCheck score ({score} > {self.config['RUGCHECK_SCORE_THRESHOLD']}) for {mint}. Deactivating.")
             try:
                 async with self.db_client.pool.acquire() as conn:
-                    await conn.execute("UPDATE tokens SET is_active = FALSE WHERE mint = $1", mint)
-                if self.websocket_handler.websocket and self.websocket_handler.websocket.open:
+
+                    is_active_in_portfolio = await conn.fetchval("SELECT 1 FROM portfolio WHERE mint = $1 AND status = 'active' LIMIT 1", mint)
+                    if not is_active_in_portfolio:
+                        await conn.execute("UPDATE tokens SET is_active = FALSE WHERE mint = $1", mint)
+                
+                if self.websocket_handler.websocket and self.websocket_handler.websocket.open and not is_active_in_portfolio:
                     is_subscribed = mint in self.state.active_token_subscriptions
                     if is_subscribed:
                         await self.state.remove_token_subscription(mint) # Updates state and file
@@ -459,6 +544,15 @@ class Rugcheck:
                     else:
                         await self.state.wait_or_interrupt(timeout=5)
                         continue
+                
+                # --- NEW: Re-queue Logic on Idle ---
+                current_time = time.time()
+                requeue_interval = self.config.get('RUGCHECK_REQUEUE_INTERVAL_MINUTES', 5) * 60
+                if self.queue.empty() and (current_time - self._last_requeue_check_time > requeue_interval):
+                    logger.info("RugCheck queue is empty. Checking for processed tokens to re-queue...")
+                    await self._requeue_processed_tokens()
+                    self._last_requeue_check_time = current_time
+
 
                 if self.queue.empty():
                     await self.state.wait_or_interrupt(timeout=1)
@@ -576,7 +670,7 @@ class Rugcheck:
 
             except asyncio.CancelledError:
                 logger.info("⏹ RugCheck worker task cancelled.")
-                if mint: 
+                if mint:
                     try: self.queue.task_done()
                     except ValueError: pass
                 break
@@ -588,7 +682,7 @@ class Rugcheck:
                 await self.state.wait_or_interrupt(timeout=10)
 
         logger.info("🛑 RugCheck worker shutting down.")
-            
+
     def start(self) -> asyncio.Task:
         """Creates and returns the asyncio task for the RugCheck worker."""
         logger.info("Creating RugCheck background task...")

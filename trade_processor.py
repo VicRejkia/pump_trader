@@ -14,34 +14,42 @@ from config.config import _TOTAL_SUPPLY # Import TOTAL_SUPPLY from config
 async def trade_worker():
     """Processes trade messages from queue and writes them in batches to the database."""
     state = GlobalState.get_instance()
-    db_client = state.db_client # Get DatabaseClient from GlobalState
-    websocket_handler = state.websocket_handler # Get WebSocketHandler from GlobalState
-    enrichment_queue = state.get_enrichment_queue() # Get the enrichment queue from the global state
+    db_client = state.db_client
 
-    # Add check for db_client
     if not db_client:
         logger.error("Trade worker cannot start: DatabaseClient not initialized in GlobalState.")
-        return # Exit if db_client is not ready
+        return
 
+    # Wait for the single, persistent WebSocketHandler instance to be available.
+    websocket_handler = None
+    while not state.shutdown_event.is_set():
+        websocket_handler = state.websocket_handler
+        if websocket_handler:
+            logger.info("Trade worker has acquired stable WebSocketHandler instance. Proceeding.")
+            break
+        logger.info("Trade worker is waiting for WebSocketHandler to become available...")
+        await state.wait_or_interrupt(timeout=2)
+    
     if not websocket_handler:
-        logger.error("Trade worker cannot start: WebSocketHandler not initialized in GlobalState.")
-        return # Exit if websocket_handler is not ready
+        logger.warning("Trade worker exiting as shutdown was signaled while waiting for WebSocketHandler.")
+        return
 
-    trade_queue = websocket_handler.trade_queue # Get trade queue
-    logger.debug(f"Trade queue: {trade_queue}")
+    # The trade_queue reference is now stable and will never change.
+    trade_queue = websocket_handler.trade_queue
 
-    BATCH_SIZE = 100  # Number of trades per batch
-    BATCH_TIMEOUT = 5 # Seconds to wait for new trades before processing batch
+    trade_queue = websocket_handler.trade_queue
+    BATCH_SIZE = 100
+    BATCH_TIMEOUT = 5
 
     logger.info("🚀 Trade worker started.")
 
     while not state.shutdown_event.is_set():
+        # The complex logic to re-check the handler instance is no longer needed.
         batch_from_queue = []
         trade_params_to_db = []
         mints_in_batch = []
 
         try:
-            # Collect a batch of items from the queue
             start_time = asyncio.get_event_loop().time()
             while len(batch_from_queue) < BATCH_SIZE:
                 remaining_time = BATCH_TIMEOUT - (asyncio.get_event_loop().time() - start_time)
@@ -60,78 +68,70 @@ async def trade_worker():
             active_subscriptions = await state.get_token_subscriptions()
             sol_price_decimal = Decimal(await state.get_sol_price() or 0)
 
-            # Prepare the database parameters from the batch
             for data in batch_from_queue:
                 mint = data.get('mint')
                 if not mint or mint not in active_subscriptions:
-                    # This item is invalid or for an unsubscribed token, mark it as done immediately.
                     trade_queue.task_done()
                     continue
 
                 try:
-                    token_amount = Decimal(str(data.get('tokenAmount', 0)))
-                    sol_amount = Decimal(str(data.get('solAmount', 0)))
+                    # --- START OF FIX ---
+                    # Safely convert potentially malformed API data to Decimal.
+                    # This handles cases where the API sends None, empty strings, or other non-numeric values.
+                    raw_token_amount = data.get('tokenAmount')
+                    raw_sol_amount = data.get('solAmount')
+                    raw_market_cap_sol = data.get('marketCapSol')
+                    raw_v_tokens = data.get('vTokensInBondingCurve')
+                    raw_v_sol = data.get('vSolInBondingCurve')
+
+                    token_amount = Decimal(str(raw_token_amount)) if raw_token_amount else Decimal('0')
+                    sol_amount = Decimal(str(raw_sol_amount)) if raw_sol_amount else Decimal('0')
+                    # --- END OF FIX ---
                     
-                    # Skip trades with no amounts
                     if token_amount <= 0 or sol_amount <= 0:
                         trade_queue.task_done()
                         continue
                         
                     price = sol_amount / token_amount
-                    market_cap_sol = Decimal(str(data.get('marketCapSol', 0)))
+                    # --- START OF FIX (Continued) ---
+                    market_cap_sol = Decimal(str(raw_market_cap_sol)) if raw_market_cap_sol else Decimal('0')
+                    v_tokens_in_bc = Decimal(str(raw_v_tokens)) if raw_v_tokens else Decimal('0')
+                    v_sol_in_bc = Decimal(str(raw_v_sol)) if raw_v_sol else Decimal('0')
+                    # --- END OF FIX (Continued) ---
 
-                    # Use a fallback for market_cap_calculated if needed
                     market_cap_calculated = market_cap_sol * sol_price_decimal
 
                     trade_params_to_db.append((
                         data.get('signature'), mint, None, data.get('txType'),
                         token_amount, sol_amount, price,
                         data.get('bondingCurveKey', ""),
-                        Decimal(str(data.get('vTokensInBondingCurve', 0))),
-                        Decimal(str(data.get('vSolInBondingCurve', 0))),
+                        v_tokens_in_bc,
+                        v_sol_in_bc,
                         market_cap_sol, sol_price_decimal, market_cap_calculated,
                         data.get('received_at_timestamp', datetime.now(timezone.utc))
                     ))
                     mints_in_batch.append(mint)
                 except (InvalidOperation, TypeError) as e:
                     logger.error(f"Invalid data for trade (Sig: {data.get('signature')}). Skipping. Error: {e}", exc_info=True)
-                    trade_queue.task_done() # Mark invalid item as done
+                    trade_queue.task_done()
                 except Exception as e:
                     logger.error(f"Unexpected error processing trade item (Sig: {data.get('signature')}). Error: {e}", exc_info=True)
-                    trade_queue.task_done() # Mark errored item as done to prevent blockage
+                    trade_queue.task_done()
 
-
-            # --- CRITICAL CHANGE: DB write happens BEFORE task_done ---
             if trade_params_to_db:
                 try:
-                    # Attempt to write the prepared batch to the database
                     await db_client.insert_trades_batch(trade_params_to_db, mints_in_batch)
                     
-                    # <<< ADD THIS BLOCK TO POPULATE ENRICHMENT QUEUE >>>
-                    # for sig in signatures_for_enrichment:
-                    #     await enrichment_queue.put(sig)
-                    # logger.debug(f"Added {len(signatures_for_enrichment)} signatures to enrichment queue.")
-                    # <<< END BLOCK >>>
-                    
-                    # SUCCESS: The DB write was successful. Now, mark all items in the batch as done.
                     for item in batch_from_queue:
-                        # We must check if the item was processed into trade_params_to_db,
-                        # as some might have been skipped (e.g., unsubscribed).
-                        # A simpler way is to just call task_done for every item retrieved.
-                        # The ones already marked done will be ignored.
                         try:
                             trade_queue.task_done()
                         except ValueError:
-                            # This can happen if a task is already marked as done, which is fine.
                             pass
                     
                     logger.debug(f"Successfully processed and saved a batch of {len(trade_params_to_db)} trades.")
 
                 except Exception as e:
-                    # FAILURE: The DB write failed. The items are still in the queue because we haven't
-                    # called task_done(). They will be retried in the next loop.
                     logger.error(f"🚨 Trade worker failed during batch insert. The batch will be retried. Error: {e}", exc_info=True)
-                    # We add a small sleep to prevent a tight loop if the DB is down.
                     await asyncio.sleep(5)
 
         except Exception as e:

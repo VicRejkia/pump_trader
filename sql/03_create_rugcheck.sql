@@ -1,5 +1,8 @@
+-- sql/03_create_rugcheck.sql
+
 CREATE TABLE IF NOT EXISTS rugcheck (
-    mint TEXT PRIMARY KEY REFERENCES tokens(mint) ON DELETE CASCADE,
+    id SERIAL PRIMARY KEY, -- Use a serial ID as the primary key
+    mint TEXT REFERENCES tokens(mint) ON DELETE CASCADE, -- Mint is no longer primary, but still references tokens
     tokenProgram TEXT,
     creator TEXT,
     token_mintAuthority TEXT,

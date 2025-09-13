@@ -17,30 +17,11 @@ from utils import (
 from connectors.live_trader_pumpportal import execute_live_pumpportal_trade # Import the live trading function
 from telegram_interface import send_telegram_message # If you use it
 
-from rl_agent.inference.model_server import RLModelServer
-from rl_agent.environments.meme_coin_env import FlexiblePortfolioActionSpace 
-
 class TradingManager:
     def __init__(self, db_client: DatabaseClient, config_dict: dict, state: GlobalState):
         self.db = db_client
         self.config = config_dict # This is the active config from TradingBot
         self.state = state
-
-        # +++ RL ATTRIBUTES +++
-        self.rl_model_enabled = self.config.get('USE_RL_AGENT', False)
-        self.rl_model_server = None
-        self.action_decoder = None
-        if self.rl_model_enabled:
-            model_path = self.config.get('RL_MODEL_PATH')
-            if model_path:
-                self.rl_model_server = RLModelServer(model_path)
-                # Ensure max_tokens matches the trained model's action space
-                max_tokens_for_action = self.config.get('MAX_CONCURRENT_POSITIONS', 5)
-                self.action_decoder = FlexiblePortfolioActionSpace(max_tokens_for_action)
-                logger.info(f"✅ RL Agent enabled. Loaded model from: {model_path}")
-            else:
-                logger.error("RL Agent is enabled in config, but RL_MODEL_PATH is not set. Disabling RL.")
-                self.rl_model_enabled = False
 
     async def _is_trend_reversal_confirmed(self, mint: str) -> bool:
         """
@@ -203,65 +184,8 @@ class TradingManager:
         else:
             logger.warning(f"Unknown data_source '{data_source}' for {mint} in trend reversal check.")
             return False
-        
-    async def check_sell_opportunities(self):
-        """
-        Determines sell opportunities. If the RL agent is enabled, it delegates
-        all sell and re-buy decisions to the agent. Otherwise, it uses the
-        programmed rule-based strategy.
-        """
-        if self.state.shutdown_event.is_set():
-            return
 
-        if self.rl_model_enabled:
-            await self._run_rl_agent_decision_cycle()
-        else:
-            await self._run_rule_based_sell_strategy()
-        
-    # +++ NEW METHOD FOR RL DECISION MAKING +++
-    async def _run_rl_agent_decision_cycle(self):
-        """
-        Gathers state, gets actions from the RL agent, and executes them.
-        This handles both selling and re-buying decisions for held/closed positions.
-        """
-        try:
-            # 1. Get current portfolio state & build observations
-            # This needs a comprehensive function to build the observation vector
-            # For now, we'll conceptualize it.
-            observation = await self._build_rl_observation()
-
-            if observation is None:
-                logger.warning("Could not build a valid observation for RL agent. Skipping cycle.")
-                return
-
-            # 2. Get action from the model server
-            raw_action = await self.rl_model_server.get_action(observation)
-            
-            # 3. Decode action into concrete decisions
-            # We need the universe of potential tokens (e.g., all active tokens)
-            # and current positions
-            token_universe = [] # Placeholder: await self.db.get_all_active_tokens()
-            current_positions = {} # Placeholder: await self.db.get_active_positions_dict()
-            decisions = self.action_decoder.decode(raw_action, token_universe, current_positions)
-
-            # 4. Execute sell decisions
-            for mint, sell_fraction in decisions['sell'].items():
-                if sell_fraction > 0.05: # Action threshold
-                    logger.info(f"RL Agent decided to sell {sell_fraction:.2%} of {mint}")
-                    # This requires finding the position_id and executing the sell
-                    # await self.execute_rl_sell(mint, sell_fraction, "RL Agent Decision")
-            
-            # 5. Execute buy decisions (for new positions or re-buys)
-            # This logic would be in the `check_trading_opportunities` method if we replace that too.
-            # For now, we focus on sell/rebuy.
-            # for mint, buy_weight in decisions['buy'].items():
-            #   ...
-
-        except Exception as e:
-            logger.error(f"Error during RL agent decision cycle: {e}", exc_info=True)
-
-
-    async def _run_rule_based_sell_strategy(self):
+    async def check_trading_opportunities(self):
         """✅ Check for new trading opportunities based on configured criteria."""
         if self.state.shutdown_event.is_set():
             return

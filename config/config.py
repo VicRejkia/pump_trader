@@ -20,7 +20,7 @@ DEFAULT_BUY_POOL = "auto"
 DEFAULT_SELL_POOL = "auto"
 
 # --- New Multi-Stage Sell Logic Configuration ---
-FIRST_SELL_PROFIT_MARGIN = 70.0             # Desired profit margin % on the *total initial investment* for the first TP sell
+FIRST_SELL_PROFIT_MARGIN = 80.0             # Desired profit margin % on the *total initial investment* for the first TP sell
 FIRST_SELL_PERCENT = 35.0                   # % of *initial* tokens to sell at First TP (e.g., 50.0 for 50%)
 INITIAL_STOP_LOSS_PERCENT = 40.0            # Initial SL as % below buy price (e.g., 25.0 for -25%)
 TRAILING_STOP_LOSS_PERCENT = 10.0           # Trailing SL % drop from highest price *after* First TP (e.g., 15.0 for -15%)
@@ -51,14 +51,14 @@ PRICE_AVG_TRADE_COUNT = 15  # Number of trades for window if PRICE_WINDOW_TYPE i
 
 
 # Trading thresholds
-DEFAULT_RUGCHECK_SCORE_THRESHOLD = 401      # No trading if Rugcheck score is equal or above this threshold
+DEFAULT_RUGCHECK_SCORE_THRESHOLD = 501      # No trading if Rugcheck score is equal or above this threshold
 DEFAULT_SOCIAL_SCORE_THRESHOLD = 100        # No trading if Social score is equal or above this threshold
 DEFAULT_VOLUME_THRESHOLD = 40000            # Minimum volume threshold in USD
 MIN_MARKETCAP_THRESHOLD = 4000              # Minimum market cap threshold in USD to make emergency sell
 DEFAULT_MARKETCAP_THRESHOLD = 20000         # Minimum market cap threshold in USD to search for buy opportunities
 MIN_VOLATILITY = 0.18                       # Minimum volatility threshold in % to search for buy opportunities
 DEFAULT_TIME_INTERVAL = 10                 # Time interval for checking volatility, volume and marketcap in minutes
-MAX_TOKEN_COUNT_PER_CREATOR = 10            # Maximum number of tokens per creator to consider token as safe
+MAX_TOKEN_COUNT_PER_CREATOR = 50            # Maximum number of tokens per creator to consider token as safe
 
 # --- Re-Buy Logic Configuration ---
 USE_TREND_REVERSAL_CONFIRMATION = True      # Master switch to enable/disable this feature
@@ -69,7 +69,7 @@ TREND_REVERSAL_RSI_NEUTRAL_LEVEL = 45.0     # RSI level considered neutral for t
 INDICATOR_LOOKBACK_HOURS = 1                # Lookback period for indicators in hours
 
 # Indicator Time Periods
-APPLY_TREND_REVERSAL_ON_SELL_REASONS = ["🛑 Stop Loss", "🆘 Emergency SL (MCap)", "↘️ Trailing SL", "🛡️ Breakeven SL", "manual_override"]
+APPLY_TREND_REVERSAL_ON_SELL_REASONS = ["🛑 Stop Loss", "🆘 Emergency SL (MCap)", "🆘 Emergency SL (No Volume)", "↘️ Trailing SL", "🛡️ Breakeven SL", "manual_override"]
 RSI_PERIOD = 14
 BBANDS_PERIOD = 20
 BBANDS_STD_DEV = 2.0
@@ -97,12 +97,21 @@ _PUMPORTAL_LOCAL_API_URL = "https://pumpportal.fun/api/trade-local"
 _WEBSOCKET_SUBSCRIPTION_REFRESH_ENABLED = True       # Enable periodic refresh of all trade subscriptions
 _WEBSOCKET_SUBSCRIPTION_REFRESH_INTERVAL_MINUTES = 240 # Interval in minutes to perform the refresh
 
+# --- WebSocket Stability ---
+WEBSOCKET_MAX_SUBSCRIPTIONS = 1000  # Cap to avoid server limits
+WEBSOCKET_PING_INTERVAL_SECONDS = 30  # Send ping every 30s
+WEBSOCKET_PONG_TIMEOUT_SECONDS = 10  # Expect pong within 10s or reconnect
+WEBSOCKET_RECONNECT_BACKOFF_BASE_SECONDS = 1  # Exponential backoff start
+WEBSOCKET_RECONNECT_BACKOFF_MAX_SECONDS = 60  # Max delay
+INACTIVITY_UNSUBSCRIBE_MINUTES = 60  # Unsub tokens inactive > this (from existing INACTIVITY_PERIOD)
 
 _RUGCHECK_AUTH_API = "https://api.rugcheck.xyz/auth/login/solana"
 _RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens"
 _RUGCHECK_RATE_LIMIT = 10                    # 10 requests per minute
 _RUGCHECK_INTERVAL = 60                      # 60 seconds interval for RugCheck checks
-RUGCHECK_SCORE_THRESHOLD = 2500             # Score above which a token is considered high risk and deactivated
+RUGCHECK_SCORE_THRESHOLD = 10000             # Score above which a token is considered high risk and deactivated
+RUGCHECK_REQUEUE_PRIORITY_BOOST_PURCHASED = 1000.0 # High priority boost for purchased tokens
+RUGCHECK_REQUEUE_INTERVAL_MINUTES = 5 # How often to check for requeue opportunities
 
 # SOL price configuration
 _SOL_PRICE_API_URL = "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd"
@@ -157,6 +166,12 @@ SOCIALS_ALLOWED_NEWS_DOMAINS = {
     "cnbcnews.us", "truthsocial.com"
 }
 
+# --- DYNAMIC SOCIALS SCORING ---
+SOCIALS_SCORE_TYPE_INITIAL = 'INITIAL_METADATA'
+SOCIALS_SCORE_TYPE_TELEGRAM = 'TELEGRAM_UPDATE'
+SOCIALS_SCORE_TYPE_WEBSITE = 'WEBSITE_UPDATE'
+SOCIALS_TELEGRAM_UPDATE_INTERVAL_MINUTES = 15 # How often to re-check telegram stats for active tokens
+
 # Penalties (Higher = Worse)
 SOCIALS_PENALTY_NO_WEBSITE = 40
 SOCIALS_PENALTY_INVALID_WEBSITE_TYPE = 35
@@ -180,6 +195,10 @@ SOCIALS_PENALTY_ACTION_TRIGGER_URL = 15         # Action trigger URL in metadata
 # Bonuses (Negative = Better)
 SOCIALS_BONUS_DOMAIN_MATCH = -10                # Bonus if domain mentions token name or symbol
 SOCIALS_BONUS_NEWS_GOV_WEBSITE = 0              # No penalty/bonus currently applied for news/gov sites in 'SOCIALS_ALLOWED_NEWS_DOMAINS'
+SOCIALS_BONUS_TG_HIGH_MEMBERS = -10             # Bonus for having a large number of members
+SOCIALS_THRESHOLD_TG_HIGH_MEMBERS = 2000        # Threshold above which high member bonus applies
+SOCIALS_BONUS_TG_HIGH_ONLINE_RATIO = -5         # Bonus for a healthy online-to-member ratio
+SOCIALS_THRESHOLD_TG_HIGH_ONLINE_RATIO = 0.10   # Ratio (10%) above which the high online ratio bonus applies
 
 # Default Scores
 SOCIALS_SCORE_FAILED_METADATA = 100             # Score assigned if metadata fetch fails

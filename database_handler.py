@@ -305,7 +305,7 @@ class DatabaseClient:
         """
         async with self.pool.acquire() as conn:
             return await conn.fetch(query, limit)
-        
+
     async def is_suspicious_creator(self, creator: str):
         """Check if a creator is suspicious based on the number of tokens created."""
         query = """
@@ -905,6 +905,11 @@ class DatabaseClient:
                         await conn.execute('''
                             INSERT INTO rugcheck_backup SELECT *, NOW() FROM rugcheck WHERE mint = $1
                         ''', mint)
+
+                        await conn.execute('''
+                            INSERT INTO social_scores_backup (id, mint, timestamp, score_type, score_value, details, backup_timestamp)
+                            SELECT id, mint, timestamp, score_type, score_value, details, NOW() FROM social_scores WHERE mint = $1
+                        ''', mint)
  
                         # Backup migrations, ignoring conflicts on the primary key
                         await conn.execute('''
@@ -919,6 +924,7 @@ class DatabaseClient:
                         await conn.execute("DELETE FROM tokens WHERE mint = $1", mint)
                         await conn.execute("DELETE FROM trades WHERE mint = $1", mint)
                         await conn.execute("DELETE FROM rugcheck WHERE mint = $1", mint)
+                        await conn.execute("DELETE FROM social_scores WHERE mint = $1", mint)
                         await conn.execute("DELETE FROM migrations WHERE mint = $1", mint)
                         await conn.execute("DELETE FROM dexscreener_data WHERE mint_address = $1", mint)
  
@@ -1716,6 +1722,7 @@ class DatabaseClient:
                     'trades',             # No explicit FK, but related to tokens
                     'migrations',         # Standalone or related? Assuming standalone for drop order
                     'tokens',             # Drop after dependents
+                    'social_scores_backup',
                     'portfolio_backup',          
                     'rugcheck_backup',
                     'trades_backup',
@@ -1741,7 +1748,7 @@ class DatabaseClient:
             async with self.pool.acquire() as conn:
                 try:
                     tables_to_backup = [
-                        'tokens', 'trades', 'rugcheck', 'migrations', 'portfolio'
+                        'tokens', 'trades', 'rugcheck', 'migrations', 'portfolio', 'social_scores'
                     ]
                     for table in tables_to_backup:
                         logger.info("🗄️ Backing up table %s", table)
@@ -1766,6 +1773,13 @@ class DatabaseClient:
                                     'manual_backup', NOW()
                                 FROM tokens
                                 ON CONFLICT (mint) DO NOTHING;
+                            """)
+                        elif table == 'social_scores':
+                            await conn.execute("""
+                                INSERT INTO social_scores_backup (id, mint, timestamp, score_type, score_value, details, backup_timestamp)
+                                SELECT id, mint, timestamp, score_type, score_value, details, NOW()
+                                FROM social_scores
+                                ON CONFLICT (id) DO NOTHING;
                             """)
                         else:
                             # Original logic for other tables (assuming their backup tables have identical columns)

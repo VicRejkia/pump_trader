@@ -99,7 +99,7 @@ def main():
     #url = "https://t.me/db_butt_token"  # Change to test different channels
     #url = "https://t.me/homelessdegens"  # Change to test different channels
     #url = "https://t.me/frogwifhat_FWIF"  # Change to test different channels
-    url = "https://t.me/animeonsols"  # Change to test different channels
+    url = "https://t.me/adzillaofficial"  # Change to test different channels
     loop = asyncio.get_event_loop()
     result = loop.run_until_complete(check_telegram_channel(url))
     print(result)

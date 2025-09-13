@@ -22,10 +22,10 @@ CREATE TABLE IF NOT EXISTS rl_agent_performance (
 
 -- Optional: Create partitions for the next few months as an example
 -- In a production PostgreSQL environment, you would automate this process.
-CREATE TABLE rl_agent_performance_y2025m08 PARTITION OF rl_agent_performance
+CREATE TABLE IF NOT EXISTS rl_agent_performance_y2025m08 PARTITION OF rl_agent_performance
     FOR VALUES FROM ('2025-08-01') TO ('2025-09-01');
 
-CREATE TABLE rl_agent_performance_y2025m09 PARTITION OF rl_agent_performance
+CREATE TABLE IF NOT EXISTS rl_agent_performance_y2025m09 PARTITION OF rl_agent_performance
     FOR VALUES FROM ('2025-09-01') TO ('2025-10-01');
 
 -- Create an index on the partitioned table
