@@ -31,6 +31,8 @@ class WebSocketHandler:
         self.last_message_timestamp: Optional[float] = None
         # Event to signal a requested shutdown, breaking the main connection loop.
         self._shutdown_requested = asyncio.Event()
+        # Lock to serialize outgoing sends (prevents concurrent sends from disrupting the socket)
+        self._send_lock = asyncio.Lock()
 
     async def manage_connection(self):
         """
@@ -50,7 +52,7 @@ class WebSocketHandler:
             except Exception as e:
                 # This block now correctly catches ConnectionClosed and other
                 # fatal session errors propagated from _connect_and_run_session.
-                logger.error(f"WebSocket session failed: {type(e).__name__} - {e}. The supervisor will attempt to reconnect.")
+                logger.error(f"WebSocket session failed: {type(e).__name__} - {e}. The supervisor will attempt to reconnect.", exc_info=True)
 
             if not self._shutdown_requested.is_set():
                 logger.info("Will attempt to reconnect in 5 seconds...")
@@ -67,13 +69,13 @@ class WebSocketHandler:
             await asyncio.gather(*self.tasks, return_exceptions=True)
             self.tasks.clear()
 
-        if self.websocket and self.websocket.open:
+        if self.websocket and getattr(self.websocket, "open", False):
             try:
                 await self.websocket.close()
             except websockets.exceptions.ConnectionClosed:
                 pass 
             except Exception as e:
-                logger.error(f"Error closing old websocket: {e}")
+                logger.error(f"Error closing old websocket: {e}", exc_info=True)
         self.websocket = None
         self.last_message_timestamp = None
         await self.state.set_ws_refresh_next_run_ts(None)
@@ -94,6 +96,7 @@ class WebSocketHandler:
             logger.info("✅ WS: Connection established.")
             self.last_message_timestamp = asyncio.get_event_loop().time()
 
+            # Subscribe / resume
             await self.subscribe_new_token_stream()
             await self.subscribe_to_migrations()
             await self.resume_subscriptions()
@@ -117,6 +120,33 @@ class WebSocketHandler:
             logger.warning("WS Session: Session ended. Performing cleanup...")
             await self._cleanup_tasks_and_socket()
 
+    async def safe_send(self, message: str, wait_timeout: float = 5.0):
+        """
+        Safely send a message over the websocket.
+        - Serializes outgoing sends via a lock.
+        - applies a timeout to the underlying send.
+        - on failure attempts to close the socket so the supervisor reconnects.
+        - re-raises the exception so callers/supervisor can react.
+        """
+        async with self._send_lock:
+            if not (self.websocket and getattr(self.websocket, "open", False)):
+                raise RuntimeError("Websocket is not connected.")
+            try:
+                # Use wait_for to ensure we don't hang indefinitely
+                await asyncio.wait_for(self.websocket.send(message), timeout=wait_timeout)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(f"WebSocket send failed: {exc}. Forcing socket close to trigger reconnect.", exc_info=True)
+                # Try to close the socket to make sure the manager sees a closed connection
+                try:
+                    if self.websocket and getattr(self.websocket, "open", False):
+                        await self.websocket.close()
+                except Exception:
+                    pass
+                # propagate so caller/supervisor handles reconnect logic
+                raise
+
     async def message_handler(self):
         """Processes incoming WebSocket messages. Exits on connection closed."""
         logger.info("✉️ WebSocket message handler started.")
@@ -139,13 +169,17 @@ class WebSocketHandler:
                                 await self.unsubscribe_tokens_from_creator(creator)
                             continue
                         
-                        await self.websocket.send(json.dumps({
-                            "method": "subscribeTokenTrade",
-                            "keys": [data['mint']]
-                        }))
-                        await self.state.add_token_subscription(data['mint'])
-                        active_subs_count = len(await self.state.get_token_subscriptions())
-                        logger.debug(f"✅ Subscribed to {data['mint']} --> {active_subs_count} active subscriptions")
+                        # Use safe_send here
+                        try:
+                            await self.safe_send(json.dumps({
+                                "method": "subscribeTokenTrade",
+                                "keys": [data['mint']]
+                            }))
+                            await self.state.add_token_subscription(data['mint'])
+                            active_subs_count = len(await self.state.get_token_subscriptions())
+                            logger.debug(f"✅ Subscribed to {data['mint']} --> {active_subs_count} active subscriptions")
+                        except Exception as e:
+                            logger.error(f"Failed to send subscribeTokenTrade for {mint}: {e}", exc_info=True)
 
                     elif data.get("txType") == "migrate":
                         mint_to_flag = data.get('mint')
@@ -181,7 +215,7 @@ class WebSocketHandler:
             try:
                 await asyncio.sleep(unsubscribe_interval)
 
-                if not (self.websocket and self.websocket.open):
+                if not (self.websocket and getattr(self.websocket, "open", False)):
                     logger.warning("Unsubscribe checker: WebSocket not open. Skipping cycle.")
                     continue
                 
@@ -205,18 +239,23 @@ class WebSocketHandler:
     
     async def subscribe_new_token_stream(self):
         """Sends a request to subscribe to the newToken stream."""
-        if self.websocket and self.websocket.open:
+        if self.websocket and getattr(self.websocket, "open", False):
             logger.info("Subscribing to new token stream...")
-            await self.websocket.send(json.dumps({"method": "subscribeNewToken"}))
-            await self.state.set_new_token_subscription(True)
+            try:
+                await self.safe_send(json.dumps({"method": "subscribeNewToken"}))
+                await self.state.set_new_token_subscription(True)
+            except Exception as e:
+                logger.error(f"Failed to subscribe to new token stream: {e}", exc_info=True)
+                await self.state.set_new_token_subscription(False)
         else:
             logger.error("Cannot subscribe to new tokens: WebSocket not connected.")
+            await self.state.set_new_token_subscription(False)
         
     async def subscribe_to_migrations(self):
         """Sends a request to subscribe to the migration event stream."""
-        if self.websocket and self.websocket.open:
+        if self.websocket and getattr(self.websocket, "open", False):
             try:
-                await self.websocket.send(json.dumps({"method": "subscribeMigration"}))
+                await self.safe_send(json.dumps({"method": "subscribeMigration"}))
                 await self.state.set_migration_subscription(True)
                 logger.debug("Successfully sent migration subscription request.")
             except Exception as e:
@@ -241,7 +280,7 @@ class WebSocketHandler:
                 if self.state.shutdown_event.is_set():
                     break
                 
-                if not (self.websocket and self.websocket.open):
+                if not (self.websocket and getattr(self.websocket, "open", False)):
                     logger.warning("Subscription refresher: WebSocket not open. Skipping refresh cycle.")
                     continue
                 
@@ -275,7 +314,7 @@ class WebSocketHandler:
 
     async def resume_subscriptions(self):
         """Resubscribes to all active tokens from the database."""
-        if not (self.websocket and self.websocket.open):
+        if not (self.websocket and getattr(self.websocket, "open", False)):
             logger.warning("WebSocket not connected, skipping resubscriptions.")
             return
         
@@ -285,10 +324,13 @@ class WebSocketHandler:
             
             if mints_to_subscribe:
                 logger.info(f"Resuming {len(mints_to_subscribe)} active token subscriptions...")
-                await self.websocket.send(json.dumps({
-                    "method": "subscribeTokenTrade",
-                    "keys": mints_to_subscribe
-                }))
+                try:
+                    await self.safe_send(json.dumps({
+                        "method": "subscribeTokenTrade",
+                        "keys": mints_to_subscribe
+                    }))
+                except Exception as e:
+                    logger.error(f"Failed to send resume subscriptions: {e}", exc_info=True)
                 for mint in mints_to_subscribe:
                     await self.state.add_token_subscription(mint)
             else:
@@ -318,13 +360,11 @@ class WebSocketHandler:
             return
         
         logger.info(f"Processing unsubscribe batch of {len(mints)} tokens. Reason: {reason}")
-        if self.websocket and self.websocket.open:
+        if self.websocket and getattr(self.websocket, "open", False):
             try:
-                await self.websocket.send(json.dumps({"method": "unsubscribeTokenTrade", "keys": mints}))
-            except websockets.exceptions.ConnectionClosed:
-                logger.warning("Could not send unsubscribe batch, connection is already closed.")
+                await self.safe_send(json.dumps({"method": "unsubscribeTokenTrade", "keys": mints}))
             except Exception as e:
-                logger.error(f"Failed to send batch unsubscribe message: {e}")
+                logger.warning(f"Could not send unsubscribe batch (maybe socket closed): {e}", exc_info=True)
 
         reasons_to_skip_db_backup = {"shutdown", "periodic_refresh"}
         for mint in mints:
@@ -338,9 +378,9 @@ class WebSocketHandler:
             logger.info("Already unsubscribed from newToken stream.")
             return
 
-        if self.websocket and self.websocket.open:
+        if self.websocket and getattr(self.websocket, "open", False):
             try:
-                await self.websocket.send(json.dumps({"method": "unsubscribeNewToken"}))
+                await self.safe_send(json.dumps({"method": "unsubscribeNewToken"}))
                 await self.state.set_new_token_subscription(False)
                 logger.info("✅ Sent unsubscribe request for newToken stream.")
             except Exception as e:
@@ -354,7 +394,7 @@ class WebSocketHandler:
         logger.info("Initiating WebSocketHandler shutdown sequence...")
         self._shutdown_requested.set()
 
-        if self.websocket and self.websocket.open:
+        if self.websocket and getattr(self.websocket, "open", False):
             active_subs = list(await self.state.get_token_subscriptions())
             if active_subs:
                 logger.info(f"Sending final unsubscribe for {len(active_subs)} tokens.")
@@ -393,16 +433,21 @@ class WebSocketHandler:
 
         if self.state.shutdown_event.is_set():
             status_summary["connection_status"] = "Shutting Down"
-        elif self.websocket and self.websocket.open:
+        elif self.websocket and getattr(self.websocket, "open", False):
             status_summary["connection_status"] = "Connected"
         
-        status_summary["new_token_subscribed"] = await self.state.get_new_token_subscription()
-        status_summary["migration_subscribed"] = await self.state.get_migration_subscription()
-        active_subs = await self.state.get_token_subscriptions()
-        status_summary["trade_subscriptions_count"] = len(active_subs)
-        
-        if self.last_message_timestamp:
-            time_since_last = asyncio.get_event_loop().time() - self.last_message_timestamp
-            status_summary["time_since_last_message_s"] = round(time_since_last, 1)
+        try:
+            status_summary["new_token_subscribed"] = await self.state.get_new_token_subscription()
+            status_summary["migration_subscribed"] = await self.state.get_migration_subscription()
+            active_subs = await self.state.get_token_subscriptions()
+            status_summary["trade_subscriptions_count"] = len(active_subs)
+            
+            if self.last_message_timestamp:
+                time_since_last = asyncio.get_event_loop().time() - self.last_message_timestamp
+                status_summary["time_since_last_message_s"] = round(time_since_last, 1)
+        except Exception:
+            # Be defensive: ensure we always return a stable, numeric 'time_since_last_message_s'
+            if status_summary.get("time_since_last_message_s") is None:
+                status_summary["time_since_last_message_s"] = -1.0
 
         return status_summary

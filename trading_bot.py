@@ -241,8 +241,14 @@ class TradingBot:
                     summary = await self.ws_handler.get_connection_summary()
                     status = summary.get("connection_status", "Error")
                     style = "green" if "Connected" in status else "yellow" if "Reconnecting" in status else "red"
-                    time_since = summary.get("time_since_last_message_s", -1.0)
-                    if time_since > 60: status += f" (Stale: {time_since:.0f}s)"
+
+                    # Defensive handling: time_since may be None in some cases; normalize it
+                    time_since = summary.get("time_since_last_message_s")
+                    if time_since is None:
+                        time_since = -1.0
+                    # Ensure numeric comparison only when time_since is int/float
+                    if isinstance(time_since, (int, float)) and time_since > 60:
+                        status += f" (Stale: {time_since:.0f}s)"
 
                     ws_lines.append(f"[bold cyan]│[/bold cyan] :electric_plug: [bold]Websocket:[/bold] [{style}]{status}[/{style}]")
                     ws_lines.append(f"[bold cyan]│  ├─ [/bold cyan][bold]NewToken Stream:[/bold] [{'green' if summary.get('new_token_subscribed') else 'red'}]Yes/No[/]")
@@ -252,9 +258,9 @@ class TradingBot:
                     next_run = await self.state.get_ws_refresh_next_run_ts()
                     if next_run:
                         remaining = (next_run - datetime.now(timezone.utc)).total_seconds() / 60
-                        timer = f"[yellow]{remaining:.1f} min[/yellow]" if remaining > 0 else "[yellow]Soon...[/yellow]"
+                        timer = f"[yellow]{remaining:.1f} min[/yellow]" if remaining > 0 else "[yellow]Soon.[/yellow]"
                     else:
-                        timer = "[green]In Progress...[/green]"
+                        timer = "[green]In Progress.[/green]"
                     ws_lines.append(f"[bold cyan]│  └─ [/bold cyan][bold]Next WS Refresh:[/bold] {timer}")
 
                 task_lines = []
@@ -269,6 +275,7 @@ class TradingBot:
                     else:
                         active_count += 1
                     task_lines.append(f"[bold cyan]├──[/bold cyan] {name}: [bold {style}]{status}[/bold {style}]")
+
 
                 log_parts = [
                     "\n[bold cyan]┌────────────────────────────────────[/bold cyan]",

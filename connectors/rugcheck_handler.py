@@ -503,7 +503,7 @@ class Rugcheck:
                     is_subscribed = mint in self.state.active_token_subscriptions
                     if is_subscribed:
                         await self.state.remove_token_subscription(mint) # Updates state and file
-                        await asyncio.wait_for(self.websocket_handler.websocket.send(json.dumps({
+                        await asyncio.wait_for(self.websocket_handler.safe_send(json.dumps({
                             "method": "unsubscribeTokenTrade", "keys": [mint]
                         })), timeout=5.0)
                         logger.debug(f"[bold]:hot_pepper: Too spicy:[/bold] Sent unsubscribe for high-score token {mint}")
@@ -587,7 +587,7 @@ class Rugcheck:
                                         self.state.active_token_subscriptions.discard(mint)
                                         self.state._save_subscriptions_to_file()
                                 try: # Send unsubscribe even if state update fails, though unlikely
-                                    await asyncio.wait_for(self.websocket_handler.websocket.send(json.dumps({
+                                    await asyncio.wait_for(self.websocket_handler.safe_send(json.dumps({
                                         "method": "unsubscribeTokenTrade", "keys": [mint]
                                     })), timeout=5.0)
                                     logger.info(f"🧹 Culled {mint}: Unsubscribed from WebSocket due to persistent RugCheck issues.")
