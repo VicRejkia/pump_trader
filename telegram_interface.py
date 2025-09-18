@@ -71,7 +71,6 @@ CB_STOP_BOT = "stop_trading_bot"
 CB_STOP_BUYING = "stop_buying_command"
 CB_START_BUYING = "start_buying_command"
 CB_UNSUB_NEWTOKEN = "unsub_newtoken_command"
-CB_SELL_TOKEN_PROMPT = "sell_token_prompt"
 CB_UNSUB_TOKEN_PROMPT = "unsub_token_prompt"
 CB_VIEW_DYNAMIC_CONFIG = "view_dynamic_config"
 CB_EDIT_DYNAMIC_CONFIG_START = "edit_dynamic_config_start"
@@ -81,6 +80,10 @@ CB_OPEN_TRADES_PAGE_PREFIX = "open_trades_page_"
 CB_SELL_NOW_PREFIX = "sell_now_"
 CB_SELL_CONFIRM_YES_PREFIX = "sell_confirm_yes_"
 CB_SELL_CONFIRM_CANCEL_PREFIX = "sell_confirm_cancel_"
+# --- NEW CALLBACKS ---
+CB_SELL_ALL_NOW_PROMPT = "sell_all_now_prompt"
+CB_SELL_ALL_CONFIRM_YES = "sell_all_confirm_yes"
+CB_RESTART_WEBSOCKET = "restart_websocket"
 
 def get_sol_price_from_status_file() -> float | None:
     try:
@@ -170,15 +173,20 @@ def get_type_hint(value) -> str:
     return " (string)"
 
 # --- Telegram Bot Status & Control Functions ---
-async def get_bot_actual_status() -> str:
+async def get_bot_status_and_ws() -> tuple[str, dict | None]:
+    """Reads full status file, returning bot status string and WebSocket summary dict."""
     try:
-        if not os.path.exists(STATUS_FILE): return "UNKNOWN (No Status File)"
-        with open(STATUS_FILE, 'r') as f: status_data = json.load(f)
+        if not os.path.exists(STATUS_FILE):
+            return "UNKNOWN (No Status File)", None
+        with open(STATUS_FILE, 'r') as f:
+            status_data = json.load(f)
+
         bot_process_status = status_data.get("bot_process_status", "UNKNOWN").upper()
+        ws_summary = status_data.get("websocket_summary")
         status_timestamp_str = status_data.get("timestamp")
 
         if not status_timestamp_str:
-            return "STALE (No Timestamp)"
+            return "STALE (No Timestamp)", ws_summary
 
         status_dt_naive = datetime.fromisoformat(status_timestamp_str)
         status_dt = status_dt_naive.replace(tzinfo=status_dt_naive.tzinfo or timezone.utc)
@@ -186,22 +194,22 @@ async def get_bot_actual_status() -> str:
         stale_threshold = STATUS_FILE_CHECK_SECONDS * 2.5
 
         if bot_process_status in ["RUNNING", "STARTING"] and age_seconds > stale_threshold:
-            return f"STALE ({bot_process_status})"
+            return f"STALE ({bot_process_status})", ws_summary
         elif bot_process_status == "STOPPING" and age_seconds > stale_threshold * 2:
-            return "STOPPED (Stale Stopping)"
-        return bot_process_status
+            return "STOPPED (Stale Stopping)", ws_summary
+        return bot_process_status, ws_summary
     except (IOError, json.JSONDecodeError, ValueError) as e:
         print(f"Error reading status.json: {e}")
-        return "ERROR_READING_STATUS"
+        return "ERROR_READING_STATUS", None
     except Exception as e:
-        print(f"Unexpected error in get_bot_actual_status: {e}")
-        return "ERROR_UNEXPECTED_STATUS_READ"
+        print(f"Unexpected error in get_bot_status_and_ws: {e}")
+        return "ERROR_UNEXPECTED_STATUS_READ", None
 
 async def toggle_bot_process_command(update: Update, context: ContextTypes.DEFAULT_TYPE, force_start_flag: bool = False) -> None:
     query = update.callback_query
     if query: await query.answer()
     message_text = ""
-    current_bot_status = await get_bot_actual_status()
+    current_bot_status, _ = await get_bot_status_and_ws()
 
     if query and query.data == CB_STOP_BOT:
         if write_bot_command("STOP"):
@@ -248,7 +256,7 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     else:
         target_message_for_edit = update.message
 
-    current_bot_status = await get_bot_actual_status()
+    current_bot_status, ws_summary = await get_bot_status_and_ws()
     status_emoji = "🟢" if current_bot_status == "RUNNING" else \
                    "🟡" if current_bot_status == "STARTING" else \
                    "🟠" if "STALE" in current_bot_status else \
@@ -256,15 +264,41 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                    "🟣" if current_bot_status == "STOPPING" else \
                    "⚠️"
 
-    menu_text = f"{status_emoji} Bot Status: *{escape_markdown_v2_text(current_bot_status)}*\nChoose an option:"
-    keyboard = [
+    # --- WEBSOCKET STATUS DISPLAY ---
+    ws_status_text = ""
+    ws_restart_needed = False
+    if ws_summary:
+        ws_conn_status = ws_summary.get("connection_status", "N/A")
+        ws_subs = ws_summary.get("trade_subscriptions_count", "N/A")
+        last_msg_s = ws_summary.get("time_since_last_message_s", -1)
+        
+        ws_emoji = "✅"
+        if ws_conn_status != "connected":
+            ws_emoji = "🔌"
+            ws_restart_needed = True
+        elif last_msg_s > 60:
+            ws_emoji = "⏳"
+            ws_conn_status = f"Stale ({last_msg_s:.0f}s)"
+            ws_restart_needed = True
+
+        ws_status_text = escape_markdown_v2_text(f"\n\n{ws_emoji} WebSocket: {ws_conn_status} | Subs: {ws_subs}")
+    # --- END WEBSOCKET DISPLAY ---
+
+    menu_text = f"{status_emoji} Bot Status: *{escape_markdown_v2_text(current_bot_status)}*{ws_status_text}\n\nChoose an option:"
+    
+    keyboard = []
+    if ws_restart_needed:
+        keyboard.append([InlineKeyboardButton("🔄 Restart WebSocket", callback_data=CB_RESTART_WEBSOCKET)])
+
+    keyboard.extend([
         [InlineKeyboardButton("💰 Bot Wallet Info", callback_data=CB_GET_SOL_AMOUNT)],
         [InlineKeyboardButton("📊 Subscribed Tokens Count", callback_data=CB_GET_TOKEN_COUNT)],
         [InlineKeyboardButton("📈 View Open Trades", callback_data=CB_VIEW_OPEN_TRADES)],
         [InlineKeyboardButton("⚙️ Dynamic Config", callback_data=CB_MANAGE_DYNAMIC_CONFIG)],
         [InlineKeyboardButton("🤖 Bot Control", callback_data=CB_BOT_CONTROL_MENU)],
         [InlineKeyboardButton("🔄 Refresh Status", callback_data=CB_REFRESH_STATUS)],
-    ]
+    ])
+
     reply_markup = InlineKeyboardMarkup(keyboard)
     try:
         if query :
@@ -280,7 +314,7 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def bot_control_menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-    current_bot_status = await get_bot_actual_status()
+    current_bot_status, _ = await get_bot_status_and_ws()
     start_stop_button_text = "▶️ Start Trading Bot"
     start_stop_callback = CB_START_BOT
 
@@ -293,16 +327,17 @@ async def bot_control_menu_command(update: Update, context: ContextTypes.DEFAULT
     elif "STALE" in current_bot_status or current_bot_status == "ERROR_READING_STATUS":
         start_stop_button_text = "▶️ Force Start Controller"
         start_stop_callback = CB_START_BOT_FORCE
+    
     keyboard = [
         [InlineKeyboardButton(start_stop_button_text, callback_data=start_stop_callback)],
         [
             InlineKeyboardButton("🚫 Stop Buys", callback_data=CB_STOP_BUYING),
             InlineKeyboardButton("✅ Start Buys", callback_data=CB_START_BUYING)
         ],
-        [InlineKeyboardButton("🔕 Unsub New Tokens Stream", callback_data=CB_UNSUB_NEWTOKEN)],
+        [InlineKeyboardButton("🚨 Sell All Immediately", callback_data=CB_SELL_ALL_NOW_PROMPT)],
         [
-            InlineKeyboardButton("💸 Sell Token", callback_data=CB_SELL_TOKEN_PROMPT),
-            InlineKeyboardButton("🔕 Unsub Token Trades", callback_data=CB_UNSUB_TOKEN_PROMPT)
+            InlineKeyboardButton("🔕 Unsub New Tokens", callback_data=CB_UNSUB_NEWTOKEN),
+            InlineKeyboardButton("🔕 Unsub Token", callback_data=CB_UNSUB_TOKEN_PROMPT)
         ],
         [InlineKeyboardButton("🔙 Back to Main Menu", callback_data=CB_MAIN_MENU)]
     ]
@@ -884,6 +919,28 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif command == CB_UNSUB_NEWTOKEN:
         await send_simple_bot_command(update, context, "UNSUB_NEWTOKEN", "Unsubscribe New Tokens")
 
+    elif command == CB_RESTART_WEBSOCKET:
+        await query.answer("Sending WebSocket restart command...")
+        await send_simple_bot_command(update, context, "RESTART_WEBSOCKET", "Restart WebSocket")
+
+    elif command == CB_SELL_ALL_NOW_PROMPT:
+        await query.answer()
+        keyboard = [[
+            InlineKeyboardButton("✅ YES, SELL ALL", callback_data=CB_SELL_ALL_CONFIRM_YES),
+            InlineKeyboardButton("❌ No, Cancel", callback_data=CB_BOT_CONTROL_MENU)
+        ]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.message.edit_text(
+            text=escape_markdown_v2_text("⚠️ Are you sure you want to sell ALL open positions immediately? This cannot be undone."),
+            reply_markup=reply_markup,
+            parse_mode="MarkdownV2"
+        )
+        return
+
+    elif command == CB_SELL_ALL_CONFIRM_YES:
+        await query.answer("Sending SELL ALL command...")
+        await send_simple_bot_command(update, context, "SELL_ALL_IMMEDIATELY", "Sell All Immediately")
+
     elif command.startswith(CB_CONFIG_PAGE_PREFIX):
         page = int(command.split('_')[-1])
         await edit_dynamic_config_start_command(query, context, page=page)
@@ -902,8 +959,20 @@ def main_telegram_bot() -> None:
         return
     if not all([DB_USER, DB_PASSWORD, DB_HOST, DB_DATABASE]):
         print("Error: Database environment variables not fully set for Telegram interface.")
+        return
 
-    application = Application.builder().token(TG_TOKEN).build()
+    # --- FINAL CORRECTED NETWORK CONFIGURATION ---
+    # The timeout arguments are passed directly to the builder, not to a Defaults object.
+    application = (
+        Application.builder()
+        .token(TG_TOKEN)
+        .connect_timeout(10)
+        .read_timeout(30)
+        .pool_timeout(60)
+        .build()
+    )
+    # --- END CORRECTION ---
+
     edit_config_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(edit_dynamic_config_start_command, pattern=f"^{CB_EDIT_DYNAMIC_CONFIG_START}$")],
         states={
@@ -919,7 +988,6 @@ def main_telegram_bot() -> None:
     )
     mint_command_conv_handler = ConversationHandler(
         entry_points=[
-            CallbackQueryHandler(lambda u, c: prompt_mint_address(u, c, "SELL"), pattern=f"^{CB_SELL_TOKEN_PROMPT}$"),
             CallbackQueryHandler(lambda u, c: prompt_mint_address(u, c, "UNSUB_TRADES"), pattern=f"^{CB_UNSUB_TOKEN_PROMPT}$"),
         ],
         states={

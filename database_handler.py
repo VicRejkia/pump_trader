@@ -1297,9 +1297,16 @@ class DatabaseClient:
         return statistics.median(inlier_market_caps) if inlier_market_caps else None
 
 
+    async def _get_migration_timestamp(self, mint: str, conn) -> Optional[datetime]:
+        """Fetches the timestamp of when a token was migrated."""
+        query = "SELECT timestamp FROM migrations WHERE mint = $1 ORDER BY timestamp DESC LIMIT 1"
+        migration_ts = await conn.fetchval(query, mint)
+        return migration_ts
+
     async def _get_latest_price_from_dexscreener(self, mint: str, conn) -> Dict[str, Optional[float]]:
         """
-        NEW HELPER: Fetches the single latest price snapshot for a migrated token.
+        [MODIFIED] Fetches the single latest price snapshot for a migrated token,
+        with a grace period for newly migrated tokens to allow for data aggregation.
         """
         query = """
             SELECT price_usd, market_cap, sol_price_usd, volume_m5
@@ -1309,14 +1316,31 @@ class DatabaseClient:
             LIMIT 1;
         """
         record = await conn.fetchrow(query, mint)
-        # --- FIX ---
-        # This conditional logic is the core of the fix.
-        # It now checks if 5-minute volume is greater than zero.
-        if not record or not record['price_usd'] or not record['sol_price_usd'] or record['sol_price_usd'] <= 0 or float(record['volume_m5']) <= 0:
-            logger.warning(f"DEXScreener data for {mint} is stale (0 volume in m5). Treating price AND market cap as invalid.")
-            # Return None for both price and market cap
+
+        # --- START OF FIX ---
+        # Initial checks for fundamental data validity.
+        if not record or not record['price_usd'] or not record['sol_price_usd'] or record['sol_price_usd'] <= 0:
+            logger.warning(f"DEXScreener data for {mint} is missing critical price data. Treating as invalid.")
             return {'price': None, 'market_cap': None}
-        # --- END FIX ---
+
+        # Now check for staleness (0 volume), but apply a grace period for newly migrated tokens.
+        is_stale_by_volume = float(record['volume_m5']) <= 0
+        is_within_grace_period = False
+
+        # Check migration timestamp to determine if we are in the grace period.
+        migration_ts = await self._get_migration_timestamp(mint, conn)
+        if migration_ts:
+            grace_period_minutes = self.config.get('DEXSCREENER_MIGRATION_GRACE_PERIOD_MINUTES', 5)
+            time_since_migration = datetime.now(timezone.utc) - migration_ts
+            if time_since_migration < timedelta(minutes=grace_period_minutes):
+                is_within_grace_period = True
+                logger.debug(f"Token {mint} is within the {grace_period_minutes}-minute migration grace period ({time_since_migration.total_seconds():.0f}s ago). Stale volume check will be bypassed.")
+
+        # The price is considered invalid ONLY IF it's stale by volume AND we are NOT within the grace period.
+        if is_stale_by_volume and not is_within_grace_period:
+            logger.warning(f"DEXScreener data for {mint} is stale (0 volume in m5) and outside the migration grace period. Treating price AND market cap as invalid.")
+            return {'price': None, 'market_cap': None}
+        # --- END OF FIX ---
 
         price_usd = float(record['price_usd'])
         market_cap_usd = float(record['market_cap'])
@@ -1380,8 +1404,10 @@ class DatabaseClient:
 
     async def get_price_and_market_cap_for_decision(self, mint: str, config_from_caller: dict, conn) -> Dict[str, Optional[float]]:
         """
-        REFACTORED: Centralized function to get the decision price and market cap for a token,
-        using a source-specific strategy as you proposed.
+        [MODIFIED] Centralized function to get the decision price and market cap for a token.
+        If a token is marked as migrated ('DEXSCREENER') but its Dexscreener data is invalid
+        (e.g., no recent volume, or no data yet), it will temporarily fall back to using
+        its last known Pump.fun data if the migration occurred within a grace period.
         """
         # 1. Determine the data source for the token
         token_record = await conn.fetchrow("SELECT data_source FROM tokens WHERE mint = $1", mint)
@@ -1391,15 +1417,39 @@ class DatabaseClient:
             return {'price': None, 'market_cap': None}
 
         data_source = token_record['data_source']
-        logger.debug(f"Getting price for {mint} using source-specific method for: {data_source}")
+        logger.debug(f"Getting price for {mint}. Primary source: {data_source}")
 
         # 2. Branch logic based on the data source
         if data_source == 'DEXSCREENER':
-            # For migrated tokens, get the latest clean price from dexscreener_data
-            return await self._get_latest_price_from_dexscreener(mint, conn)
-        else: #// 'PUMP'
+            # For migrated tokens, first attempt to get the latest clean price from dexscreener_data
+            price_data = await self._get_latest_price_from_dexscreener(mint, conn)
+
+            # --- START: FALLBACK SECURITY LAYER ---
+            # If Dexscreener data is invalid (e.g., stale volume, or no data yet),
+            # check if we are within the migration grace period.
+            if price_data.get('price') is None:
+                migration_ts = await self._get_migration_timestamp(mint, conn)
+                if migration_ts:
+                    grace_period_minutes = self.config.get('DEXSCREENER_MIGRATION_GRACE_PERIOD_MINUTES', 5)
+                    time_since_migration = datetime.now(timezone.utc) - migration_ts
+                    
+                    if time_since_migration < timedelta(minutes=grace_period_minutes):
+                        logger.info(
+                            f"DEXScreener price for {mint} is invalid, but token is within the {grace_period_minutes}-minute "
+                            f"migration grace period ({time_since_migration.total_seconds():.0f}s ago). "
+                            f"Attempting to fall back to last known Pump.fun data."
+                        )
+                        # Fall back to using robust calculation on its (now historical) Pump.fun trades.
+                        return await self._get_robust_price_from_pump(mint, config_from_caller, conn)
+            # --- END: FALLBACK SECURITY LAYER ---
+
+            # If not in grace period or if Dexscreener data was valid, return the original result.
+            return price_data
+            
+        else: # 'PUMP'
             # For non-migrated tokens, use the robust calculation to handle outliers
             return await self._get_robust_price_from_pump(mint, config_from_caller, conn)
+
 
     async def analyze_dexscreener_trend(self, mint: str, lookback_minutes: int, conn) -> list:
         """

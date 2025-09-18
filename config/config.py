@@ -83,6 +83,8 @@ DEX_REVERSAL_MIN_LIQUIDITY_USD = 5000       # Minimum liquidity in USD for the t
 DEX_REVERSAL_MIN_PRICE_CHANGE_M5 = 2.0      # The m5 price change must be at least +2.0% to be counted as a positive signal.
 DEX_REVERSAL_MIN_BUY_SELL_RATIO = 1.5       # Ratio of buys to sells must be at least 1.5 for a strong buying pressure signal.
 DEX_REVERSAL_MIN_CONFIRMATIONS = 2          # How many snapshots must show strong buying pressure to confirm the trend.
+DEXSCREENER_MIGRATION_GRACE_PERIOD_MINUTES = 5 # How many minutes after migration to ignore stale volume checks. # <<< ADD THIS LINE
+
 
 # UNSUBSCRIBING CONDITIONS
 INACTIVITY_PERIOD = 60                      # Inactivity period in minutes before unsubscribing & backup
@@ -104,6 +106,9 @@ WEBSOCKET_PONG_TIMEOUT_SECONDS = 10  # Expect pong within 10s or reconnect
 WEBSOCKET_RECONNECT_BACKOFF_BASE_SECONDS = 1  # Exponential backoff start
 WEBSOCKET_RECONNECT_BACKOFF_MAX_SECONDS = 60  # Max delay
 INACTIVITY_UNSUBSCRIBE_MINUTES = 60  # Unsub tokens inactive > this (from existing INACTIVITY_PERIOD)
+WEBSOCKET_HEALTH_CHECK_INTERVAL = 10  # seconds
+WEBSOCKET_SUBSCRIPTION_BATCH_SIZE = 100
+WEBSOCKET_BATCH_DELAY = 0.5  # seconds between batches
 
 _RUGCHECK_AUTH_API = "https://api.rugcheck.xyz/auth/login/solana"
 _RUGCHECK_API = "https://api.rugcheck.xyz/v1/tokens"

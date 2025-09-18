@@ -831,6 +831,56 @@ class TradingManager:
                 except Exception as e:
                     logger.error(f"❌ Error in check_sell_opportunities transaction block: {e}", exc_info=True)
 
+    async def execute_manual_sell_all(self):
+        """Executes a manual sell for ALL active positions."""
+        trading_mode = self.config['TRADING_MODE'].lower()
+        logger.info(f"[{trading_mode.upper()} MODE] Received command to sell ALL active positions.")
+        
+        positions_to_sell = []
+        async with self.db.pool.acquire() as conn_fetch:
+            positions_to_sell = await self.db.get_active_buy_positions(conn_fetch)
+
+        if not positions_to_sell:
+            logger.info("No active positions found to sell.")
+            await send_telegram_message("ℹ️ Sell All Command: No active positions found to sell.")
+            return
+
+        logger.info(f"Found {len(positions_to_sell)} active positions to sell.")
+        await send_telegram_message(f"🚨 Executing SELL ALL command for {len(positions_to_sell)} positions...")
+
+        for position in positions_to_sell:
+            mint = position['mint']
+            pos_id = position['id']
+            # We must wrap each sell in its own try/except block to ensure
+            # that one failed sell doesn't stop the entire process.
+            try:
+                # Use a new connection for each sell to ensure transaction isolation.
+                async with self.db.pool.acquire() as conn_sell:
+                    price_data = await self.db.get_price_and_market_cap_for_decision(mint, self.config, conn_sell)
+                    trigger_price = price_data.get('price')
+                    market_cap = price_data.get('market_cap', 0.0)
+
+                    if trigger_price is None or trigger_price <= 0:
+                        logger.error(f"[{trading_mode.upper()}] Cannot execute sell for {mint} (part of SELL ALL): Invalid current price ({trigger_price}).")
+                        continue
+
+                    logger.info(f"[{trading_mode.upper()}] Selling {mint} (Pos ID: {pos_id}) at price {trigger_price:.9f}...")
+                    await self.execute_sell(
+                        conn=conn_sell,
+                        mint=mint,
+                        trigger_price=trigger_price,
+                        market_cap_sol_at_trigger=market_cap,
+                        reason="manual_override_all",
+                        sell_percentage=1.0,
+                        position_id_to_update=pos_id,
+                        sell_trigger_values={"command": "SELL_ALL_IMMEDIATELY"}
+                    )
+            except Exception as e:
+                logger.error(f"Failed to sell {mint} (Pos ID: {pos_id}) during SELL ALL operation: {e}", exc_info=True)
+        
+        logger.info("SELL ALL operation completed.")
+        await send_telegram_message("✅ SELL ALL operation completed.")
+        
     async def execute_manual_sell(self, mint: str):
         """Executes a manual sell for all holdings of a specific token, respecting TRADING_MODE."""
         trading_mode = self.config['TRADING_MODE'].lower()

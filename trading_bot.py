@@ -201,6 +201,11 @@ class TradingBot:
                 sol_balance = await self.state.get_current_sol_balance()
                 sol_price = await self.state.get_sol_price()
                 sol_balance_usd = (sol_balance * sol_price) if sol_balance is not None and sol_price is not None else 0.0
+                
+                # --- MODIFICATION: Get full WebSocket summary ---
+                ws_summary = {}
+                if self.ws_handler:
+                    ws_summary = await self.ws_handler.get_connection_summary()
 
                 status_data = {
                     "bot_process_status": current_process_status,
@@ -212,6 +217,7 @@ class TradingBot:
                     "current_portfolio_value_usd": round(sol_balance_usd, 2),
                     "rugcheck_queue_size": self.state.get_rugcheck_queue().qsize(),
                     "socialscheck_queue_size": self.state.get_socialscheck_queue().qsize(),
+                    "websocket_summary": ws_summary # <-- ADD THIS
                 }
                 self._write_status(status_data)
                 await asyncio.sleep(5)
@@ -225,6 +231,7 @@ class TradingBot:
         
         log_info("Status updater task finished. Writing final STOPPED status.")
         self._write_status({"bot_process_status": "STOPPED", "timestamp": datetime.now(timezone.utc).isoformat()})
+
 
     async def monitor_tasks(self):
         """Monitor and log the status of background tasks."""
@@ -312,16 +319,23 @@ class TradingBot:
                     if command and command != last_command:
                         log_info(f"Received command: '{command}'")
                         last_command = command
-                        # Process command
+                        # --- MODIFICATION: Process new commands ---
                         if command.upper() == "STOP":
                             self.state.trigger_shutdown()
                         elif command.upper() == "STOP_BUYING":
                             self.state.is_buying_enabled = False
+                            log_info("Buying has been disabled.")
                         elif command.upper() == "START_BUYING":
                             self.state.is_buying_enabled = True
+                            log_info("Buying has been enabled.")
+                        elif command.upper() == "SELL_ALL_IMMEDIATELY":
+                            asyncio.create_task(self.trading_manager.execute_manual_sell_all())
                         elif command.upper().startswith("SELL_"):
                             mint = command[len("SELL_"):]
                             asyncio.create_task(self.trading_manager.execute_manual_sell(mint))
+                        elif command.upper() == "RESTART_WEBSOCKET":
+                            if self.ws_handler:
+                                asyncio.create_task(self.ws_handler.force_reconnect())
                         # ... other commands
                         with open(COMMAND_FILE, 'w') as f: f.write("") # Clear command
                 await asyncio.sleep(5)
