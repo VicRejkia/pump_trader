@@ -100,9 +100,9 @@ _WEBSOCKET_SUBSCRIPTION_REFRESH_ENABLED = True       # Enable periodic refresh o
 _WEBSOCKET_SUBSCRIPTION_REFRESH_INTERVAL_MINUTES = 240 # Interval in minutes to perform the refresh
 
 # --- WebSocket Stability ---
-WEBSOCKET_MAX_SUBSCRIPTIONS = 1000  # Cap to avoid server limits
+WEBSOCKET_MAX_SUBSCRIPTIONS = 3000  # Cap to avoid server limits
 WEBSOCKET_PING_INTERVAL_SECONDS = 30  # Send ping every 30s
-WEBSOCKET_PONG_TIMEOUT_SECONDS = 10  # Expect pong within 10s or reconnect
+WEBSOCKET_PONG_TIMEOUT_SECONDS = 20  # Expect pong within 10s or reconnect
 WEBSOCKET_RECONNECT_BACKOFF_BASE_SECONDS = 1  # Exponential backoff start
 WEBSOCKET_RECONNECT_BACKOFF_MAX_SECONDS = 60  # Max delay
 INACTIVITY_UNSUBSCRIBE_MINUTES = 60  # Unsub tokens inactive > this (from existing INACTIVITY_PERIOD)

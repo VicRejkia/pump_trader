@@ -499,14 +499,10 @@ class Rugcheck:
                     if not is_active_in_portfolio:
                         await conn.execute("UPDATE tokens SET is_active = FALSE WHERE mint = $1", mint)
                 
-                if self.websocket_handler.websocket and self.websocket_handler.websocket.open and not is_active_in_portfolio:
-                    is_subscribed = mint in self.state.active_token_subscriptions
-                    if is_subscribed:
-                        await self.state.remove_token_subscription(mint) # Updates state and file
-                        await asyncio.wait_for(self.websocket_handler.safe_send(json.dumps({
-                            "method": "unsubscribeTokenTrade", "keys": [mint]
-                        })), timeout=5.0)
-                        logger.debug(f"[bold]:hot_pepper: Too spicy:[/bold] Sent unsubscribe for high-score token {mint}")
+                if self.websocket_handler:
+                    await self.websocket_handler.unsubscribe_from_trades([mint], "high_rugcheckscore")
+                    logger.debug(f"[bold]:hot_pepper: Too spicy:[/bold] Sent unsubscribe for high-score token {mint}")
+                    
                 await self.db_client.backup_and_delete_token(mint=mint, archived_at=datetime.now(timezone.utc), reason="high_rugcheckscore")
                 return True # Processed successfully (even if deactivation had minor issue, fetch was good)
             except Exception as deactivation_err:

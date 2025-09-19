@@ -17,7 +17,7 @@ from typing import Dict, Any, List, Optional
 import config.config as config_module
 from database_handler import DatabaseClient
 from trading_logic import TradingManager
-from connectors.websocket_handler import WebSocketHandler
+from connectors.websocket_handler import WebSocketHandler 
 from bot_logger import setup_logging, log_info, log_debug, log_error, log_warning, log_critical, rotate_log_file
 from state_manager import GlobalState
 from trade_processor import trade_worker
@@ -205,7 +205,7 @@ class TradingBot:
                 # --- MODIFICATION: Get full WebSocket summary ---
                 ws_summary = {}
                 if self.ws_handler:
-                    ws_summary = await self.ws_handler.get_connection_summary()
+                    ws_summary = self.ws_handler.get_status()
 
                 status_data = {
                     "bot_process_status": current_process_status,
@@ -245,22 +245,18 @@ class TradingBot:
 
                 ws_lines = []
                 if self.ws_handler:
-                    summary = await self.ws_handler.get_connection_summary()
+                    summary = self.ws_handler.get_status()
                     status = summary.get("connection_status", "Error")
-                    style = "green" if "Connected" in status else "yellow" if "Reconnecting" in status else "red"
+                    style = "green" if status == "Connected" else "yellow" if status == "Reconnecting" else "red"
 
-                    # Defensive handling: time_since may be None in some cases; normalize it
-                    time_since = summary.get("time_since_last_message_s")
-                    if time_since is None:
-                        time_since = -1.0
-                    # Ensure numeric comparison only when time_since is int/float
+                    time_since = summary.get("time_since_last_message_s", -1)
                     if isinstance(time_since, (int, float)) and time_since > 60:
                         status += f" (Stale: {time_since:.0f}s)"
 
                     ws_lines.append(f"[bold cyan]│[/bold cyan] :electric_plug: [bold]Websocket:[/bold] [{style}]{status}[/{style}]")
-                    ws_lines.append(f"[bold cyan]│  ├─ [/bold cyan][bold]NewToken Stream:[/bold] [{'green' if summary.get('new_token_subscribed') else 'red'}]Yes/No[/]")
-                    ws_lines.append(f"[bold cyan]│  ├─ [/bold cyan][bold]Migration Stream:[/bold] [{'green' if summary.get('migration_subscribed') else 'red'}]Yes/No[/]")
-                    ws_lines.append(f"[bold cyan]│  ├─ [/bold cyan][bold]Token Trades Subbed:[/bold] [magenta]{summary.get('trade_subscriptions_count', 0)}[/magenta]")
+                    ws_lines.append(f"[bold cyan]│  ├─ [/bold cyan][bold]NewToken Stream:[/bold] [{'green' if summary.get('new_token_subscribed') else 'red'}]Subscribed[/]")
+                    ws_lines.append(f"[bold cyan]│  ├─ [/bold cyan][bold]Migration Stream:[/bold] [{'green' if summary.get('migration_subscribed') else 'red'}]Subscribed[/]")
+                    ws_lines.append(f"[bold cyan]│  └─ [/bold cyan][bold]Token Trades Subbed:[/bold] [magenta]{summary.get('trade_subscriptions_count', 0)}[/magenta]")
                     
                     next_run = await self.state.get_ws_refresh_next_run_ts()
                     if next_run:
@@ -319,8 +315,11 @@ class TradingBot:
                     if command and command != last_command:
                         log_info(f"Received command: '{command}'")
                         last_command = command
-                        # --- MODIFICATION: Process new commands ---
-                        if command.upper() == "STOP":
+                        if command.upper() == "RESTART_WEBSOCKET":
+                            if self.ws_handler:
+                                self.ws_handler.start() 
+                                log_info("WebSocket-Neustart durch Befehl initiiert.")
+                        elif command.upper() == "STOP":
                             self.state.trigger_shutdown()
                         elif command.upper() == "STOP_BUYING":
                             self.state.is_buying_enabled = False
@@ -333,10 +332,6 @@ class TradingBot:
                         elif command.upper().startswith("SELL_"):
                             mint = command[len("SELL_"):]
                             asyncio.create_task(self.trading_manager.execute_manual_sell(mint))
-                        elif command.upper() == "RESTART_WEBSOCKET":
-                            if self.ws_handler:
-                                asyncio.create_task(self.ws_handler.force_reconnect())
-                        # ... other commands
                         with open(COMMAND_FILE, 'w') as f: f.write("") # Clear command
                 await asyncio.sleep(5)
             except asyncio.CancelledError:
@@ -391,8 +386,8 @@ class TradingBot:
             log_critical("🔴 Failed to fetch initial SOL price. Functionality may be limited.")
 
         # Create persistent instances of the main components.
-        self.ws_handler = WebSocketHandler(self.db_client, self.config, self.state)
-        await self.state.set_websocket_handler(self.ws_handler) # Set the stable instance in the global state
+        self.ws_handler = WebSocketHandler(self.db_client, self.state, self.config)
+        await self.state.set_websocket_handler(self.ws_handler)
 
         self.socials_proc = SocialsProcessor(state=self.state, db_client=self.db_client, config_dict=self.config)
         self.trading_manager = TradingManager(db_client=self.db_client, config_dict=self.config, state=self.state)
@@ -400,9 +395,12 @@ class TradingBot:
         # The Rugcheck handler now gets a stable reference to ws_handler
         self.rugchecker = Rugcheck(
             state=self.state, db_client=self.db_client,
-            websocket_handler=self.ws_handler, socials_processor=self.socials_proc,
+            websocket_handler=self.ws_handler, 
+            socials_processor=self.socials_proc,
             config_dict=self.config
         )
+
+        self.ws_handler.start()
 
         self.tasks = [
             asyncio.create_task(self.status_updater(), name="status_updater"),
@@ -410,14 +408,14 @@ class TradingBot:
             asyncio.create_task(self.command_listener(), name="command_listener"),
             asyncio.create_task(self.monitor_tasks(), name="task_monitor"),
             asyncio.create_task(update_sol_price(self.state, self.db_client), name="sol_price_updater"),
-            asyncio.create_task(trade_worker(), name="trade_worker"),
+            asyncio.create_task(trade_worker(self.ws_handler.trade_queue), name="trade_worker"),
             asyncio.create_task(self.dexscreener_fetcher.run(), name="dexscreener_fetcher"),
             *self.socials_proc.start(),
             asyncio.create_task(self.run_buy_checks(), name="buy_opportunity_checker"),
             asyncio.create_task(self.run_sell_checks(), name="sell_opportunity_checker"),
             asyncio.create_task(self.run_heartbeat_emitter(), name="heartbeat_emitter"),
             # The supervisor is replaced by the handler's own manager task
-            asyncio.create_task(self.ws_handler.manage_connection(), name="websocket_manager"),
+            #asyncio.create_task(self.ws_handler.manage_connection(), name="websocket_manager"),
             # The rugchecker is now a regular task, not tied to the supervisor
             self.rugchecker.start()
         ]
