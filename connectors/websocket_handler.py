@@ -37,13 +37,15 @@ class ConnectionState(Enum):
 
 
 class WebSocketHandler:
-    _WS_STALE_THRESHOLD_SECONDS = 30  # Reduced from 60
+    _WS_STALE_THRESHOLD_SECONDS = 25  # 20% below server-side timeout
+    _CONNECTION_TIMEOUT = 45.0
+    _HEALTH_CHECK_INTERVAL = 8
+    _STABLE_CONNECTION_RESET_MINUTES = 5  # Reset backoff after sustained connection
     _WS_GRACEFUL_CLOSE_TIMEOUT = 5.0
     _PING_INTERVAL = 15  # More frequent pings
     _PING_TIMEOUT = 10
     _MAX_RECONNECT_DELAY = 60.0
     _INITIAL_RECONNECT_DELAY = 1.0
-    _CONNECTION_TIMEOUT = 30.0
 
     def __init__(self, db_client: DatabaseClient, config_dict: dict, state_manager: GlobalState):
         self.state = state_manager
@@ -107,7 +109,7 @@ class WebSocketHandler:
     async def manage_connection(self):
         """Supervisor loop that manages connection lifecycle"""
         logger.info("🚀 WebSocket connection manager started.")
-        self._manager_task = asyncio.current_task() # <-- ADD THIS
+        self._manager_task = asyncio.current_task()
         
         while not self._shutdown_requested.is_set():
             try:
@@ -115,18 +117,35 @@ class WebSocketHandler:
                 
                 if current_state == ConnectionState.SHUTTING_DOWN:
                     break
+
+                # Smart delay reset logic
+                if self._last_connection_attempt:
+                    time_since_last = datetime.now(timezone.utc) - self._last_connection_attempt
+                    if time_since_last > timedelta(minutes=10):
+                        self._reconnect_delay = self._INITIAL_RECONNECT_DELAY
+                        logger.info("🔄 Reset reconnect delay after prolonged downtime")
                 
-                # Track connection attempt
+                # Track connection attempt with detailed logging
                 self._connection_attempts += 1
                 self._last_connection_attempt = datetime.now(timezone.utc)
-                
-                logger.info(f"Connection attempt #{self._connection_attempts}")
+                logger.info(
+                    f"🔌 Connection attempt #{self._connection_attempts} "
+                    f"(delay: {self._reconnect_delay:.1f}s, "
+                    f"state: {current_state.value})"
+                )
                 
                 # Set state to connecting
                 await self._set_connection_state(ConnectionState.CONNECTING)
                 
-                # Try to establish and run connection
-                connection_successful = await self._connect_and_run_session()
+                try:
+                    # Establish connection with detailed timeout handling
+                    connection_successful = await asyncio.wait_for(
+                        self._connect_and_run_session(),
+                        timeout=self._CONNECTION_TIMEOUT
+                    )
+                except asyncio.TimeoutError:
+                    logger.error("⌛ Connection attempt timed out")
+                    connection_successful = False
                 
                 if connection_successful:
                     # Reset reconnect delay on successful connection
@@ -188,15 +207,24 @@ class WebSocketHandler:
             # Establish new connection
             logger.info(f"Connecting to {_PUMPPORTAL_WS}...")
             
-            self.websocket = await asyncio.wait_for(
-                websockets.connect(
-                    _PUMPPORTAL_WS,
-                    ping_interval=self._PING_INTERVAL,
-                    ping_timeout=self._PING_TIMEOUT,
-                    close_timeout=self._WS_GRACEFUL_CLOSE_TIMEOUT,
-                ),
-                timeout=30.0  # Connection timeout
+            self.websocket = await websockets.connect(
+                _PUMPPORTAL_WS,
+                ping_interval=self._PING_INTERVAL,
+                ping_timeout=self._PING_TIMEOUT,
+                close_timeout=self._WS_GRACEFUL_CLOSE_TIMEOUT,
+                max_queue=1024,
+                read_limit=2**20,
+                write_limit=2**20,
+                origin="https://pumpportal.com",
+                compression="deflate",
+                open_timeout=self._CONNECTION_TIMEOUT,
+                extra_headers={
+                    "User-Agent": "PumpTraderBot/1.0",
+                    "Accept-Encoding": "gzip, deflate",
+                    "Cache-Control": "no-cache"
+                }
             )
+            logger.debug(f"WebSocket connected with protocol: {self.websocket.subprotocol}")
             
             logger.info("✅ WebSocket connected successfully.")
             await self._set_connection_state(ConnectionState.CONNECTED)
@@ -206,8 +234,24 @@ class WebSocketHandler:
             self.last_message_timestamp = current_time
             self.last_pong_timestamp = current_time
             
-            # Set up subscriptions
-            await self._initialize_subscriptions()
+            # Initialize subscriptions with enhanced logging
+            logger.debug("Starting subscription initialization")
+            try:
+                # Initialize subscriptions with retry logic
+                await self._retry_subscriptions()
+                logger.info("Subscription initialization completed successfully")
+                
+                # Update activity timestamps after successful setup
+                current_time = asyncio.get_event_loop().time()
+                self.last_message_timestamp = current_time
+                self.last_pong_timestamp = current_time
+                
+                # Immediate health check after subscriptions
+                await self._health_monitor()
+                
+            except Exception as e:
+                logger.error(f"Subscription initialization failed: {str(e)}", exc_info=True)
+                raise ConnectionError("Critical subscription failure") from e
             
             # Create session tasks
             session_tasks = [
@@ -344,10 +388,17 @@ class WebSocketHandler:
                 except asyncio.TimeoutError:
                     # No message received within timeout
                     logger.warning(f"No message received for {self._WS_STALE_THRESHOLD_SECONDS}s")
-                    break
+                    raise ConnectionError("Receive timeout")
                 except ws_exceptions.ConnectionClosed as e:
                     logger.warning(f"WebSocket connection closed: {e.code} - {e.reason}")
-                    break
+                    if e.code == 1006:
+                        logger.error("🚨 Abnormal closure detected - performing full reset")
+                        self.last_message_timestamp = None
+                        self.last_pong_timestamp = None
+                        await self._cleanup_connection()
+                        await self._set_connection_state(ConnectionState.DISCONNECTED)
+                        logger.debug("Full connection state reset completed")
+                        raise ConnectionError("Abnormal closure (1006)") from e
                 except Exception as e:
                     logger.error(f"Error receiving message: {e}", exc_info=True)
                     break
@@ -401,26 +452,26 @@ class WebSocketHandler:
                 
                 if not self._is_websocket_open():
                     logger.warning("WebSocket not open, triggering reconnection...")
-                    break
-                
+                    raise ConnectionError("WebSocket not open")
+
                 # Check for stale connection
                 if self.last_message_timestamp:
                     elapsed = asyncio.get_event_loop().time() - self.last_message_timestamp
                     if elapsed > self._WS_STALE_THRESHOLD_SECONDS:
                         logger.warning(f"Connection stale for {elapsed:.1f}s, triggering reconnection...")
-                        break
+                        raise ConnectionError("Connection stale")
                 
-                # Optional: Send manual ping to check connection
+                # Manual ping check
                 try:
                     pong_waiter = await self.websocket.ping()
                     await asyncio.wait_for(pong_waiter, timeout=10)
                     self.last_pong_timestamp = asyncio.get_event_loop().time()
                 except asyncio.TimeoutError:
-                    logger.warning("Ping timeout, connection may be dead...")
-                    break
+                    logger.warning("⌛ Ping timeout - No response from server")
+                    raise ConnectionError("Ping timeout") from None
                 except Exception as e:
                     logger.warning(f"Ping failed: {e}")
-                    break
+                    raise
                     
         except asyncio.CancelledError:
             logger.info("Health monitor cancelled.")
@@ -455,22 +506,57 @@ class WebSocketHandler:
     # -------------------------
     # Subscription management
     # -------------------------
-    async def _initialize_subscriptions(self):
-        """Initialize all subscriptions after connection"""
-        try:
-            await self.subscribe_new_token_stream()
-            await self.subscribe_to_migrations()
-            await self.resume_subscriptions()
-        except Exception as e:
-            logger.error(f"Error initializing subscriptions: {e}", exc_info=True)
+    async def _retry_subscriptions(self, max_attempts=3):
+        """Retry subscriptions with backoff"""
+        attempt = 0
+        while attempt < max_attempts and not self._shutdown_requested.is_set():
+            try:
+                if not self._is_websocket_open():
+                    raise ConnectionError("WebSocket not open for subscriptions")
+                
+                logger.debug(f"Attempting subscriptions (try {attempt+1}/{max_attempts})")
+                await self.subscribe_new_token_stream()
+                await self.subscribe_to_migrations()
+                await self.resume_subscriptions()
+                logger.info("All subscriptions established successfully")
+                return
+            except Exception as e:
+                attempt += 1
+                wait_time = min(2 ** attempt, 10)  # Exponential backoff capped at 10s
+                logger.warning(f"Subscription failed (attempt {attempt}): {e}. Retrying in {wait_time}s")
+                await asyncio.sleep(wait_time)
+        
+        logger.error("Failed to establish subscriptions after multiple attempts")
+        raise ConnectionError("Subscription setup failed")
 
     async def subscribe_new_token_stream(self):
-        """Subscribe to new token stream"""
+        """Subscribe to new token stream with confirmation"""
         if self._is_websocket_open():
             try:
-                await self.safe_send(json.dumps({"method": "subscribeNewToken"}))
+                sub_id = f"sub-new-{datetime.now().timestamp()}"
+                sub_msg = json.dumps({
+                    "method": "subscribeNewToken",
+                    "id": sub_id
+                })
+                
+                await self.safe_send(sub_msg)
+                logger.debug(f"Sent subscription request: {sub_id}")
+                
+                # Wait for confirmation
+                # Get and parse response
+                raw_response = await asyncio.wait_for(self.websocket.recv(), timeout=15)
+                ack = json.loads(raw_response)
+                
+                # Validate acknowledgement
+                if not isinstance(ack, dict) or ack.get("id") != sub_id or not ack.get("success", False):
+                    raise ConnectionError(f"Subscription failed: {ack.get('error', 'Unknown error')}")
+                
                 await self.state.set_new_token_subscription(True)
-                logger.info("Subscribed to new token stream")
+                logger.info(f"✅ Verified new token subscription ({sub_id})")
+                # Update activity timestamps
+                current_time = asyncio.get_event_loop().time()
+                self.last_message_timestamp = current_time
+                self.last_pong_timestamp = current_time
             except Exception as e:
                 logger.error(f"Failed to subscribe to new tokens: {e}")
                 await self.state.set_new_token_subscription(False)
