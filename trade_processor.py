@@ -19,13 +19,13 @@ async def trade_worker(trade_queue: asyncio.Queue):
     db_client = state.db_client
 
     if not db_client:
-        logger.error("Trade worker cannot start: DatabaseClient not initialized in GlobalState.")
+        logger.error(":police_car_light: Trade worker cannot start: DatabaseClient not initialized in GlobalState.")
         return
 
     BATCH_SIZE = 100
     BATCH_TIMEOUT = 5
 
-    logger.info("🚀 Trade worker started.")
+    logger.info(":rocket: Trade worker started.")
 
     while not state.shutdown_event.is_set():
         batch_from_queue = []
@@ -91,10 +91,10 @@ async def trade_worker(trade_queue: asyncio.Queue):
                     ))
                     mints_in_batch.append(mint)
                 except (InvalidOperation, TypeError) as e:
-                    logger.error(f"Invalid data for trade (Sig: {data.get('signature')}). Skipping. Error: {e}")
+                    logger.error(f":police_car_light: Invalid data for trade (Sig: {data.get('signature')}). Skipping. Error: {e}")
                     trade_queue.task_done()
                 except Exception as e:
-                    logger.error(f"Unexpected error processing trade item (Sig: {data.get('signature')}). Error: {e}", exc_info=True)
+                    logger.error(f":police_car_light: Unexpected error processing trade item (Sig: {data.get('signature')}). Error: {e}", exc_info=True)
                     trade_queue.task_done()
 
             if trade_params_to_db:
@@ -108,18 +108,18 @@ async def trade_worker(trade_queue: asyncio.Queue):
                         except ValueError:
                             pass # Can happen if queue is manipulated elsewhere, safe to ignore
                     
-                    logger.debug(f"Successfully processed and saved a batch of {len(trade_params_to_db)} trades.")
+                    logger.debug(f":bank: Successfully processed and saved a batch of {len(trade_params_to_db)} trades.")
 
                 except Exception as e:
-                    logger.error(f"🚨 Trade worker failed during batch insert. Error: {e}", exc_info=True)
+                    logger.error(f":police_car_light: Trade worker failed during batch insert. Error: {e}", exc_info=True)
                     # Note: In case of DB failure, items remain in queue and will be re-processed, which is the desired behavior.
                     await asyncio.sleep(5)
 
         except asyncio.CancelledError:
-            logger.info("Trade worker task cancelled.")
+            logger.info(":stop_sign: Trade worker task cancelled.")
             break
         except Exception as e:
             logger.error(f"🚨 Unexpected error in trade worker main loop: {e}", exc_info=True)
             await asyncio.sleep(5)
 
-    logger.info("🛑 Trade worker shutting down.")
+    logger.info(":stop_sign: Trade worker shutting down.")

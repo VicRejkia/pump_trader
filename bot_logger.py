@@ -133,10 +133,10 @@ def rotate_log_file(logger_name=_LOGGER_NAME):
             logger.info(f"Log rotated to: {new_name}")
 
         setup_logging() # This re-initializes handlers, including RichHandler
-        logger.info("Initialized new log file after rotation")
+        logger.info(":newspaper: Initialized new log file after rotation")
 
     except Exception as e:
-        logger.error(f"Log rotation failed: {str(e)}", exc_info=True)
+        logger.error(f":exclamation: Log rotation failed: {str(e)}", exc_info=True)
 
 
 # -------------------------------

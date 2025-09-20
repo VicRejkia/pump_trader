@@ -45,7 +45,7 @@ def write_bot_command(command: str):
         log_info(f"Controller sent command to bot: '{command}'")
         return True
     except IOError as e:
-        log_error(f"Controller error writing command file: {e}")
+        log_error(f":police_car_light: Controller error writing command file: {e}")
         return False
 
 def get_trading_bot_status_from_file() -> str:
@@ -93,13 +93,13 @@ def get_trading_bot_status_from_file() -> str:
             if attempt < max_attempts - 1:
                 time.sleep(1) # Wait before the next attempt
             else:
-                log_error(f"Error reading bot_status.json after {max_attempts} attempts: {e}")
+                log_error(f":police_car_light: Error reading bot_status.json after {max_attempts} attempts: {e}")
                 return "ERROR_READING_STATUS"
         except (IOError, ValueError) as e:
-            log_error(f"Error reading bot_status.json: {e}")
+            log_error(f":police_car_light: Error reading bot_status.json: {e}")
             return "ERROR_READING_STATUS"
         except Exception as e:
-            log_error(f"Unexpected error in get_trading_bot_status_from_file: {e}")
+            log_error(f":police_car_light: Unexpected error in get_trading_bot_status_from_file: {e}")
             return "ERROR_READING_STATUS"
     return "ERROR_READING_STATUS" # Should not be reached, but as a fallback
 
@@ -138,7 +138,7 @@ async def ensure_process_terminated(process_handle: subprocess.Popen, process_na
                 log_warning(f"{process_name} did not terminate gracefully, killing (PID: {process_handle.pid}).")
                 process_handle.kill()
         except Exception as e:
-            log_error(f"Error during forceful termination of {process_name}: {e}")
+            log_error(f":police_car_light: Error during forceful termination of {process_name}: {e}")
 
 # --- NEW: Function to request a graceful shutdown from the trading bot ---
 async def request_graceful_shutdown(process_handle: subprocess.Popen, process_name: str):
@@ -169,7 +169,7 @@ async def request_graceful_shutdown(process_handle: subprocess.Popen, process_na
         await ensure_process_terminated(process_handle, process_name)
 
     except Exception as e:
-        log_error(f"Error during graceful shutdown for {process_name}: {e}", exc_info=True)
+        log_error(f":police_car_light: Error during graceful shutdown for {process_name}: {e}", exc_info=True)
         await ensure_process_terminated(process_handle, process_name)
 
 
@@ -195,7 +195,7 @@ async def main_controller(args):
                 if not telegram_interface_process:
                     log_warning("Failed to start Telegram Interface, but controller will continue.")
         except Exception as e:
-            log_error(f"Error during Telegram Interface startup: {e}")
+            log_error(f":police_car_light: Error during Telegram Interface startup: {e}")
 
         # Function to start the trading bot
         async def start_trading_bot(pass_args):
@@ -284,13 +284,13 @@ async def main_controller(args):
                     if not telegram_interface_process:
                          log_error("Failed to restart Telegram Interface.")
                 except Exception as e:
-                    log_error(f"Error restarting Telegram Interface: {e}")
+                    log_error(f":police_car_light: Error restarting Telegram Interface: {e}")
 
 
     except KeyboardInterrupt:
         log_info("KeyboardInterrupt received in Main Controller. Shutting down...")
     except Exception as e:
-        log_error(f"An unexpected error occurred in Main Controller: {e}", exc_info=True)
+        log_error(f":police_car_light: An unexpected error occurred in Main Controller: {e}", exc_info=True)
     finally:
         log_info("--- Main Controller Shutting Down ---")
         await request_graceful_shutdown(trading_bot_process, "Trading Bot")
@@ -320,4 +320,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nMain Controller interrupted by user. Exiting.")
     except Exception as e:
-        print(f"Fatal error in controller startup: {e}")
+        print(f":police_car_light: Fatal error in controller startup: {e}")

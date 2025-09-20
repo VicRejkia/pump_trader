@@ -88,7 +88,7 @@ class TradingBot:
                     log_info(f"✅ Initial SOL price successfully fetched and set: {new_price} USD")
                     return True
                 else:
-                    log_error(f"⚠ Error fetching initial SOL price. Status: {response.status_code}, Response: {response.text}")
+                    log_error(f":police_car_light: Error fetching initial SOL price. Status: {response.status_code}, Response: {response.text}")
                     return False
         except httpx.TimeoutException:
             log_error("⏳ Timeout fetching initial SOL price.")
@@ -176,7 +176,7 @@ class TradingBot:
                         log_info(f"Applied {updated_count} configuration updates: {changed_params}")
                     self._last_dynamic_config_mtime = current_mtime
             except Exception as e:
-                log_error(f"Error in config_updater loop: {e}", exc_info=True)
+                log_error(f":police_car_light: Error in config_updater loop: {e}", exc_info=True)
         log_info("⚙️ Dynamic config updater task shutting down.")
 
     def _write_status(self, status_data: dict):
@@ -185,11 +185,11 @@ class TradingBot:
             with open(STATUS_FILE, 'w', encoding='utf-8') as f:
                 json.dump(status_data, f, indent=4)
         except IOError as e:
-            log_error(f"Error writing status file {STATUS_FILE}: {e}")
+            log_error(f":police_car_light: Error writing status file {STATUS_FILE}: {e}")
 
     async def status_updater(self):
         """Periodically gathers and writes detailed bot status to bot_status.json."""
-        log_info("🚀 Status updater task started.")
+        log_info(":rocket: Status updater task started.")
         while not self.state.shutdown_event.is_set():
             try:
                 current_process_status = "RUNNING"
@@ -225,7 +225,7 @@ class TradingBot:
                 log_info(":stop_sign: Status updater task shutting down.")
                 break
             except Exception as e:
-                log_error(f":x: Error in status updater: {e}", exc_info=True)
+                log_error(f":police_car_light: Error in status updater: {e}", exc_info=True)
                 self._write_status({"bot_process_status": "ERROR_IN_STATUS_UPDATER", "error_message": str(e), "timestamp": datetime.now(timezone.utc).isoformat()})
                 await asyncio.sleep(15)
         
@@ -302,7 +302,7 @@ class TradingBot:
         except asyncio.CancelledError:
             log_info(":stop_sign: Monitor task shutting down.")
         except Exception as e:
-            log_error(f":x: [bold red]FATAL error in Monitor task[/bold red]: {e}", exc_info=True)
+            log_error(f":police_car_light: [bold red]FATAL error in Monitor task[/bold red]: {e}", exc_info=True)
 
     async def command_listener(self):
         """Periodically checks the command file for commands."""
@@ -338,7 +338,7 @@ class TradingBot:
                 log_info(":stop_sign: Command listener task shutting down.")
                 break
             except Exception as e:
-                log_error(f"Error in command listener: {e}", exc_info=True)
+                log_error(f":police_car_light: Error in command listener: {e}", exc_info=True)
     
     async def shutdown(self):
         if getattr(self, '_shutdown_called', False): return
@@ -424,7 +424,7 @@ class TradingBot:
         try:
             await self.state.wait_for_shutdown()
         except Exception as e:
-            log_critical(f"CRITICAL ERROR in bot's main execution: {e}", exc_info=True)
+            log_critical(f":police_car_light: CRITICAL ERROR in bot's main execution: {e}", exc_info=True)
             self.state.trigger_shutdown()
         finally:
             log_info("Main execution loop ended. Proceeding to full shutdown.")
@@ -434,7 +434,7 @@ class TradingBot:
         try:
             if self.db_client: await self.db_client.insert_heartbeat(event_type="STARTUP")
         except Exception as e:
-            log_error(f"Error in heartbeat emitter: {e}", exc_info=True)
+            log_error(f":police_car_light: Error in heartbeat emitter: {e}", exc_info=True)
             
         while not self.state.shutdown_event.is_set():
             try:
@@ -443,7 +443,7 @@ class TradingBot:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                log_error(f"Error in heartbeat emitter: {e}", exc_info=True)
+                log_error(f":police_car_light: Error in heartbeat emitter: {e}", exc_info=True)
                 await asyncio.sleep(60)
 
     async def run_buy_checks(self):
@@ -455,7 +455,7 @@ class TradingBot:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                log_error(f":x: Error in buy checker loop: {e}", exc_info=True)
+                log_error(f":police_car_light: Error in buy checker loop: {e}", exc_info=True)
                 await asyncio.sleep(30)
 
     async def run_sell_checks(self):
@@ -467,7 +467,7 @@ class TradingBot:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                log_error(f":x: Error in sell checker loop: {e}", exc_info=True)
+                log_error(f":police_car_light: Error in sell checker loop: {e}", exc_info=True)
                 await asyncio.sleep(12)
 
 if __name__ == "__main__":
@@ -492,7 +492,7 @@ if __name__ == "__main__":
             if bot_instance and not bot_instance.state.shutdown_event.is_set():
                 bot_instance.state.trigger_shutdown()
         except Exception as e:
-            log_critical(f"Unexpected error in bot's main execution: {e}", exc_info=True)
+            log_critical(f":police_car_light: Unexpected error in bot's main execution: {e}", exc_info=True)
             if bot_instance and not bot_instance.state.shutdown_event.is_set():
                  bot_instance.state.trigger_shutdown()
         finally:

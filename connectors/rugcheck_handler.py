@@ -85,7 +85,7 @@ class Rugcheck:
                 "type": "ed25519",
             }
         except Exception as e:
-            logger.error(f"❌ Error signing message: {e}", exc_info=True)
+            logger.error(f":police_car_light: Error signing message: {e}", exc_info=True)
             return None
 
     async def _login_to_rugcheck(self) -> bool:
@@ -118,7 +118,7 @@ class Rugcheck:
         except httpx.TimeoutException:
              logger.error(f"⏳ Timeout during RugCheck API login.")
         except Exception as e:
-            logger.error(f"❌ Unexpected error during RugCheck API login: {e}", exc_info=True)
+            logger.error(f":police_car_light: Unexpected error during RugCheck API login: {e}", exc_info=True)
         self.jwt_token = None
         return False
 
@@ -155,10 +155,10 @@ class Rugcheck:
             logger.error("⏳ Timeout checking RugCheck API maintenance status.")
             self.consecutive_maintenance_check_failures += 1
         except httpx.RequestError as e:
-            logger.error(f"❌ Request error checking RugCheck API maintenance status: {e}")
+            logger.error(f":police_car_light: Request error checking RugCheck API maintenance status: {e}")
             self.consecutive_maintenance_check_failures += 1
         except Exception as e:
-            logger.error(f"❌ Unexpected error checking RugCheck API maintenance status: {e}", exc_info=True)
+            logger.error(f":police_car_light: Unexpected error checking RugCheck API maintenance status: {e}", exc_info=True)
             self.consecutive_maintenance_check_failures += 1
 
         if self.consecutive_maintenance_check_failures >= MAINTENANCE_ENDPOINT_FAILURES_THRESHOLD:
@@ -184,7 +184,7 @@ class Rugcheck:
                 except asyncio.QueueEmpty:
                     break
                 except Exception as e:
-                    logger.error(f"Error clearing rugcheck queue item: {e}")
+                    logger.error(f":police_car_light: Error clearing rugcheck queue item: {e}")
 
             async with self.db_client.pool.acquire() as conn:
                 # Updated query with new priority formula
@@ -228,7 +228,7 @@ class Rugcheck:
                     logger.debug(f"🔄 Refreshed RugCheck queue. Added {tokens_added} tokens (current size: {self.queue.qsize()}).")
             return True
         except Exception as e:
-            logger.error(f"❌ Critical error in _refresh_queue: {e}", exc_info=True)
+            logger.error(f":police_car_light: Critical error in _refresh_queue: {e}", exc_info=True)
             return False
 
     async def _requeue_processed_tokens(self):
@@ -322,7 +322,7 @@ class Rugcheck:
                     logger.info(f"Re-queued {requeued_count} processed tokens for another RugCheck.")
 
         except Exception as e:
-            logger.error(f"Error during RugCheck re-queue process: {e}", exc_info=True)
+            logger.error(f":police_car_light: Error during RugCheck re-queue process: {e}", exc_info=True)
 
 
     async def _fetch_and_store_data(self, mint: str, is_retry: bool = False) -> dict | None | str:
@@ -436,7 +436,7 @@ class Rugcheck:
                     logger.debug(f"💾 RugCheck data stored/updated for {mint}")
                     return data # Return fetched data for score checking
                 except Exception as db_err:
-                    logger.error(f"❌ DB Error storing RugCheck for {mint}: {db_err}", exc_info=True)
+                    logger.error(f":police_car_light: DB Error storing RugCheck for {mint}: {db_err}", exc_info=True)
                     return 'DB_INSERT_ERROR'
 
             elif response.status_code == 404:
@@ -502,11 +502,11 @@ class Rugcheck:
                 if self.websocket_handler:
                     await self.websocket_handler.unsubscribe_from_trades([mint], "high_rugcheckscore")
                     logger.debug(f"[bold]:hot_pepper: Too spicy:[/bold] Sent unsubscribe for high-score token {mint}")
-                    
+
                 await self.db_client.backup_and_delete_token(mint=mint, archived_at=datetime.now(timezone.utc), reason="high_rugcheckscore")
                 return True # Processed successfully (even if deactivation had minor issue, fetch was good)
             except Exception as deactivation_err:
-                logger.error(f"❌ Error during deactivation for high-score token {mint}: {deactivation_err}", exc_info=True)
+                logger.error(f":police_car_light: Error during deactivation for high-score token {mint}: {deactivation_err}", exc_info=True)
                 return True # Still return True as fetch/store part was okay for the token itself
         else:
             logger.debug(f"✅ RugCheck score OK for {mint} (Score: {score})")
@@ -514,7 +514,7 @@ class Rugcheck:
             return True # Processed successfully
 
     async def _worker(self):
-        logger.info("🚀 RugCheck worker started.")
+        logger.info(":rocket: RugCheck worker started.")
         last_refresh_time = 0
         refresh_interval = self.config.get('_RUGCHECK_INTERVAL', _RUGCHECK_INTERVAL) / 2
 
@@ -559,7 +559,7 @@ class Rugcheck:
                 except asyncio.TimeoutError:
                     continue
                 except Exception as q_err:
-                    logger.error(f"Error getting item from rugcheck queue: {q_err}"); continue
+                    logger.error(f":police_car_light: Error getting item from rugcheck queue: {q_err}"); continue
 
                 # --- CULLING LOGIC FOR DEPRIORITIZED TOKENS ---
                 if priority == DEPRIORITIZED_PRIORITY and mint in self.deprioritized_tokens_tracker:
@@ -588,12 +588,12 @@ class Rugcheck:
                                     })), timeout=5.0)
                                     logger.info(f"🧹 Culled {mint}: Unsubscribed from WebSocket due to persistent RugCheck issues.")
                                 except Exception as ws_err:
-                                    logger.error(f"Error unsubscribing culled token {mint} from WebSocket: {ws_err}")
+                                    logger.error(f":police_car_light: Error unsubscribing culled token {mint} from WebSocket: {ws_err}")
 
                             await self.db_client.backup_and_delete_token(mint=mint, archived_at=datetime.now(timezone.utc), reason="rugcheck_error_culled")
                             logger.info(f"🧹 Culled {mint}: Backed up and deleted from DB with reason 'rugcheck_error_culled'.")
                         except Exception as e:
-                            logger.error(f"Error during culling operations for deprioritized token {mint}: {e}", exc_info=True)
+                            logger.error(f":police_car_light: Error during culling operations for deprioritized token {mint}: {e}", exc_info=True)
                         finally:
                             self.fetch_attempts.pop(mint, None) # Clean up attempt counter
                             self.deprioritized_tokens_tracker.pop(mint, None) # Clean up tracker

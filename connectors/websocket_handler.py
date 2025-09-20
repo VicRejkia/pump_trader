@@ -1,10 +1,10 @@
 # path: connectors/websocket_handler.py
 
 """
-Verwaltet die gesamte WebSocket-Kommunikation mit der PumpPortal-API.
-Diese Klasse ist als robuster, sich selbst heilender Supervisor konzipiert, der eine
-dauerhafte Verbindung sicherstellt, Abonnements verwaltet und eine saubere
-Schnittstelle für den Rest der Anwendung bereitstellt.
+Manages all WebSocket communication with the PumpPortal API.
+This class is designed as a robust, self-healing supervisor that ensures a
+persistent connection, manages subscriptions, and provides a clean
+interface for the rest of the application.
 """
 
 import asyncio
@@ -12,7 +12,7 @@ import json
 import random
 from enum import Enum
 from datetime import datetime, timezone
-from typing import Optional, Set, List
+from typing import Optional, List
 
 import websockets
 from websockets import exceptions as ws_exceptions
@@ -24,8 +24,6 @@ from config.config import (
     _PUMPPORTAL_WS,
     _WEBSOCKET_SUBSCRIPTION_REFRESH_ENABLED,
     _WEBSOCKET_SUBSCRIPTION_REFRESH_INTERVAL_MINUTES,
-    WEBSOCKET_PING_INTERVAL_SECONDS,
-    WEBSOCKET_PONG_TIMEOUT_SECONDS,
     WEBSOCKET_RECONNECT_BACKOFF_BASE_SECONDS,
     WEBSOCKET_RECONNECT_BACKOFF_MAX_SECONDS,
     WEBSOCKET_SUBSCRIPTION_BATCH_SIZE,
@@ -33,7 +31,7 @@ from config.config import (
 )
 
 class ConnectionStatus(Enum):
-    """Definiert die möglichen Zustände der WebSocket-Verbindung."""
+    """Defines the possible states of the WebSocket connection."""
     DISCONNECTED = "Disconnected"
     CONNECTING = "Connecting"
     CONNECTED = "Connected"
@@ -41,9 +39,17 @@ class ConnectionStatus(Enum):
     SHUTTING_DOWN = "Shutting Down"
 
 class WebSocketHandler:
-    """Ein Supervisor für eine persistente WebSocket-Verbindung."""
+    """A supervisor for managing a persistent WebSocket connection."""
 
     def __init__(self, db_client: DatabaseClient, state_manager: GlobalState, config: dict):
+        """
+        Initializes the WebSocketHandler.
+
+        Args:
+            db_client: An instance of the DatabaseClient for database operations.
+            state_manager: The global state manager instance.
+            config: The application's configuration dictionary.
+        """
         self.db_client = db_client
         self.state = state_manager
         self.config = config
@@ -52,70 +58,77 @@ class WebSocketHandler:
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
         self._status = ConnectionStatus.DISCONNECTED
         self._reconnect_delay = WEBSOCKET_RECONNECT_BACKOFF_BASE_SECONDS
-        self._last_pong_time: float = 0.0
         self._last_message_time: float = 0.0
 
-        # Speichert den Status der globalen Abonnements
+        # Stores the status of global, non-token-specific subscriptions.
         self._subscribed_to_new_token = False
         self._subscribed_to_migration = False
 
-        # Haupt-Task für die Verbindungsverwaltung
+        # The main task that manages the connection lifecycle.
         self._manager_task: Optional[asyncio.Task] = None
 
     def start(self):
-        """Startet den Verbindungsmanager als Hintergrund-Task."""
+        """Starts the connection manager as a background task."""
         if self._manager_task is None or self._manager_task.done():
             self._manager_task = asyncio.create_task(self._connection_supervisor(), name="websocket_supervisor")
-            logger.info("🚀 WebSocket Connection Supervisor gestartet.")
+            logger.info(":rocket: WebSocket Connection Supervisor started.")
         else:
-            logger.warning("WebSocket Connection Supervisor läuft bereits.")
+            logger.warning("WebSocket Connection Supervisor is already running.")
 
     async def shutdown(self):
-        """Fährt die WebSocket-Verbindung und alle zugehörigen Tasks ordnungsgemäß herunter."""
+        """Gracefully shuts down the WebSocket connection and all associated tasks."""
         if self._status == ConnectionStatus.SHUTTING_DOWN:
             return
             
-        logger.info("🔌 WebSocket-Handler wird heruntergefahren...")
+        logger.info("🔌 Shutting down WebSocket handler...")
         self._set_status(ConnectionStatus.SHUTTING_DOWN)
 
-        # Alle Abonnements kündigen
+        # Unsubscribe from all active token trades before closing.
         if self._ws and self._ws.open:
-            logger.debug("Kündige alle offenen Abonnements vor dem Herunterfahren.")
+            logger.debug("Unsubscribing from all open token trades before shutdown.")
             all_subs = list(await self.state.get_token_subscriptions())
             await self._unsubscribe_in_batches(all_subs, "shutdown")
             self._subscribed_to_new_token = False
             self._subscribed_to_migration = False
 
-        # Den Manager-Task beenden
+        # Cancel the main manager task.
         if self._manager_task and not self._manager_task.done():
             self._manager_task.cancel()
             try:
                 await self._manager_task
             except asyncio.CancelledError:
-                pass # Erwarteter Fehler beim Abbrechen
+                pass # This is expected on cancellation.
 
-        # Finale Bereinigung
+        # Perform final connection cleanup.
         await self._close_connection("Shutdown requested")
-        logger.info("✅ WebSocket-Handler erfolgreich heruntergefahren.")
+        logger.info("✅ WebSocket handler has been shut down successfully.")
 
-    # --- Öffentliche Methoden für andere Module ---
+    # --- Public Methods for Other Modules ---
 
     async def unsubscribe_from_trades(self, mints: List[str], reason: str):
         """
-        Öffentliche Methode, um `subscribeTokenTrade` für eine Liste von Mints zu kündigen.
-        Wird von `rugcheck_handler` und dem `_dead_token_monitor` verwendet.
+        Public method to unsubscribe from token trades for a list of mints.
+        Used by modules like `rugcheck_handler` and the `_dead_token_monitor`.
+
+        Args:
+            mints: A list of mint addresses to unsubscribe from.
+            reason: A string explaining why the unsubscription is happening (for logging).
         """
         if not mints:
             return
         
-        logger.info(f"Anfrage zum Kündigen von {len(mints)} Token-Abonnements erhalten (Grund: {reason}).")
+        logger.info(f"Request received to unsubscribe from {len(mints)} tokens (Reason: {reason}).")
         await self._unsubscribe_in_batches(mints, reason)
 
     def get_status(self) -> dict:
-        """Gibt einen detaillierten Statusbericht für `monitor_tasks` zurück."""
+        """
+        Provides a detailed status report for monitoring purposes (e.g., `monitor_tasks`).
+
+        Returns:
+            A dictionary containing the current connection status and health metrics.
+        """
         now = asyncio.get_event_loop().time()
-        time_since_last_msg = now - self._last_message_time if self._last_message_time else -1
-        time_since_last_pong = now - self._last_pong_time if self._last_pong_time else -1
+        time_since_last_msg = now - self._last_message_time if self._last_message_time > 0 else -1
 
         return {
             "connection_status": self._status.value,
@@ -124,125 +137,133 @@ class WebSocketHandler:
             "migration_subscribed": self._subscribed_to_migration,
             "trade_subscriptions_count": len(self.state.active_token_subscriptions),
             "time_since_last_message_s": round(time_since_last_msg, 1),
-            "time_since_last_pong_s": round(time_since_last_pong, 1),
+            "time_since_last_pong_s": -1.0, # Kept for backward compatibility in status logs.
         }
         
-    # --- Interne Logik: Der Connection Supervisor ---
+    # --- Internal Logic: Connection Supervisor ---
 
     def _set_status(self, new_status: ConnectionStatus):
+        """Atomically updates the connection status and logs the change."""
         if self._status != new_status:
-            logger.info(f"WebSocket-Status geändert: {self._status.value} -> {new_status.value}")
+            logger.info(f"WebSocket status changed: {self._status.value} -> {new_status.value}")
             self._status = new_status
 
     async def _connection_supervisor(self):
         """
-        Die Hauptschleife, die sicherstellt, dass die Verbindung immer aktiv ist.
-        Implementiert exponentielles Backoff mit Jitter für die Wiederverbindung.
+        The main supervisor loop that ensures the WebSocket is always connected.
+        It handles connection attempts, disconnects, and reconnection with
+        exponential backoff and jitter to avoid spamming the server.
         """
         while self._status != ConnectionStatus.SHUTTING_DOWN:
             try:
                 self._set_status(ConnectionStatus.CONNECTING)
+                # We disable the library's automatic pinging (`ping_interval=None`)
+                # in favor of our own application-level pinger, which is more reliable
+                # for custom WebSocket APIs.
                 async for websocket in websockets.connect(
                     _PUMPPORTAL_WS,
-                    ping_interval=WEBSOCKET_PING_INTERVAL_SECONDS,
-                    ping_timeout=WEBSOCKET_PONG_TIMEOUT_SECONDS,
+                    ping_interval=None, 
                     open_timeout=20,
                     extra_headers={"Origin": "https://pumpportal.fun"}
                 ):
                     self._ws = websocket
                     self._set_status(ConnectionStatus.CONNECTED)
-                    logger.info("✅ WebSocket-Verbindung erfolgreich hergestellt.")
-                    self._reconnect_delay = WEBSOCKET_RECONNECT_BACKOFF_BASE_SECONDS # Reset bei Erfolg
+                    logger.info("✅ WebSocket connection established successfully.")
+                    # Reset the reconnect delay upon a successful connection.
+                    self._reconnect_delay = WEBSOCKET_RECONNECT_BACKOFF_BASE_SECONDS
                     
-                    # Starte die Session-Logik
+                    # Start the session handler which manages the active connection.
                     await self._session_handler()
             
             except ws_exceptions.WebSocketException as e:
-                logger.warning(f"WebSocket-Verbindungsfehler: {e}. Wiederverbindung wird versucht.")
+                logger.warning(f"WebSocket connection error: {e}. Attempting to reconnect.")
             except asyncio.CancelledError:
-                logger.info("Connection Supervisor wurde abgebrochen.")
+                logger.info("Connection supervisor task was cancelled.")
                 break
             except Exception as e:
-                logger.error(f"Unerwarteter Fehler im Connection Supervisor: {e}", exc_info=True)
+                logger.error(f":police_car_light: Unexpected error in connection supervisor: {e}", exc_info=True)
 
             if self._status == ConnectionStatus.SHUTTING_DOWN:
                 break
             
-            # Logik für Wiederverbindung mit Backoff
+            # If the loop breaks for any reason other than shutdown, initiate reconnection.
             self._set_status(ConnectionStatus.RECONNECTING)
+            
+            # Calculate wait time with jitter to prevent synchronized reconnect storms.
             jitter = random.uniform(0.5, 1.5)
             wait_time = min(self._reconnect_delay * jitter, WEBSOCKET_RECONNECT_BACKOFF_MAX_SECONDS)
-            logger.info(f"Warte {wait_time:.2f} Sekunden vor dem nächsten Verbindungsversuch...")
+            logger.info(f"Waiting {wait_time:.2f} seconds before next connection attempt...")
             
             await asyncio.sleep(wait_time)
+            # Increase the delay for the next potential attempt.
             self._reconnect_delay = min(self._reconnect_delay * 2, WEBSOCKET_RECONNECT_BACKOFF_MAX_SECONDS)
 
-        logger.info("🛑 WebSocket Connection Supervisor wurde beendet.")
+        logger.info("🛑 WebSocket Connection Supervisor has shut down.")
 
-    # --- Interne Logik: Session- und Nachrichten-Handling ---
+    # --- Internal Logic: Session and Message Handling ---
 
     async def _session_handler(self):
         """
-        Verwaltet eine aktive WebSocket-Sitzung: Abonnements, Nachrichtenempfang und Health Checks.
+        Manages an active WebSocket session by running all necessary background tasks
+        like message receiving, health checks, and subscription management. The session
+        ends if any of these tasks fail, which triggers the supervisor to reconnect.
         """
         if not self._ws: return
 
-        # Setzt die Zeitstempel beim Start der Sitzung zurück
-        now = asyncio.get_event_loop().time()
-        self._last_pong_time = now
-        self._last_message_time = now
+        self._last_message_time = asyncio.get_event_loop().time()
 
-        # Führt alle Hintergrundtasks für die Sitzung aus
+        # Create all tasks that should run during an active session.
         session_tasks = [
             asyncio.create_task(self._message_receiver(), name="ws_receiver"),
             asyncio.create_task(self._health_checker(), name="ws_health_checker"),
+            asyncio.create_task(self._application_pinger(), name="ws_app_pinger"),
             asyncio.create_task(self._subscription_refresher(), name="ws_subscription_refresher"),
             asyncio.create_task(self._dead_token_monitor(), name="ws_dead_token_monitor")
         ]
         
         try:
-            # Initialisiere alle Abonnements
+            # Subscribe to all required streams at the start of the session.
             await self._initialize_subscriptions()
             
-            # Wartet, bis einer der Tasks endet (was auf ein Problem hindeutet)
+            # Wait for the first task to complete, which indicates the session has ended.
             done, pending = await asyncio.wait(session_tasks, return_when=asyncio.FIRST_COMPLETED)
             
-            # Loggt den Grund für das Ende der Sitzung
+            # Log why the session ended.
             for task in done:
                 if task.exception():
-                    logger.warning(f"WebSocket-Sitzung beendet, da Task '{task.get_name()}' mit Fehler fehlgeschlagen ist: {task.exception()}")
+                    logger.warning(f"WebSocket session ended because task '{task.get_name()}' failed with error: {task.exception()}")
                 else:
-                    logger.warning(f"WebSocket-Sitzung beendet, da Task '{task.get_name()}' unerwartet beendet wurde.")
+                    logger.warning(f"WebSocket session ended because task '{task.get_name()}' finished unexpectedly.")
             
-            # Bricht die verbleibenden Tasks ab
+            # Cancel all other running session tasks.
             for task in pending:
                 task.cancel()
 
         except Exception as e:
-            logger.error(f"Fehler während der WebSocket-Sitzung: {e}", exc_info=True)
+            logger.error(f":police_car_light: Error during WebSocket session handling: {e}", exc_info=True)
         finally:
-            await self._close_connection("Session beendet")
+            await self._close_connection("Session ended")
 
     async def _message_receiver(self):
-        """Empfängt und verarbeitet eingehende Nachrichten."""
+        """Continuously listens for incoming messages and dispatches them."""
         if not self._ws: return
         try:
             async for message in self._ws:
+                # Update the timestamp of the last message to keep the health check happy.
                 self._last_message_time = asyncio.get_event_loop().time()
                 await self._handle_incoming(message)
         except asyncio.CancelledError:
-            pass # Normales Beenden
+            pass # Normal shutdown procedure.
         except ws_exceptions.ConnectionClosed as e:
-            logger.warning(f"Verbindung im Receiver geschlossen: {e.code} {e.reason}")
-            raise # Löst das Beenden der Session aus
+            logger.warning(f"Connection closed in receiver: {e.code} {e.reason}")
+            raise ConnectionError(f"Connection closed: {e.code}") # Raise to terminate the session.
         except Exception as e:
-            logger.error(f"Fehler im Nachrichten-Receiver: {e}", exc_info=True)
-            raise
+            logger.error(f":police_car_light: Error in message receiver: {e}", exc_info=True)
+            raise # Raise to terminate the session.
 
     async def _handle_incoming(self, raw_message: str):
         """
-        Verarbeitet die Logik für eine einzelne eingehende Nachricht.
-        Entspricht der alten `_handle_incoming`-Funktion.
+        Processes the logic for a single incoming message, similar to the old implementation.
         """
         try:
             data = json.loads(raw_message)
@@ -252,12 +273,12 @@ class WebSocketHandler:
                 mint = data.get("mint")
                 if not mint: return
                 
-                # Die Logik zum Einfügen in die DB und zur Überprüfung des Erstellers ist in `insert_token` gekapselt.
-                # `insert_token` gibt `True` zurück, wenn der Token neu ist und die Kriterien erfüllt.
+                # The logic to insert into DB and check creator limits is encapsulated in `insert_token`.
+                # It returns `True` if the token is new and meets all criteria.
                 is_new_and_valid = await self.db_client.insert_token(data)
                 
                 if is_new_and_valid:
-                    logger.info(f"Neuer valider Token erkannt: {mint}. Abonniere Trades.")
+                    logger.info(f":heavy_plus_sign: New valid token detected: {mint}. Subscribing to trades.")
                     await self._send_json({"method": "subscribeTokenTrade", "keys": [mint]})
                     await self.state.add_token_subscription(mint)
 
@@ -271,62 +292,91 @@ class WebSocketHandler:
                 await self.trade_queue.put(data)
                 
         except json.JSONDecodeError:
-            logger.debug(f"Nicht-JSON-Nachricht empfangen: {raw_message[:100]}")
+            logger.debug(f"Received non-JSON message: {raw_message[:100]}")
         except Exception as e:
-            logger.error(f"Fehler bei der Verarbeitung der eingehenden Nachricht: {e}", exc_info=True)
+            logger.error(f":police_car_light: Error processing incoming message: {e}", exc_info=True)
 
-    # --- Interne Logik: Abonnements & Health Checks ---
+    # --- Internal Logic: Subscriptions & Health Checks ---
 
+    async def _application_pinger(self):
+        """Periodically sends an application-level ping message to keep the connection alive."""
+        while self._status == ConnectionStatus.CONNECTED:
+            try:
+                await asyncio.sleep(20) # Send a ping every 20 seconds.
+                await self._send_json({"method": "ping"})
+                logger.debug("Application-level ping sent.")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"Failed to send application-level ping: {e}")
+                break # Failure to send means the connection is likely dead; break to trigger a reconnect.
+
+    async def _health_checker(self):
+        """
+        Monitors connection health by checking if any message (including responses to our pings)
+        has been received recently.
+        """
+        while self._status == ConnectionStatus.CONNECTED:
+            await asyncio.sleep(30) # Check every 30 seconds.
+            
+            time_since_last_message = asyncio.get_event_loop().time() - self._last_message_time
+            
+            # If we haven't received ANY message for 60 seconds (despite sending a ping every 20s),
+            # the connection is considered stale/dead.
+            if time_since_last_message > 60:
+                logger.warning(f"No message received for {time_since_last_message:.0f}s. Connection is considered stale.")
+                raise ConnectionError("Stale connection")
+    
     async def _initialize_subscriptions(self):
-        """Abonniert alle notwendigen Streams bei Verbindungsaufbau."""
-        logger.info("Initialisiere Abonnements...")
+        """Subscribes to all necessary streams when a new connection is established."""
+        logger.info("Initializing subscriptions...")
         
-        # Globale Streams
+        # Global streams
         await self._send_json({"method": "subscribeNewToken"})
         self._subscribed_to_new_token = True
-        logger.debug("-> 'subscribeNewToken' gesendet.")
+        logger.debug("-> 'subscribeNewToken' message sent.")
         
         await self._send_json({"method": "subscribeMigration"})
         self._subscribed_to_migration = True
-        logger.debug("-> 'subscribeMigration' gesendet.")
+        logger.debug("-> 'subscribeMigration' message sent.")
 
-        # Bestehende aktive Token
+        # Subscriptions for existing active tokens from the database
         active_tokens = await self.db_client.get_active_tokens()
         mints_to_subscribe = [record["mint"] for record in active_tokens]
         
         if mints_to_subscribe:
-            logger.info(f"Setze {len(mints_to_subscribe)} bestehende Token-Abonnements fort...")
+            logger.info(f"Resuming {len(mints_to_subscribe)} existing token subscriptions...")
             await self._subscribe_in_batches(mints_to_subscribe)
             
-        logger.info("✅ Alle initialen Abonnements abgeschlossen.")
+        logger.info("✅ All initial subscriptions have been sent.")
 
     async def _subscribe_in_batches(self, mints: List[str]):
-        """Abonniert eine Liste von Mints in Stapeln."""
+        """Subscribes to a list of mints in batches to avoid overwhelming the API."""
         for i in range(0, len(mints), WEBSOCKET_SUBSCRIPTION_BATCH_SIZE):
             if self._status != ConnectionStatus.CONNECTED: break
             batch = mints[i:i + WEBSOCKET_SUBSCRIPTION_BATCH_SIZE]
             await self._send_json({"method": "subscribeTokenTrade", "keys": batch})
             for mint in batch:
                 await self.state.add_token_subscription(mint)
-            logger.debug(f"Stapel von {len(batch)} Token-Abonnements gesendet.")
+            logger.debug(f"Sent subscription batch for {len(batch)} tokens.")
             await asyncio.sleep(WEBSOCKET_BATCH_DELAY)
 
     async def _unsubscribe_in_batches(self, mints: List[str], reason: str):
-        """Kündigt Abonnements in Stapeln und aktualisiert den Zustand."""
+        """Unsubscribes from mints in batches and updates the state accordingly."""
         for i in range(0, len(mints), WEBSOCKET_SUBSCRIPTION_BATCH_SIZE):
-            # Sende Kündigung auch wenn nicht verbunden, um den Zustand zu bereinigen
             batch = mints[i:i + WEBSOCKET_SUBSCRIPTION_BATCH_SIZE]
             
+            # Send unsubscribe message if connected.
             if self._ws and self._ws.open:
                 await self._send_json({"method": "unsubscribeTokenTrade", "keys": batch})
             
-            # Zustand immer aktualisieren
+            # Always update the local state.
             for mint in batch:
                 await self.state.remove_token_subscription(mint)
 
-            logger.debug(f"Stapel von {len(batch)} Token-Abmeldungen gesendet (Grund: {reason}).")
+            logger.debug(f"Sent unsubscription batch for {len(batch)} tokens (Reason: {reason}).")
             
-            # Bei Gründen wie "dead" oder "rug", auch aus der DB löschen/archivieren
+            # If the reason is terminal (e.g., dead token), also archive/delete from DB.
             if reason in ["dead_token", "high_rugcheckscore"]:
                 for mint in batch:
                     await self.db_client.backup_and_delete_token(
@@ -338,41 +388,44 @@ class WebSocketHandler:
             await asyncio.sleep(WEBSOCKET_BATCH_DELAY)
 
     async def _subscription_refresher(self):
-        """Erneuert periodisch alle 'subscribeTokenTrade'-Abonnements."""
+        """Periodically refreshes all `subscribeTokenTrade` subscriptions to prevent them from going stale."""
         if not _WEBSOCKET_SUBSCRIPTION_REFRESH_ENABLED:
-            logger.info("Automatischer Abonnement-Refresher ist deaktiviert.")
+            logger.info("Automatic subscription refresher is disabled.")
             return
 
         interval = _WEBSOCKET_SUBSCRIPTION_REFRESH_INTERVAL_MINUTES * 60
-        logger.info(f"🔄 Abonnement-Refresher gestartet. Intervall: {interval / 60} Minuten.")
+        logger.info(f"🔄 Subscription refresher started. Interval: {interval / 60} minutes.")
 
         while self._status == ConnectionStatus.CONNECTED:
             await asyncio.sleep(interval)
-            logger.info("Starte periodische Erneuerung der Abonnements...")
+            logger.info("Starting periodic subscription refresh...")
             
+            # Unsubscribe from all currently tracked tokens.
             current_subs = list(await self.state.get_token_subscriptions())
             if current_subs:
                 await self._unsubscribe_in_batches(current_subs, "periodic_refresh")
                 
-            await asyncio.sleep(2) # Kurze Pause
+            await asyncio.sleep(2) # Brief pause before re-subscribing.
             
+            # Get the latest list of active tokens from the database and re-subscribe.
             active_tokens_now = await self.db_client.get_active_tokens()
             mints_to_resubscribe = [r["mint"] for r in active_tokens_now]
             
             if mints_to_resubscribe:
                 await self._subscribe_in_batches(mints_to_resubscribe)
             
-            logger.info(f"✅ Periodische Erneuerung abgeschlossen. {len(mints_to_resubscribe)} Abonnements aktiv.")
+            logger.info(f"✅ Periodic refresh complete. {len(mints_to_resubscribe)} subscriptions are now active.")
         
-        logger.info("Abonnement-Refresher beendet, da die Verbindung getrennt wurde.")
+        logger.info("Subscription refresher stopped because connection was lost.")
 
     async def _dead_token_monitor(self):
         """
-        Überwacht periodisch, ob Token inaktiv geworden sind und gekündigt werden müssen.
-        Entspricht der alten `unsubscribe_checker`-Funktion.
+        Periodically checks the database for tokens that have become inactive or "dead"
+        and unsubscribes from their trade streams.
         """
-        interval = self.config.get("INACTIVITY_PERIOD", 60) * 30 # Prüft in halben Inaktivitätsperioden
-        logger.info(f"🗑️ Monitor für tote Token gestartet. Intervall: {interval / 60:.1f} Minuten.")
+        # Check at half the inactivity period to be proactive.
+        interval = 5 * 60
+        logger.info(f"🗑️ Dead token monitor started. Check interval: {interval / 60:.1f} minutes.")
         
         while self._status == ConnectionStatus.CONNECTED:
             await asyncio.sleep(interval)
@@ -385,57 +438,40 @@ class WebSocketHandler:
                 
                 if tokens_to_unsub:
                     mints = [record["mint"] for record in tokens_to_unsub]
-                    logger.info(f"Gefundene {len(mints)} tote/inaktive Token. Kündige Abonnements.")
+                    logger.info(f"Found {len(mints)} dead/inactive tokens. Unsubscribing.")
                     await self.unsubscribe_from_trades(mints, "dead_token")
 
             except Exception as e:
-                logger.error(f"Fehler im Monitor für tote Token: {e}", exc_info=True)
+                logger.error(f":police_car_light: Error in dead token monitor: {e}", exc_info=True)
                 
-        logger.info("Monitor für tote Token beendet, da die Verbindung getrennt wurde.")
+        logger.info("Dead token monitor stopped because connection was lost.")
 
-    async def _health_checker(self):
-        """Überwacht die Gesundheit der Verbindung durch Pongs und Nachrichtenfluss."""
-        while self._status == ConnectionStatus.CONNECTED:
-            await asyncio.sleep(WEBSOCKET_PING_INTERVAL_SECONDS)
-            if not self._ws or not self._ws.open: break
-
-            # 1. Pong-Check: `websockets` handelt dies intern und wirft einen TimeoutError.
-            # Wir überwachen zusätzlich die Zeit seit dem letzten erfolgreichen Pong.
-            now = asyncio.get_event_loop().time()
-            if now - self._last_pong_time > (WEBSOCKET_PONG_TIMEOUT_SECONDS + 5):
-                logger.warning("Kein Pong in der erwarteten Zeit erhalten. Verbindung wird als tot betrachtet.")
-                raise ConnectionError("Pong-Timeout")
-
-            # 2. Nachrichtenfluss-Check
-            if now - self._last_message_time > (WEBSOCKET_PING_INTERVAL_SECONDS * 4):
-                logger.warning(f"Seit über {now - self._last_message_time:.0f}s keine Nachricht erhalten. Verbindung könnte tot sein.")
-                raise ConnectionError("Stale connection")
-    
-    # --- Hilfsfunktionen ---
+    # --- Helper Functions ---
 
     async def _send_json(self, data: dict):
-        """Sendet ein JSON-Objekt sicher über den WebSocket."""
+        """Safely sends a JSON payload over the WebSocket."""
         if self._ws and self._ws.open:
             try:
                 await self._ws.send(json.dumps(data))
             except ws_exceptions.ConnectionClosed:
-                logger.warning("Versuch, auf einer geschlossenen Verbindung zu senden.")
-                raise # Signalisiert das Ende der Session
+                logger.warning("Attempted to send on a closed connection.")
+                raise ConnectionError("Connection closed during send")
             except Exception as e:
-                logger.error(f"Fehler beim Senden von Daten: {e}")
+                logger.error(f"Failed to send data: {e}")
                 raise
         else:
-            logger.warning("Sendeversuch, aber WebSocket ist nicht verbunden.")
+            logger.warning("Attempted to send but WebSocket is not connected.")
             raise ConnectionError("WebSocket is not open")
 
     async def _close_connection(self, reason: str):
-        """Schließt die WebSocket-Verbindung, falls sie existiert."""
+        """Closes the WebSocket connection if it exists."""
         if self._ws:
-            logger.debug(f"Schließe WebSocket-Verbindung (Grund: {reason})...")
+            logger.debug(f"Closing WebSocket connection (Reason: {reason})...")
             try:
                 await self._ws.close(code=1000, reason=reason)
             except Exception as e:
-                logger.error(f"Fehler beim Schließen der WebSocket-Verbindung: {e}")
+                # This can happen if the connection is already dead, which is fine.
+                logger.debug(f":police_car_light: Error while closing WebSocket connection (may be expected): {e}")
             finally:
                 self._ws = None
                 self._set_status(ConnectionStatus.DISCONNECTED)

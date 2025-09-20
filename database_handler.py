@@ -89,9 +89,9 @@ class DatabaseClient:
         try:
             # Use the DB_URL constructed from environment variables
             self.pool = await asyncpg.create_pool(dsn=DB_URL)
-            logger.info("Connected to the database successfully.")
+            logger.info(":handshake: Connected to the database successfully.")
         except Exception as e:
-            logger.exception("Error connecting to the database: %s", e)
+            logger.exception(":police_car_light: Errorconnecting to the database: %s", e)
             raise
 
     async def init_db(self):
@@ -112,7 +112,7 @@ class DatabaseClient:
                     await conn.execute(sql)
                     logger.info("Executed SQL file: %s", os.path.basename(file_path))
                 except Exception as e:
-                    logger.exception("Error executing SQL file %s: %s", os.path.basename(file_path), e)
+                    logger.exception(":exclamation: Errorexecuting SQL file %s: %s", os.path.basename(file_path), e)
                     raise
 
     async def insert_sol_price(self, price: float, timestamp: datetime = datetime.now(timezone.utc)):
@@ -121,7 +121,7 @@ class DatabaseClient:
             async with self.pool.acquire() as conn:
                 await conn.execute("INSERT INTO sol_price_usd (price, timestamp) VALUES ($1, $2)", price, timestamp)
         except Exception as e:
-            logger.exception("Error inserting SOL price into the database: %s", e)
+            logger.exception(":exclamation: Errorinserting SOL price into the database: %s", e)
             raise
 
     async def insert_token(self, data: dict):
@@ -199,7 +199,7 @@ class DatabaseClient:
                     logger.debug("Inserted/Updated token %s", data.get('mint'))
                     return True
             except Exception as e:
-                logger.exception("Error inserting token data: %s", e)
+                logger.exception(":exclamation: Errorinserting token data: %s", e)
                 raise
 
     async def insert_migration(self, data: dict):
@@ -218,7 +218,7 @@ class DatabaseClient:
                         logger.error(f"❌ Storing migration for {data['mint']} failed: {e}", exc_info=True)
                         raise
         except Exception as e:
-            logger.error(f"🚨 Error on storing migration: {e}", exc_info=True)
+            logger.error(f":police_car_light: Error on storing migration: {e}", exc_info=True)
             await asyncio.sleep(5)
 
     async def insert_trades_batch(self, trade_params: list, mints: list):
@@ -254,7 +254,7 @@ class DatabaseClient:
                     logger.debug(f"✅ Processed {len(trade_params)} trades in batch")
 
                 except Exception as e:
-                    logger.error(f"🚨 Error during batch trade insert: {e}", exc_info=True)
+                    logger.error(f":police_car_light: Error during batch trade insert: {e}", exc_info=True)
                     # The transaction will be rolled back automatically
                     raise # Re-raise the exception so the caller knows about the failure
 
@@ -445,7 +445,7 @@ class DatabaseClient:
             try:
                 return await conn.fetch(query, sol_price, volume_threshold, marketcap_threshold, rugcheck_threshold, social_score_threshold, str(time_interval_minutes), min_volatility)
             except Exception as e:
-                logger.error(f"Error finding trading opportunities: {e}", exc_info=True)
+                logger.error(f":police_car_light: Error finding trading opportunities: {e}", exc_info=True)
                 return []
 
     async def get_active_buy_positions(self, conn=None):
@@ -675,7 +675,7 @@ class DatabaseClient:
                 return [dict(row) for row in results]
             except Exception as e:
                 # Log the error using the logger instance
-                logger.error(f"Error fetching trade history for mints {mints}: {e}", exc_info=True)
+                logger.error(f":police_car_light: Error fetching trade history for mints {mints}: {e}", exc_info=True)
                 return [] # Return empty list on error
 
     async def get_all_unique_mints_with_names(self):
@@ -718,7 +718,7 @@ class DatabaseClient:
                     } for row in results
                 ]
             except Exception as e:
-                logger.error(f"Error fetching unique mints with names: {e}", exc_info=True)
+                logger.error(f":police_car_light: Error fetching unique mints with names: {e}", exc_info=True)
                 return []
             
     async def get_all_migrated_tokens(self) -> List[str]:
@@ -729,7 +729,7 @@ class DatabaseClient:
                 rows = await conn.fetch(query)
                 return [row['mint'] for row in rows]
         except Exception as e:
-            logger.error(f"Error fetching migrated tokens: {e}", exc_info=True)
+            logger.error(f":police_car_light: Error fetching migrated tokens: {e}", exc_info=True)
             return []
 
     async def get_filtered_tokens(self, max_socials=100, max_rugcheck=10000, min_volume_sol=0, time_window_minutes=60, portfolio_only=False):
@@ -814,7 +814,7 @@ class DatabaseClient:
                     } for row in results
                 ]
             except Exception as e:
-                logger.error(f"Error fetching filtered tokens: {e}", exc_info=True)
+                logger.error(f":police_car_light: Error fetching filtered tokens: {e}", exc_info=True)
                 return []
 
 
@@ -849,7 +849,7 @@ class DatabaseClient:
                 logger.debug(f"Fetched portfolio transactions for mints: {mints}")
                 return portfolio_data
             except Exception as e:
-                logger.error(f"Error fetching portfolio transactions for mints {mints}: {e}", exc_info=True)
+                logger.error(f":police_car_light: Error fetching portfolio transactions for mints {mints}: {e}", exc_info=True)
                 return {} # Return empty dict on error
 
     async def backup_and_delete_token(self, mint: str, archived_at: datetime, reason: str=None):
@@ -871,7 +871,7 @@ class DatabaseClient:
                     await conn.execute("UPDATE tokens SET is_active = FALSE WHERE mint = $1", mint)
                     return # Exit the function immediately.
         except Exception as e:
-            logger.error(f"Error during safety check in backup_and_delete_token for {mint}: {e}", exc_info=True)
+            logger.error(f":police_car_light: Error during safety check in backup_and_delete_token for {mint}: {e}", exc_info=True)
             return # Exit on error to be safe
         # --- END: ADD THIS SAFETY CHECK BLOCK ---
         final_reason = reason # Initialize final_reason with the provided reason
@@ -934,7 +934,7 @@ class DatabaseClient:
                         logger.error(f"❌ Backup failed for {mint}: {e}", exc_info=True)
                         raise
         except Exception as e:
-            logger.error(f"🚨 backup_and_delete_token: {e}", exc_info=True)
+            logger.error(f":police_car_light: backup_and_delete_token: {e}", exc_info=True)
             await asyncio.sleep(5)
 
     async def backup_creator_wallets(self):
@@ -963,7 +963,7 @@ class DatabaseClient:
                 
                 logger.info(f"✅ Successfully backed up {len(rows)} creator wallets to {backup_file_path}")
         except Exception as e:
-            logger.exception(f"Error backing up creator_wallets table: {e}")
+            logger.exception(f":police_car_light: Error backing up creator_wallets table: {e}")
             # Decide if we should raise or just log
 
 
@@ -1014,7 +1014,7 @@ class DatabaseClient:
             logger.info("Loaded backup data from %s (%d records)", backup_path, len(records))
 
         except Exception as e:
-            logger.exception("Error loading backup data: %s", e)
+            logger.exception(":police_car_light: Error loading backup data: %s", e)
             raise
 
     # --- START: Refactored Price Calculation Logic ---
@@ -1217,7 +1217,7 @@ class DatabaseClient:
                 return values #
             return inliers #
         except Exception as e:
-            logger.error(f"Error during IQR calculation for values: {e}. Returning original values.", exc_info=True) #
+            logger.error(f":police_car_light: Error during IQR calculation for values: {e}. Returning original values.", exc_info=True) #
             return values #
 
     async def _calculate_median_price_with_iqr(self, mint: str, config_params: dict, conn) -> float | None: #
@@ -1413,11 +1413,11 @@ class DatabaseClient:
         token_record = await conn.fetchrow("SELECT data_source FROM tokens WHERE mint = $1", mint)
 
         if not token_record:
-            logger.warning(f"Could not find token {mint} in 'tokens' table to determine data source.")
+            logger.warning(f":triangular_flag: Could not find token {mint} in 'tokens' table to determine data source.")
             return {'price': None, 'market_cap': None}
 
         data_source = token_record['data_source']
-        logger.debug(f"Getting price for {mint}. Primary source: {data_source}")
+        logger.debug(f":bar_chart: Getting price for {mint}. Primary source: {data_source}")
 
         # 2. Branch logic based on the data source
         if data_source == 'DEXSCREENER':
@@ -1470,7 +1470,7 @@ class DatabaseClient:
         try:
             return await conn.fetch(query, mint, str(lookback_minutes))
         except Exception as e:
-            logger.error(f"Error fetching DexScreener trend data for {mint}: {e}", exc_info=True)
+            logger.error(f":police_car_light: Error fetching DexScreener trend data for {mint}: {e}", exc_info=True)
             return []
 
     async def get_latest_dexscreener_response(self, mint: str, conn=None) -> str | None:
@@ -1498,7 +1498,7 @@ class DatabaseClient:
                 result = await conn.fetchval(query)
                 return result if result is not None else 0
             except Exception as e:
-                logger.error(f"Error fetching total tracked tokens: {e}", exc_info=True)
+                logger.error(f":police_car_light: Error fetching total tracked tokens: {e}", exc_info=True)
                 return 0
 
     async def load_all_configurations(self) -> Dict[str, Any]:
@@ -1525,12 +1525,12 @@ class DatabaseClient:
                             logger.warning(f"Unknown configuration type '{value_type}' for key '{key}'. Storing as string.")
                             config_data[key] = str_value
                     except (ValueError, TypeError, json.JSONDecodeError) as e:
-                        logger.error(f"Error converting configuration value for key '{key}' (type: {value_type}, value: '{str_value}'): {e}. Storing as raw string or None.")
+                        logger.error(f":police_car_light: Error converting configuration value for key '{key}' (type: {value_type}, value: '{str_value}'): {e}. Storing as raw string or None.")
                         config_data[key] = str_value # Fallback to string
                 logger.info(f"Loaded {len(config_data)} configurations from database.")
                 return config_data
         except Exception as e:
-            logger.error(f"Error loading configurations from database: {e}", exc_info=True)
+            logger.error(f":police_car_light: Error loading configurations from database: {e}", exc_info=True)
             return {} # Return empty dict on error
 
     async def save_configuration_parameter(self, key: str, value: Any, value_type: str, description: Optional[str] = None):
@@ -1559,7 +1559,7 @@ class DatabaseClient:
                 await conn.execute(query, key, str_value, value_type, description)
             logger.debug(f"Saved configuration: {key} = {value} (Type: {value_type})")
         except Exception as e:
-            logger.error(f"Error saving configuration parameter {key}: {e}", exc_info=True)
+            logger.error(f":police_car_light: Error saving configuration parameter {key}: {e}", exc_info=True)
 
     async def get_python_type_string(self, value: Any) -> str:
         """Determines the storable type string for a Python value."""
@@ -1589,7 +1589,7 @@ class DatabaseClient:
                 )
             # logger.debug(f"Heartbeat event '{event_type}' inserted.") # Optional logging
         except Exception as e:
-            logger.error(f"Error inserting heartbeat event: {e}", exc_info=True)
+            logger.error(f":police_car_light: Error inserting heartbeat event: {e}", exc_info=True)
             # Decide if you want to raise, as heartbeat failure could be critical
 
     async def get_last_heartbeat_before(self, timestamp: datetime) -> Optional[datetime]:
@@ -1662,7 +1662,7 @@ class DatabaseClient:
             return False
 
         except Exception as e:
-            logger.error(f"Error in check_for_data_gap_on_restart: {e}", exc_info=True)
+            logger.error(f":police_car_light: Error in check_for_data_gap_on_restart: {e}", exc_info=True)
             return False # Fail safe
 
     async def check_for_data_gap(self, token_start_time: datetime, token_end_time: datetime, gap_threshold_seconds: int = 300) -> bool:
@@ -1749,7 +1749,7 @@ class DatabaseClient:
 
     async def mark_token_as_migrated(self, mint: str, conn=None):
         """Updates the data_source for a token to 'DEXSCREENER'."""
-        logger.info(f"🚩 Flagging token {mint} as migrated. Switching data source to DEXScreener.")
+        logger.info(f":twisted_rightwards_arrows: Flagging token {mint} as migrated. Switching data source to DEXScreener.")
         query = "UPDATE tokens SET data_source = 'DEXSCREENER' WHERE mint = $1"
         connection = conn or await self.pool.acquire()
         try:
@@ -1761,7 +1761,7 @@ class DatabaseClient:
     async def cleanup_db(self, cleanup_flag: bool):
         """Drop all application tables if cleanup_flag is True."""
         if cleanup_flag:
-            logger.warning("🚨 Starting full database cleanup - Dropping all application tables...")
+            logger.warning(":police_car_light: Starting full database cleanup - Dropping all application tables...")
             async with self.pool.acquire() as conn:
                 # List all known application tables (main and backup)
                 # Add any other tables managed by the application if necessary (e.g., creator_wallets)
@@ -1788,7 +1788,7 @@ class DatabaseClient:
                         logger.info(f"🗑️ Dropped table {table}")
                     except Exception as e:
                         # Log error but continue trying to drop other tables
-                        logger.error(f"Error dropping table {table}: {e}", exc_info=False) # Keep log concise
+                        logger.error(f":police_car_light: Error dropping table {table}: {e}", exc_info=False) # Keep log concise
 
             logger.warning("✅ Full database cleanup finished.")
 
@@ -1851,7 +1851,7 @@ class DatabaseClient:
                         await conn.execute(f"TRUNCATE TABLE {table} RESTART IDENTITY CASCADE;")
 
                 except Exception as e:
-                    logger.exception("Error during database backup: %s", e)
+                    logger.exception(":police_car_light: Error during database backup: %s", e)
                     raise
 
     async def close(self):
@@ -1896,7 +1896,7 @@ class DatabaseClient:
                     logger.warning(f"No trade timestamps found for mint {mint} to determine lifespan.")
                     return None
             except Exception as e:
-                logger.error(f"Error fetching token lifespan for {mint}: {e}", exc_info=True)
+                logger.error(f":police_car_light: Error fetching token lifespan for {mint}: {e}", exc_info=True)
                 return None
 
     def ohlcv_sql_like(self, df_group: pd.DataFrame) -> pd.Series:
@@ -2204,7 +2204,7 @@ class DatabaseClient:
                         logger.warning(f"No valid data or missing columns for {mint_name} after final processing. Skipping.")
             
             except Exception as e:
-                logger.error(f"Error processing historical data ({type(e).__name__}): {e}", exc_info=True)
+                logger.error(f":police_car_light: Error processing historical data ({type(e).__name__}): {e}", exc_info=True)
                 return {}
 
         return results_dict
@@ -2274,7 +2274,7 @@ class DatabaseClient:
             return trades_df, rugcheck_df, token_info_df, dexscreener_df
 
         except Exception as e:
-            logger.error(f"Error fetching raw data for RL: {e}", exc_info=True)
+            logger.error(f":police_car_light: Error fetching raw data for RL: {e}", exc_info=True)
             return None
 
     # --- NEW METHOD FOR RL FEEDBACK LOOP ---
@@ -2368,5 +2368,5 @@ async def get_token_lifespan(db_client: DatabaseClient, mint: str) -> Optional[D
                 logger.warning(f"No trade timestamps found for mint {mint} to determine lifespan.")
                 return None
         except Exception as e:
-            logger.error(f"Error fetching token lifespan for {mint}: {e}", exc_info=True)
+            logger.error(f":police_car_light: Error fetching token lifespan for {mint}: {e}", exc_info=True)
             return None

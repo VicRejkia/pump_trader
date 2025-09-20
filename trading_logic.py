@@ -46,7 +46,7 @@ class TradingManager:
         if not self.config.get('USE_TREND_REVERSAL_CONFIRMATION', False):
             return True
 
-        logger.debug(f"Performing trend reversal confirmation for {mint}...")
+        #logger.debug(f"Performing trend reversal confirmation for {mint}...")
 
         # --- Step 1: Fetch Token Status and Last Sell Information ---
         # Get the token's current data_source and details of its last sell event.
@@ -62,7 +62,7 @@ class TradingManager:
             """, mint)
 
         if not token_record:
-            logger.warning(f"Could not find token record for {mint} during trend reversal check.")
+            logger.warning(f":triangular_flag: Could not find token record for {mint} during trend reversal check.")
             return True # Cannot block a buy if the token record is missing.
 
         data_source = token_record['data_source']
@@ -81,7 +81,7 @@ class TradingManager:
                     requires_reversal_check = True
 
         if not requires_reversal_check:
-            logger.debug(f"Trend reversal check not required for {mint} (Reason: '{last_sell_reason}', Source: {data_source}).")
+            logger.debug(f":thumbs_up: Trend reversal check not required for {mint} (Reason: '{last_sell_reason}', Source: {data_source}).")
             return True # If no check is needed, do not block the buy.
 
         # --- Step 3: Execute Source-Specific Reversal Logic ---
@@ -100,7 +100,7 @@ class TradingManager:
 
             # Ensure we have enough data points to make a reliable decision.
             if len(snapshots) < self.config['DEX_REVERSAL_MIN_SNAPSHOTS']:
-                logger.info(f"DEX Reversal FAILED for {mint}: Not enough recent data points (have {len(snapshots)}, need {self.config['DEX_REVERSAL_MIN_SNAPSHOTS']}).")
+                logger.info(f":triangular_flag: DEX Reversal FAILED for {mint}: Not enough recent data points (have {len(snapshots)}, need {self.config['DEX_REVERSAL_MIN_SNAPSHOTS']}).")
                 return False
 
             latest_snapshot = snapshots[0]
@@ -108,7 +108,7 @@ class TradingManager:
             # Stage 1: Health Check - Ensure the token has sufficient liquidity.
             min_liquidity_usd = self.config['DEX_REVERSAL_MIN_LIQUIDITY_USD']
             if float(latest_snapshot['liquidity_usd']) < min_liquidity_usd:
-                logger.info(f"DEX Reversal FAILED for {mint}: Liquidity (${latest_snapshot['liquidity_usd']:.2f}) is below threshold (${min_liquidity_usd:.2f}).")
+                logger.info(f":thumbs_down: DEX Reversal FAILED for {mint}: Liquidity (${latest_snapshot['liquidity_usd']:.2f}) is below threshold (${min_liquidity_usd:.2f}).")
                 return False
 
             # Stage 2: Momentum Confirmation - Analyze recent snapshots for buying pressure.
@@ -121,15 +121,15 @@ class TradingManager:
                 if buys > 0 and (sells == 0 or (buys / sells) >= self.config['DEX_REVERSAL_MIN_BUY_SELL_RATIO']):
                     strong_buy_pressure_count += 1
 
-            logger.debug(f"DEX Reversal analysis for {mint}: Strong Buy Pressure Signals={strong_buy_pressure_count} found in the last {len(snapshots)} snapshots.")
+            logger.debug(f":bookmark: DEX Reversal analysis for {mint}: Strong Buy Pressure Signals={strong_buy_pressure_count} found in the last {len(snapshots)} snapshots.")
 
             # Final Decision: The trend is confirmed only if we see enough signals of buying pressure.
             min_confirmations = self.config['DEX_REVERSAL_MIN_CONFIRMATIONS']
             if strong_buy_pressure_count >= min_confirmations:
-                logger.info(f"🚀 DEXScreener Trend Reversal CONFIRMED for {mint}. Strong buy pressure found in {strong_buy_pressure_count}/{len(snapshots)} recent snapshots.")
+                logger.info(f":bookmark: DEXScreener Trend Reversal CONFIRMED for {mint}. Strong buy pressure found in {strong_buy_pressure_count}/{len(snapshots)} recent snapshots.")
                 return True
             else:
-                logger.info(f"DEX Reversal FAILED for {mint}: Not enough confirmations of strong buying pressure (have {strong_buy_pressure_count}, need {min_confirmations}).")
+                logger.info(f":thumbs_down: DEX Reversal FAILED for {mint}: Not enough confirmations of strong buying pressure (have {strong_buy_pressure_count}, need {min_confirmations}).")
                 return False
 
         # ==============================================================================
@@ -175,14 +175,14 @@ class TradingManager:
             is_ema_bullish = latest.get('EMA_fast', float('-inf')) > latest.get('EMA_slow', float('inf'))
 
             if is_above_vwap and is_ema_bullish:
-                logger.info(f"🚀 Pump.fun Trend Reversal Fully Confirmed for {mint}!")
+                logger.info(f":thumbs_up: Pump.fun Trend Reversal Fully Confirmed for {mint}!")
                 return True
             else:
                 return False
                 
         # Fallback for any other unknown data source.
         else:
-            logger.warning(f"Unknown data_source '{data_source}' for {mint} in trend reversal check.")
+            logger.warning(f":triangular_flag: Unknown data_source '{data_source}' for {mint} in trend reversal check.")
             return False
 
     async def check_trading_opportunities(self):
@@ -191,7 +191,7 @@ class TradingManager:
             return
 
         if not self.state.is_buying_enabled: # Global bot state flag
-            logger.debug("Buying is currently disabled by command. Skipping buy checks.")
+            logger.debug(":closed_lock_with_key: Buying is currently disabled by command. Skipping buy checks.")
             return
 
         try:
@@ -210,7 +210,7 @@ class TradingManager:
                 min_volatility=self.config['MIN_VOLATILITY']
             )
 
-            logger.debug(f"Found {len(rows)} potential trading opportunities after initial DB filter.")
+            logger.debug(f":magnifying_glass_tilted_right: Found {len(rows)} potential trading opportunities after initial DB filter.")
 
             for row in rows:
                 mint = row['mint']
@@ -694,7 +694,7 @@ class TradingManager:
                         price_data = await self.db.get_price_and_market_cap_for_decision(mint, self.config, conn)
                         current_price_to_use = price_data.get('price')
                         current_market_cap_sol_for_log = price_data.get('market_cap')
-                        logger.debug(f"Checking sell for {mint} (ID: {pos_id}) - Current Price: {current_price_to_use}, Market Cap (SOL): {current_market_cap_sol_for_log}")
+                        logger.debug(f":abacus: Checking sell for {mint} (ID: {pos_id}) - Current Price: {current_price_to_use}, Market Cap (SOL): {current_market_cap_sol_for_log}")
 
                         # ======================================================================
                         # --- NEW LOGIC: The "No Volume" Kill Switch for Migrated Tokens ---
