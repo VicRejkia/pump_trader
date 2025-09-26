@@ -50,9 +50,7 @@ class Rugcheck:
         self.deprioritized_tokens_tracker = {} # Stores {mint: {'first_deprio_timestamp': datetime, 'reprocess_count': int}}
         self.jwt_token: str | None = None
         self.wallet: Keypair | None = None
-        self._last_requeue_check_time = 0
-
-
+        
         # --- NEW State Variables for Maintenance Handling ---
         self.maintenance_mode_active = False
         self.consecutive_api_errors = 0 # For the main /report endpoint
@@ -129,25 +127,23 @@ class Rugcheck:
             async with httpx.AsyncClient(timeout=MAINTENANCE_CHECK_TIMEOUT) as client:
                 response = await client.get(RUGCHECK_MAINTENANCE_URL)
 
-            # According to user's example, 200 OK with empty body means "pong" (service up)
-            if response.status_code == 200: # Allow empty body or specific message
+            if response.status_code == 200:
                 try:
-                    data = response.json() # Try to parse JSON
+                    data = response.json()
                     message = data.get("message", "")
                     logger.info(f"RugCheck API maintenance check OK (Status: {response.status_code}, Message: '{message}'). Service is responsive.")
-                except json.JSONDecodeError: # Handle empty body case
+                except json.JSONDecodeError:
                     if response.headers.get('content-length') == '0':
                          logger.info(f"RugCheck API maintenance check OK (Status: {response.status_code}, Empty Body). Service is responsive.")
-                    else: # Non-empty but invalid JSON
+                    else:
                         logger.warning(f"RugCheck API maintenance check returned 200 but with invalid JSON body: {response.text[:100]}")
-                        # Treat as a failure for our check
                         self.consecutive_maintenance_check_failures += 1
 
-                if self.consecutive_maintenance_check_failures == 0 or response.status_code == 200 : # if it was a json error above, but status 200, still reset
+                if self.consecutive_maintenance_check_failures == 0 or response.status_code == 200 :
                     self.maintenance_mode_active = False
                     self.consecutive_maintenance_check_failures = 0
 
-            else: # Any other status code is treated as a potential issue
+            else:
                 logger.warning(f"RugCheck API maintenance check failed or indicated issue: Status {response.status_code} - {response.text}")
                 self.consecutive_maintenance_check_failures += 1
 
@@ -162,32 +158,22 @@ class Rugcheck:
             self.consecutive_maintenance_check_failures += 1
 
         if self.consecutive_maintenance_check_failures >= MAINTENANCE_ENDPOINT_FAILURES_THRESHOLD:
-            if not self.maintenance_mode_active: # Log only when it transitions to active
+            if not self.maintenance_mode_active:
                 logger.error(f"🚨 RugCheck API assumed to be in maintenance/unavailable after {self.consecutive_maintenance_check_failures} failed checks to maintenance endpoint. Pausing Rugcheck tasks.")
             self.maintenance_mode_active = True
-        elif self.maintenance_mode_active and self.consecutive_maintenance_check_failures == 0 : # If it was active, but now check passes
+        elif self.maintenance_mode_active and self.consecutive_maintenance_check_failures == 0 :
             logger.info("✅ RugCheck API maintenance mode appears to have ended.")
             self.maintenance_mode_active = False
 
     async def _refresh_queue(self):
+        """Refreshes the queue with new, unchecked tokens."""
         try:
             sol_price = await self.state.get_sol_price()
             if sol_price is None:
                 logger.warning("⚠ SOL_PRICE not updated yet; skipping RugCheck queue refresh.")
                 return False
 
-            # Clear existing queue
-            while not self.queue.empty():
-                try:
-                    self.queue.get_nowait()
-                    self.queue.task_done()
-                except asyncio.QueueEmpty:
-                    break
-                except Exception as e:
-                    logger.error(f":police_car_light: Error clearing rugcheck queue item: {e}")
-
             async with self.db_client.pool.acquire() as conn:
-                # Updated query with new priority formula
                 rows = await conn.fetch("""
                     WITH ranked_tokens AS (
                         SELECT
@@ -202,7 +188,6 @@ class Rugcheck:
                         WHERE t.is_active = TRUE AND r.mint IS NULL
                         GROUP BY t.mint, t.timestamp
                     )
-
                     SELECT
                         mint,
                         (total_volume + buy_volume + (1.0 - row_num * 0.001)) AS priority_score
@@ -211,69 +196,44 @@ class Rugcheck:
 
                 logger.debug(f"🔍 Found {len(rows)} active tokens missing RugCheck data for refresh.")
                 if rows:
-                    tokens_added = 0
                     for row in rows:
                         mint = row["mint"]
                         priority_score = row["priority_score"] or Decimal(0)
-
-                        # Convert to negative for min-heap priority queue
-                        # Higher priority_score = higher urgency = more negative value
                         priority = -float(priority_score)
-
                         current_attempts = self.fetch_attempts.get(mint, 0)
                         if current_attempts < MAX_FETCH_ATTEMPTS:
                             await self.queue.put((priority, mint))
-                            tokens_added += 1
 
-                    logger.debug(f"🔄 Refreshed RugCheck queue. Added {tokens_added} tokens (current size: {self.queue.qsize()}).")
+                    logger.debug(f"🔄 Refreshed RugCheck queue with {len(rows)} new tokens (current size: {self.queue.qsize()}).")
             return True
         except Exception as e:
             logger.error(f":police_car_light: Critical error in _refresh_queue: {e}", exc_info=True)
             return False
 
     async def _requeue_processed_tokens(self):
-        """
-        Identifies already-processed tokens that are candidates for a re-check and adds them back to the queue.
-        Prioritization is based on volatility, volume, purchase status, and previous check count.
-        """
+        """Identifies already-processed tokens and adds them back to the queue for re-checking."""
         try:
             async with self.db_client.pool.acquire() as conn:
-                # --- START MODIFICATION ---
-                # This query is more complex. It joins multiple tables to gather all prioritization criteria.
                 requeue_candidates = await conn.fetch("""
                     WITH TokenVolatility AS (
-                        -- Calculate volatility from recent trades (e.g., last 15 mins)
-                        SELECT
-                            mint,
-                            STDDEV(price) / AVG(price) as volatility
-                        FROM trades
-                        WHERE timestamp >= NOW() - INTERVAL '15 minutes' AND price > 0
-                        GROUP BY mint
-                        HAVING COUNT(*) > 5 -- Require a minimum number of trades for a reliable volatility metric
+                        SELECT mint, STDDEV(price) / AVG(price) as volatility
+                        FROM trades WHERE timestamp >= NOW() - INTERVAL '15 minutes' AND price > 0
+                        GROUP BY mint HAVING COUNT(*) > 5
                     ),
                     TokenVolume AS (
-                        -- Calculate total volume in the same recent period
                         SELECT mint, SUM(sol_amount) as volume
-                        FROM trades
-                        WHERE timestamp >= NOW() - INTERVAL '15 minutes'
-                        GROUP BY mint
+                        FROM trades WHERE timestamp >= NOW() - INTERVAL '15 minutes' GROUP BY mint
                     ),
                     RugcheckCounts AS (
-                        -- NEW: Count the number of checks per mint directly from the table
-                        SELECT mint, COUNT(*) AS check_count
-                        FROM rugcheck
-                        GROUP BY mint
+                        SELECT mint, COUNT(*) AS check_count FROM rugcheck GROUP BY mint
                     )
                     SELECT
-                        r.mint,
-                        COALESCE(rc.check_count, 0) as check_count, -- Use the new calculated count
-                        COALESCE(tv.volatility, 0) as volatility,
-                        COALESCE(tvl.volume, 0) as volume,
-                        -- Check if there's an active position in the portfolio
+                        r.mint, COALESCE(rc.check_count, 0) as check_count,
+                        COALESCE(tv.volatility, 0) as volatility, COALESCE(tvl.volume, 0) as volume,
                         CASE WHEN p.mint IS NOT NULL THEN TRUE ELSE FALSE END as is_purchased
                     FROM rugcheck r
                     JOIN tokens t ON r.mint = t.mint
-                    LEFT JOIN RugcheckCounts rc ON r.mint = rc.mint -- Join with the new counts
+                    LEFT JOIN RugcheckCounts rc ON r.mint = rc.mint
                     LEFT JOIN TokenVolatility tv ON r.mint = tv.mint
                     LEFT JOIN TokenVolume tvl ON r.mint = tvl.mint
                     LEFT JOIN portfolio p ON r.mint = p.mint AND p.status = 'active'
@@ -288,31 +248,15 @@ class Rugcheck:
                 for candidate in requeue_candidates:
                     mint = candidate['mint']
                     base_priority = 0
-
-                    # 1. Boost priority for purchased tokens (most important)
                     if candidate['is_purchased']:
                         base_priority += self.config.get('RUGCHECK_REQUEUE_PRIORITY_BOOST_PURCHASED', 1000.0)
-
-                    # 2. Add priority based on recent volume and volatility
-                    base_priority += float(candidate['volume']) * 10  # Weight volume
-                    base_priority += float(candidate['volatility']) * 50 # Weight volatility more
+                    base_priority += float(candidate['volume']) * 10
+                    base_priority += float(candidate['volatility']) * 50
                     
-                    # --- START MODIFICATION ---
-                    # 3. Apply PRIORITY DECAY based on the number of previous checks.
-                    # This replaces the subtractive penalty with a more effective divisional decay.
                     check_count = candidate['check_count']
-                    if check_count > 0:
-                        # Divide the score by the square of the check count
-                        final_priority_score = base_priority / (check_count ** 2)
-                    else:
-                        # Fallback for the unlikely case of a zero count
-                        final_priority_score = base_priority
-                    # --- END MODIFICATION ---
-
-                    # Convert to negative for the min-heap queue
+                    final_priority_score = base_priority / (check_count ** 2) if check_count > 0 else base_priority
                     priority = -final_priority_score
                     
-                    # Only requeue if it has a meaningful priority
                     if final_priority_score > 1.0:
                         await self.queue.put((priority, mint))
                         requeued_count += 1
@@ -324,18 +268,9 @@ class Rugcheck:
         except Exception as e:
             logger.error(f":police_car_light: Error during RugCheck re-queue process: {e}", exc_info=True)
 
-
     async def _fetch_and_store_data(self, mint: str, is_retry: bool = False) -> dict | None | str:
-        """
-        Fetches RugCheck data from the API and stores it in the database.
-        Returns:
-            - dict: The fetched data on success.
-            - 'NOT_FOUND': If the API returns 404.
-            - 'TIMEOUT': If the API request times out.
-            - None: On other errors (invalid JSON, DB error, other HTTP errors, etc.).
-        """
         url = f"{_RUGCHECK_API}/{mint}/report"
-        response = None # Define response outside try block
+        response = None
         headers = {}
         if self.jwt_token:
             headers["Authorization"] = f"Bearer {self.jwt_token}"
@@ -349,29 +284,26 @@ class Rugcheck:
 
             if response.status_code == 200:
                 data = response.json()
-                if data.get("error") == "failed to generate report cached": # Specific error check
+                if data.get("error") == "failed to generate report cached":
                     logger.warning(f"⚠ RugCheck API for {mint} reported: failed to generate report cached.")
                     return 'GENERATION_ERROR'
-                if not data or "score" not in data: # Basic validation
+                if not data or "score" not in data:
                     logger.warning(f"⚠ RugCheck data incomplete or invalid for {mint}. Response: {data}")
-                    return 'GENERATION_ERROR' # Treat as generation error if data is bad
+                    return 'GENERATION_ERROR'
 
-                # --- Store data in DB ---
                 try:
                     token = data.get("token") or {}
                     tokenMeta = data.get("tokenMeta") or {}
                     fileMeta = data.get("fileMeta") or {}
                     transferFee = data.get("transferFee") or {}
-                    # Ensure risks is stored as JSON string or NULL
                     risks_list = data.get("risks", [])
                     risks_json = json.dumps(risks_list) if isinstance(risks_list, list) else None
-                    full_data_json = json.dumps(data) # Store the full response
+                    full_data_json = json.dumps(data)
 
                     detected_at = None
                     detected_at_str = data.get("detectedAt")
                     if detected_at_str:
                         try:
-                            # Handle 'Z' and potential extra precision
                             detected_at_str = detected_at_str.replace('Z', '+00:00')
                             if '.' in detected_at_str:
                                 base, fraction = detected_at_str.split('.', 1)
@@ -382,28 +314,18 @@ class Rugcheck:
                                 elif '-' in fraction:
                                      fraction, tz_part = fraction.split('-', 1)
                                      tz_part = '-' + tz_part
-                                detected_at_str = f"{base}.{fraction[:6]}{tz_part}" # Truncate microseconds
+                                detected_at_str = f"{base}.{fraction[:6]}{tz_part}"
                             detected_at = datetime.fromisoformat(detected_at_str).astimezone(timezone.utc)
                         except ValueError as date_err:
                             logger.warning(f"Could not parse detectedAt '{data.get('detectedAt')}' for {mint}: {date_err}")
-                            detected_at = datetime.now(timezone.utc) # Fallback
+                            detected_at = datetime.now(timezone.utc)
 
                     async with self.db_client.pool.acquire() as conn:
                         async with conn.transaction():
-                            # --- START OF FIX ---
-                            # This check runs *after* the API call and immediately before the insert,
-                            # guaranteeing the token exists at the moment of the transaction.
-                            token_exists = await conn.fetchval(
-                                "SELECT 1 FROM tokens WHERE mint = $1", mint
-                            )
-
+                            token_exists = await conn.fetchval("SELECT 1 FROM tokens WHERE mint = $1", mint)
                             if not token_exists:
-                                logger.info(
-                                    f"Token {mint} was deleted from DB while its RugCheck data was being fetched. Aborting DB storage."
-                                )
-                                return 'TOKEN_DELETED_MID_FETCH' # Return a specific status
-                            # --- END OF FIX ---
-                            #
+                                logger.info(f"Token {mint} was deleted from DB while its RugCheck data was being fetched. Aborting DB storage.")
+                                return 'TOKEN_DELETED_MID_FETCH'
                             await conn.execute('''
                                 INSERT INTO rugcheck
                                 (mint, tokenProgram, creator, token_mintAuthority, token_supply,
@@ -434,67 +356,51 @@ class Rugcheck:
                                 detected_at, full_data_json
                             )
                     logger.debug(f"💾 RugCheck data stored/updated for {mint}")
-                    return data # Return fetched data for score checking
+                    return data
                 except Exception as db_err:
                     logger.error(f":police_car_light: DB Error storing RugCheck for {mint}: {db_err}", exc_info=True)
                     return 'DB_INSERT_ERROR'
 
             elif response.status_code == 404:
-                logger.warning(f"❓ RugCheck API returned 404 (Not Found) for {mint}. Maybe too new?")
-                return 'NOT_FOUND' # Specific status for 404
+                return 'NOT_FOUND'
             elif response.status_code in [401, 403]:
                  logger.warning(f"🔑 RugCheck API returned {response.status_code} (Authorization Error) for {mint}.")
                  self.jwt_token = None
-                 if not is_retry: # Only attempt re-login once per call chain
+                 if not is_retry:
                      if await self._login_to_rugcheck():
-                         logger.info(f"Re-login successful. Retrying fetch for {mint} (original attempt).")
-                         return await self._fetch_and_store_data(mint, is_retry=True) # Mark as retry within this fetch
-                 return 'AUTH_ERROR' # Persistent auth error
-            else: # Other HTTP errors (e.g., 5xx)
+                         return await self._fetch_and_store_data(mint, is_retry=True)
+                 return 'AUTH_ERROR'
+            else:
                 logger.warning(f"⚠ RugCheck API returned HTTP {response.status_code} for {mint}. Response: {response.text}")
                 return 'HTTP_ERROR'
-
         except httpx.TimeoutException:
-            logger.error(f"⏳ Timeout fetching RugCheck data for {mint}")
             return 'TIMEOUT'
-        except httpx.RequestError as req_err: # Covers connection errors, DNS errors etc.
-            logger.error(f"❌ HTTP Request Error fetching RugCheck for {mint}: {req_err}")
+        except httpx.RequestError as req_err:
             return 'REQUEST_ERROR'
         except json.JSONDecodeError as json_err:
             response_text = response.text if response else "N/A"
             logger.error(f"❌ JSON Decode Error for RugCheck response {mint}: {json_err}. Response: {response_text[:100]}")
-            return 'GENERATION_ERROR' # Treat as bad data from API
+            return 'GENERATION_ERROR'
         except Exception as e:
             logger.error(f"❌ Unexpected Error fetching RugCheck data for {mint}: {e}", exc_info=True)
-            return None # Unexpected internal error
+            return None
 
     async def _process_token(self, mint: str) -> bool | str:
-        """
-        Fetches, stores, and processes RugCheck data for a single token.
-        Returns:
-            - True: If processing was successful (data fetched/stored, score checked, deactivation handled).
-            - 'NOT_FOUND': If the fetch attempt resulted in a 404 from the API.
-            - 'TIMEOUT': If the fetch attempt resulted in a timeout.
-            - False: If there was another error during fetching, storing, or processing.
-        """
         fetch_result = await self._fetch_and_store_data(mint)
 
-        if isinstance(fetch_result, str): # 'NOT_FOUND', 'TIMEOUT', 'GENERATION_ERROR', etc.
-            return fetch_result # Propagate API/fetch error status
+        if isinstance(fetch_result, str):
+            return fetch_result
 
-        if fetch_result is None or fetch_result == 'DB_INSERT_ERROR': # Unexpected internal error or DB error
+        if fetch_result is None or fetch_result == 'DB_INSERT_ERROR':
             logger.warning(f"Processing failed for {mint}: Could not fetch/store RugCheck data due to error: {fetch_result}")
-            return False # Indicate unrecoverable internal/DB error for this attempt
+            return False
 
-        # --- Score Check and Deactivation (if data was fetched successfully as dict) ---
-        fetched_data = fetch_result # Known to be a dict here
+        fetched_data = fetch_result
         score = fetched_data.get("score")
-        # RUGCHECK_SCORE_THRESHOLD is from config.py, accessed via self.config
         if score is not None and score > self.config.get('RUGCHECK_SCORE_THRESHOLD', 1002):
             logger.debug(f"🚨 High RugCheck score ({score} > {self.config['RUGCHECK_SCORE_THRESHOLD']}) for {mint}. Deactivating.")
             try:
                 async with self.db_client.pool.acquire() as conn:
-
                     is_active_in_portfolio = await conn.fetchval("SELECT 1 FROM portfolio WHERE mint = $1 AND status = 'active' LIMIT 1", mint)
                     if not is_active_in_portfolio:
                         await conn.execute("UPDATE tokens SET is_active = FALSE WHERE mint = $1", mint)
@@ -504,19 +410,16 @@ class Rugcheck:
                     logger.debug(f"[bold]:hot_pepper: Too spicy:[/bold] Sent unsubscribe for high-score token {mint}")
 
                 await self.db_client.backup_and_delete_token(mint=mint, archived_at=datetime.now(timezone.utc), reason="high_rugcheckscore")
-                return True # Processed successfully (even if deactivation had minor issue, fetch was good)
+                return True
             except Exception as deactivation_err:
                 logger.error(f":police_car_light: Error during deactivation for high-score token {mint}: {deactivation_err}", exc_info=True)
-                return True # Still return True as fetch/store part was okay for the token itself
+                return True
         else:
             logger.debug(f"✅ RugCheck score OK for {mint} (Score: {score})")
-            # Socials processing can be triggered here if needed, or remain separate
-            return True # Processed successfully
+            return True
 
     async def _worker(self):
         logger.info(":rocket: RugCheck worker started.")
-        last_refresh_time = 0
-        refresh_interval = self.config.get('_RUGCHECK_INTERVAL', _RUGCHECK_INTERVAL) / 2
 
         if self.wallet:
             await self._login_to_rugcheck()
@@ -532,27 +435,24 @@ class Rugcheck:
                     await self._check_api_maintenance_status()
                     continue
 
-                current_time_loop_start = asyncio.get_event_loop().time()
-                if self.queue.empty() or (current_time_loop_start - last_refresh_time > refresh_interval):
-                    logger.debug("🔄 Triggering RugCheck queue refresh...")
-                    if await self._refresh_queue():
-                        last_refresh_time = current_time_loop_start
-                    else:
-                        await self.state.wait_or_interrupt(timeout=5)
-                        continue
-                
-                # --- NEW: Re-queue Logic on Idle ---
-                current_time = time.time()
-                requeue_interval = self.config.get('RUGCHECK_REQUEUE_INTERVAL_MINUTES', 5) * 60
-                if self.queue.empty() and (current_time - self._last_requeue_check_time > requeue_interval):
-                    logger.info("RugCheck queue is empty. Checking for processed tokens to re-queue...")
-                    await self._requeue_processed_tokens()
-                    self._last_requeue_check_time = current_time
-
-
+                # --- START: REFACTORED QUEUE FILLING LOGIC ---
                 if self.queue.empty():
-                    await self.state.wait_or_interrupt(timeout=1)
-                    continue
+                    logger.debug("RugCheck queue is empty. Attempting to refill...")
+                    
+                    # Priority 1: Refresh with new, unchecked tokens.
+                    await self._refresh_queue()
+
+                    # Priority 2: If still empty, requeue already processed tokens.
+                    if self.queue.empty():
+                        logger.info("No new tokens found. Checking for processed tokens to re-queue...")
+                        await self._requeue_processed_tokens()
+
+                    # If still empty after all attempts, wait before trying again.
+                    if self.queue.empty():
+                        logger.debug("No new or re-queueable tokens found. Waiting.")
+                        await self.state.wait_or_interrupt(timeout=5) # Prevent busy-looping
+                        continue
+                # --- END: REFACTORED QUEUE FILLING LOGIC ---
 
                 try:
                     priority, mint = await asyncio.wait_for(self.queue.get(), timeout=0.5)
@@ -561,10 +461,9 @@ class Rugcheck:
                 except Exception as q_err:
                     logger.error(f":police_car_light: Error getting item from rugcheck queue: {q_err}"); continue
 
-                # --- CULLING LOGIC FOR DEPRIORITIZED TOKENS ---
                 if priority == DEPRIORITIZED_PRIORITY and mint in self.deprioritized_tokens_tracker:
                     tracker_entry = self.deprioritized_tokens_tracker[mint]
-                    tracker_entry['reprocess_count'] += 1 # Increment reprocess attempts for this deprioritized token
+                    tracker_entry['reprocess_count'] += 1
                     age_seconds = (datetime.now(timezone.utc) - tracker_entry['first_deprio_timestamp']).total_seconds()
 
                     cull_reason = None
@@ -575,14 +474,13 @@ class Rugcheck:
 
                     if cull_reason:
                         logger.warning(f"🧹 Culling deprioritized token {mint} due to {cull_reason} for RugCheck.")
-                        # Perform culling actions
                         try:
                             if self.websocket_handler and self.websocket_handler.websocket and self.websocket_handler.websocket.open:
-                                async with self.state.lock: # Ensure atomicity for subscription state
+                                async with self.state.lock:
                                     if mint in self.state.active_token_subscriptions:
                                         self.state.active_token_subscriptions.discard(mint)
                                         self.state._save_subscriptions_to_file()
-                                try: # Send unsubscribe even if state update fails, though unlikely
+                                try:
                                     await asyncio.wait_for(self.websocket_handler.safe_send(json.dumps({
                                         "method": "unsubscribeTokenTrade", "keys": [mint]
                                     })), timeout=5.0)
@@ -595,20 +493,19 @@ class Rugcheck:
                         except Exception as e:
                             logger.error(f":police_car_light: Error during culling operations for deprioritized token {mint}: {e}", exc_info=True)
                         finally:
-                            self.fetch_attempts.pop(mint, None) # Clean up attempt counter
-                            self.deprioritized_tokens_tracker.pop(mint, None) # Clean up tracker
+                            self.fetch_attempts.pop(mint, None)
+                            self.deprioritized_tokens_tracker.pop(mint, None)
                             self.queue.task_done(); task_completed_in_loop = True
-                            continue # Move to the next token
+                            continue
 
-                # --- REGULAR PROCESSING ---
                 async with self.limiter:
-                    async with self.db_client.pool.acquire() as conn: # Use specific connection for DB check
+                    async with self.db_client.pool.acquire() as conn:
                         is_active = await conn.fetchval("SELECT is_active FROM tokens WHERE mint = $1", mint)
 
                     if not is_active:
                         logger.debug(f"Token {mint} no longer active or exists. Skipping RugCheck.")
                         self.fetch_attempts.pop(mint, None)
-                        self.deprioritized_tokens_tracker.pop(mint, None) # Also remove from deprio tracker if it became inactive
+                        self.deprioritized_tokens_tracker.pop(mint, None)
                         self.queue.task_done(); task_completed_in_loop = True
                         continue
 
@@ -619,7 +516,7 @@ class Rugcheck:
 
                     if process_status is True:
                         self.fetch_attempts.pop(mint, None)
-                        self.deprioritized_tokens_tracker.pop(mint, None) # Remove if successfully processed
+                        self.deprioritized_tokens_tracker.pop(mint, None)
                         self.consecutive_api_errors = 0
                     elif process_status in retryable_api_error_statuses:
                         self.consecutive_api_errors += 1
@@ -632,10 +529,10 @@ class Rugcheck:
                         logger.warning(f"🔄 RugCheck API failed for {mint} ({process_status}). Attempt {current_attempts}/{MAX_FETCH_ATTEMPTS}.")
                         if current_attempts < MAX_FETCH_ATTEMPTS:
                             await self.queue.put((priority, mint))
-                        else: # Max attempts reached for this error type
+                        else:
                             await self.queue.put((DEPRIORITIZED_PRIORITY, mint))
                             logger.warning(f"Max fetch attempts ({MAX_FETCH_ATTEMPTS}) reached for {mint} due to {process_status}. Deprioritizing.")
-                            if mint not in self.deprioritized_tokens_tracker: # Start tracking for culling
+                            if mint not in self.deprioritized_tokens_tracker:
                                 self.deprioritized_tokens_tracker[mint] = {'first_deprio_timestamp': datetime.now(timezone.utc), 'reprocess_count': 0}
                     elif process_status == 'NOT_FOUND':
                         current_attempts = self.fetch_attempts.get(mint, 0) + 1
@@ -646,21 +543,21 @@ class Rugcheck:
                         else:
                             await self.queue.put((DEPRIORITIZED_PRIORITY, mint))
                             logger.warning(f"Max 404 attempts for {mint}. Deprioritizing.")
-                            if mint not in self.deprioritized_tokens_tracker: # Start tracking for culling
+                            if mint not in self.deprioritized_tokens_tracker:
                                 self.deprioritized_tokens_tracker[mint] = {'first_deprio_timestamp': datetime.now(timezone.utc), 'reprocess_count': 0}
                         self.consecutive_api_errors = 0
                     elif process_status == 'AUTH_ERROR':
                         logger.error(f"🔑 Persistent RugCheck Auth Error for {mint}. Deprioritizing and marking max attempts.")
                         await self.queue.put((DEPRIORITIZED_PRIORITY, mint))
                         self.fetch_attempts[mint] = MAX_FETCH_ATTEMPTS
-                        if mint not in self.deprioritized_tokens_tracker: # Start tracking for culling
+                        if mint not in self.deprioritized_tokens_tracker:
                             self.deprioritized_tokens_tracker[mint] = {'first_deprio_timestamp': datetime.now(timezone.utc), 'reprocess_count': 0}
                         self.consecutive_api_errors = 0
                     elif process_status is False or process_status == 'DB_INSERT_ERROR':
                         logger.error(f"📉 RugCheck processing internal/DB error for {mint} (Status: {process_status}). Requeuing with original priority.")
                         await self.queue.put((priority, mint))
-                        self.fetch_attempts.pop(mint, None) # Not an API fetch issue for this token
-                        self.deprioritized_tokens_tracker.pop(mint, None) # Remove if it was being tracked
+                        self.fetch_attempts.pop(mint, None)
+                        self.deprioritized_tokens_tracker.pop(mint, None)
 
                     self.queue.task_done()
 
@@ -682,5 +579,4 @@ class Rugcheck:
     def start(self) -> asyncio.Task:
         """Creates and returns the asyncio task for the RugCheck worker."""
         logger.info("Creating RugCheck background task...")
-        # Ensure worker starts after initial setup (like wallet loading) is done
         return asyncio.create_task(self._worker(), name="rugcheck_worker")

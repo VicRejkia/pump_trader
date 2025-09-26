@@ -117,7 +117,7 @@ class WebSocketHandler:
         if not mints:
             return
         
-        logger.info(f"Request received to unsubscribe from {len(mints)} tokens (Reason: {reason}).")
+        #logger.info(f"Request received to unsubscribe from {len(mints)} tokens (Reason: {reason}).")
         await self._unsubscribe_in_batches(mints, reason)
 
     def get_status(self) -> dict:
@@ -145,7 +145,7 @@ class WebSocketHandler:
     def _set_status(self, new_status: ConnectionStatus):
         """Atomically updates the connection status and logs the change."""
         if self._status != new_status:
-            logger.info(f"WebSocket status changed: {self._status.value} -> {new_status.value}")
+            logger.info(f":satellite: WebSocket status changed: {self._status.value} -> {new_status.value}")
             self._status = new_status
 
     async def _connection_supervisor(self):
@@ -176,9 +176,9 @@ class WebSocketHandler:
                     await self._session_handler()
             
             except ws_exceptions.WebSocketException as e:
-                logger.warning(f"WebSocket connection error: {e}. Attempting to reconnect.")
+                logger.warning(f":police_car_light: WebSocket connection error: {e}. Attempting to reconnect.")
             except asyncio.CancelledError:
-                logger.info("Connection supervisor task was cancelled.")
+                logger.info(":stop_sign: Connection supervisor task was cancelled.")
                 break
             except Exception as e:
                 logger.error(f":police_car_light: Unexpected error in connection supervisor: {e}", exc_info=True)
@@ -192,7 +192,7 @@ class WebSocketHandler:
             # Calculate wait time with jitter to prevent synchronized reconnect storms.
             jitter = random.uniform(0.5, 1.5)
             wait_time = min(self._reconnect_delay * jitter, WEBSOCKET_RECONNECT_BACKOFF_MAX_SECONDS)
-            logger.info(f"Waiting {wait_time:.2f} seconds before next connection attempt...")
+            logger.info(f":stopwatch: Waiting {wait_time:.2f} seconds before next connection attempt...")
             
             await asyncio.sleep(wait_time)
             # Increase the delay for the next potential attempt.

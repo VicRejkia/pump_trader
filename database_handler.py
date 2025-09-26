@@ -1417,7 +1417,7 @@ class DatabaseClient:
             return {'price': None, 'market_cap': None}
 
         data_source = token_record['data_source']
-        logger.debug(f":bar_chart: Getting price for {mint}. Primary source: {data_source}")
+        #logger.debug(f":bar_chart: Getting price for {mint}. Primary source: {data_source}")
 
         # 2. Branch logic based on the data source
         if data_source == 'DEXSCREENER':

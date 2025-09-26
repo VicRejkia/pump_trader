@@ -694,7 +694,7 @@ class TradingManager:
                         price_data = await self.db.get_price_and_market_cap_for_decision(mint, self.config, conn)
                         current_price_to_use = price_data.get('price')
                         current_market_cap_sol_for_log = price_data.get('market_cap')
-                        logger.debug(f":abacus: Checking sell for {mint} (ID: {pos_id}) - Current Price: {current_price_to_use}, Market Cap (SOL): {current_market_cap_sol_for_log}")
+                        logger.debug(f":abacus: Checking sell for {mint} (ID: {pos_id}) - Current Price: {current_price_to_use}, Market Cap (SOL): {current_market_cap_sol_for_log} on {token_data_source}")
 
                         # ======================================================================
                         # --- NEW LOGIC: The "No Volume" Kill Switch for Migrated Tokens ---
