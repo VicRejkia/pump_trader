@@ -408,12 +408,11 @@ class SocialsProcessor:
     async def _refresh_queue(self):
         """Refreshes the queue with tokens that have never had a socials check."""
         try:
-            while not self.queue.empty():
-                try:
-                    self.queue.get_nowait()
-                    self.queue.task_done()
-                except asyncio.QueueEmpty:
-                    break
+            # This clear operation is the source of the race condition.
+            # We will remove it and check attempts before putting items on the queue.
+            # while not self.queue.empty():
+            #     try: self.queue.get_nowait(); self.queue.task_done()
+            #     except asyncio.QueueEmpty: break
             
             async with self.db_client.pool.acquire() as conn:
                 rows = await conn.fetch("""
@@ -426,11 +425,18 @@ class SocialsProcessor:
                 """)
 
             if rows:
+                added_count = 0
                 for row in rows:
-                    priority = -float(row["volume"] or Decimal(0))
-                    if self.fetch_attempts.get(row["mint"], 0) < MAX_FETCH_ATTEMPTS:
-                        await self.queue.put((priority, row["mint"]))
-                logger.debug(f"🔄 Refreshed Socials queue with {len(rows)} new tokens.")
+                    mint = row["mint"]
+                    # --- START: FIX ---
+                    # Only add the token to the queue if it hasn't already reached max fetch attempts.
+                    if self.fetch_attempts.get(mint, 0) < MAX_FETCH_ATTEMPTS:
+                        priority = -float(row["volume"] or Decimal(0))
+                        await self.queue.put((priority, mint))
+                        added_count += 1
+                    # --- END: FIX ---
+                if added_count > 0:
+                    logger.debug(f"🔄 Refreshed Socials queue with {added_count} new tokens.")
             return True
 
         except Exception as e:
@@ -467,7 +473,7 @@ class SocialsProcessor:
                     permanent_failures = {
                         "NOT_FOUND", "Error InvalidURI", "NO_PRIMARY_URI",
                         "Error NotJSONContentType", "Error DecodeFailedStrict", 
-                        "Error DecodeGeneral", "Error HTTP 404", "Error HTTP 403"
+                        "Error DecodeGeneral", "Error HTTP 404", "Error HTTP 403", "Error HTTP 401"
                     }
                     
                     is_permanent_failure = False
@@ -482,7 +488,7 @@ class SocialsProcessor:
                     elif is_permanent_failure:
                         logger.warning(f" socials Socials Check for {mint} failed with permanent error: '{process_status}'. No more retries.")
                         self.fetch_attempts[mint] = MAX_FETCH_ATTEMPTS
-                    else: # Handle transient/unknown errors with retry logic
+                    else: 
                         current_attempts = self.fetch_attempts.get(mint, 0) + 1
                         self.fetch_attempts[mint] = current_attempts
                         logger.warning(f" socials Socials Check for {mint} failed with transient error ('{process_status}'). Attempt {current_attempts}/{MAX_FETCH_ATTEMPTS}.")
