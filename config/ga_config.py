@@ -26,17 +26,17 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
     },
     {
         "name": "INITIAL_STOP_LOSS_PERCENT",
-        "values": list(range(5, 31, 1)),    # Range: 8, 9, 10, ..., 50
+        "values": list(range(4, 56, 2)),    # Range: 8, 9, 10, ..., 50
         "type": float
     },
     {
         "name": "FIRST_SELL_PERCENT",
-        "values": list(range(5, 50, 5)),    # Range: 5, 10, 15, ..., 65
+        "values": list(range(5, 101, 5)),    # Range: 5, 10, 15, ..., 65
         "type": float
     },
     {
         "name": "TRAILING_STOP_LOSS_PERCENT",
-        "values": list(range(5, 41, 5)),    # Range: 5, 10, 15, ..., 70
+        "values": list(range(5, 61, 5)),    # Range: 5, 10, 15, ..., 70
         "type": float
     },
     {
@@ -53,7 +53,7 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
     # --- Buy Condition Thresholds ---
     {
         "name": "DEFAULT_VOLUME_THRESHOLD",
-        "values": list(range(2000, 10001, 1000)), # Range: 2000, 3000, ..., 10000
+        "values": list(range(1000, 10001, 1000)), # Range: 2000, 3000, ..., 10000
         "type": int
     },
     {
@@ -187,7 +187,7 @@ NUM_GENERATIONS: int = 500
 # Example & Effect:
 #   - 0.6 (Lower): Preserves more successful strategies as-is, leading to slower, more stable evolution.
 #   - 0.9 (Higher): Creates more new combinations, which can speed up convergence but may reduce diversity.
-CROSSOVER_PROBABILITY: float = 0.85
+CROSSOVER_PROBABILITY: float = 0.8
 
 # MUTATION_PROBABILITY
 # Explanation: The probability that a single parameter ("gene") will be randomly changed.
@@ -245,7 +245,7 @@ DATA_SPLIT: Dict[str, float] = {
     "test": 0.2
 }
 HISTORICAL_DATA_START_TS: datetime = datetime(2025, 9, 20, 0, 0, 0)
-HISTORICAL_DATA_END_TS: datetime = datetime(2025, 10, 1, 0, 0, 0)
+HISTORICAL_DATA_END_TS: datetime = datetime(2025, 10, 5, 0, 0, 0)
 
 # --- Backtester Settings ---
 BACKTEST_INITIAL_CAPITAL: float = 100.0 # In SOL

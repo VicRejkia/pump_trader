@@ -29,7 +29,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from bot_logger import logger, setup_logging
-from GA_Optimizer.ga_config import (
+from config.ga_config import (
     OPTIMIZABLE_PARAMETERS, POPULATION_SIZE, NUM_GENERATIONS,
     CROSSOVER_PROBABILITY, MUTATION_PROBABILITY, FITNESS_METRIC, FITNESS_GOAL,
     DATA_SPLIT, BACKTEST_INITIAL_CAPITAL, RESULTS_DIR,
