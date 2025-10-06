@@ -1,3 +1,5 @@
+# path: config/config.py
+
 """
 Configuration constants and settings for the trading bot.
 """
@@ -20,11 +22,11 @@ DEFAULT_BUY_POOL = "auto"
 DEFAULT_SELL_POOL = "auto"
 
 # --- New Multi-Stage Sell Logic Configuration ---
-FIRST_SELL_PROFIT_MARGIN = 80.0             # Desired profit margin % on the *total initial investment* for the first TP sell
-FIRST_SELL_PERCENT = 35.0                   # % of *initial* tokens to sell at First TP (e.g., 50.0 for 50%)
-INITIAL_STOP_LOSS_PERCENT = 40.0            # Initial SL as % below buy price (e.g., 25.0 for -25%)
-TRAILING_STOP_LOSS_PERCENT = 10.0           # Trailing SL % drop from highest price *after* First TP (e.g., 15.0 for -15%)
-SECOND_TAKE_PROFIT_PERCENT = 450.0          # Second TP as % above buy price (e.g., 200.0 for +200%)
+FIRST_SELL_PROFIT_MARGIN = 110.0             # Desired profit margin % on the *total initial investment* for the first TP sell
+FIRST_SELL_PERCENT = 45.0                   # % of *initial* tokens to sell at First TP (e.g., 50.0 for 50%)
+INITIAL_STOP_LOSS_PERCENT = 29.0            # Initial SL as % below buy price (e.g., 25.0 for -25%)
+TRAILING_STOP_LOSS_PERCENT = 5.0           # Trailing SL % drop from highest price *after* First TP (e.g., 15.0 for -15%)
+SECOND_TAKE_PROFIT_PERCENT = 600.0          # Second TP as % above buy price (e.g., 200.0 for +200%)
 
 # --- Fees and Tips ---
 DEFAULT_BUY_FEE = 0.001                     # Fee for buying in SOL
@@ -51,38 +53,39 @@ PRICE_AVG_TRADE_COUNT = 15  # Number of trades for window if PRICE_WINDOW_TYPE i
 
 
 # Trading thresholds
-DEFAULT_RUGCHECK_SCORE_THRESHOLD = 501      # No trading if Rugcheck score is equal or above this threshold
+DEFAULT_RUGCHECK_SCORE_THRESHOLD = 901      # No trading if Rugcheck score is equal or above this threshold
 DEFAULT_SOCIAL_SCORE_THRESHOLD = 100        # No trading if Social score is equal or above this threshold
-DEFAULT_VOLUME_THRESHOLD = 40000            # Minimum volume threshold in USD
+DEFAULT_VOLUME_THRESHOLD = 2000            # Minimum volume threshold in USD
 MIN_MARKETCAP_THRESHOLD = 4000              # Minimum market cap threshold in USD to make emergency sell
-DEFAULT_MARKETCAP_THRESHOLD = 20000         # Minimum market cap threshold in USD to search for buy opportunities
-MIN_VOLATILITY = 0.18                       # Minimum volatility threshold in % to search for buy opportunities
+DEFAULT_MARKETCAP_THRESHOLD = 14000         # Minimum market cap threshold in USD to search for buy opportunities
+MIN_VOLATILITY = 0.11                       # Minimum volatility threshold in % to search for buy opportunities
 DEFAULT_TIME_INTERVAL = 10                 # Time interval for checking volatility, volume and marketcap in minutes
 MAX_TOKEN_COUNT_PER_CREATOR = 50            # Maximum number of tokens per creator to consider token as safe
 
 # --- Re-Buy Logic Configuration ---
 USE_TREND_REVERSAL_CONFIRMATION = True      # Master switch to enable/disable this feature
-STOP_LOSS_COOLDOWN_MINUTES = 1              # How long a token is ignored after a Stop Loss
+STOP_LOSS_COOLDOWN_MINUTES = 17              # How long a token is ignored after a Stop Loss
 MIN_CANDLE_DATA_FOR_INDICATORS = 30         # Min 5-second data points required to calculate indicators
-TREND_REVERSAL_RECENCY_HOURS = 6 
-TREND_REVERSAL_RSI_NEUTRAL_LEVEL = 45.0     # RSI level considered neutral for trend reversal
-INDICATOR_LOOKBACK_HOURS = 1                # Lookback period for indicators in hours
+TREND_REVERSAL_RECENCY_HOURS = 0.1 
+TREND_REVERSAL_RSI_NEUTRAL_LEVEL = 20.0     # RSI level considered neutral for trend reversal
+INDICATOR_LOOKBACK_HOURS = 1.7                # Lookback period for indicators in hours
 
 # Indicator Time Periods
-APPLY_TREND_REVERSAL_ON_SELL_REASONS = ["🛑 Stop Loss", "🆘 Emergency SL (MCap)", "🆘 Emergency SL (No Volume)", "↘️ Trailing SL", "🛡️ Breakeven SL", "manual_override"]
-RSI_PERIOD = 14
-BBANDS_PERIOD = 20
-BBANDS_STD_DEV = 2.0
-FAST_EMA_PERIOD = 9
-SLOW_EMA_PERIOD = 21
+# MODIFICATION: Emojis removed from this list to ensure robust string comparisons.
+APPLY_TREND_REVERSAL_ON_SELL_REASONS = ["Stop Loss", "Emergency SL (MCap)", "Emergency SL (No Volume)", "Trailing SL", "Breakeven SL", "manual_override", "manual_override_all"]
+RSI_PERIOD = 9, 
+BBANDS_PERIOD = 19
+BBANDS_STD_DEV = 1.5
+FAST_EMA_PERIOD = 11
+SLOW_EMA_PERIOD = 19
 
 # --- DexScreener Trend Reversal Configuration ---
-DEX_REVERSAL_LOOKBACK_MINUTES = 15          # How many minutes of snapshot data to analyze.
-DEX_REVERSAL_MIN_SNAPSHOTS = 3              # Minimum number of snapshots required within the lookback window.
-DEX_REVERSAL_MIN_LIQUIDITY_USD = 5000       # Minimum liquidity in USD for the token to be considered viable for a re-buy.
+DEX_REVERSAL_LOOKBACK_MINUTES = 20          # How many minutes of snapshot data to analyze.
+DEX_REVERSAL_MIN_SNAPSHOTS = 5              # Minimum number of snapshots required within the lookback window.
+DEX_REVERSAL_MIN_LIQUIDITY_USD = 3500       # Minimum liquidity in USD for the token to be considered viable for a re-buy.
 DEX_REVERSAL_MIN_PRICE_CHANGE_M5 = 2.0      # The m5 price change must be at least +2.0% to be counted as a positive signal.
-DEX_REVERSAL_MIN_BUY_SELL_RATIO = 1.5       # Ratio of buys to sells must be at least 1.5 for a strong buying pressure signal.
-DEX_REVERSAL_MIN_CONFIRMATIONS = 2          # How many snapshots must show strong buying pressure to confirm the trend.
+DEX_REVERSAL_MIN_BUY_SELL_RATIO = 2.4       # Ratio of buys to sells must be at least 1.5 for a strong buying pressure signal.
+DEX_REVERSAL_MIN_CONFIRMATIONS = 3          # How many snapshots must show strong buying pressure to confirm the trend.
 DEXSCREENER_MIGRATION_GRACE_PERIOD_MINUTES = 5 # How many minutes after migration to ignore stale volume checks. # <<< ADD THIS LINE
 
 

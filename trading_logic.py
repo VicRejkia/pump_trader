@@ -1,3 +1,5 @@
+# path: trading_logic.py
+
 """
 Handles trading logic including buy/sell decision making,
 emergency sell triggers, and portfolio management, supporting multiple trading modes.
@@ -26,30 +28,12 @@ class TradingManager:
     async def _is_trend_reversal_confirmed(self, mint: str) -> bool:
         """
         Checks if a token that was recently stopped out shows signs of a trend reversal.
-
-        This function is source-aware and applies different logic depending on whether
-        the token's data comes from Pump.fun or DexScreener.
-
-        - For PUMP tokens: It uses traditional time-series technical indicators (RSI,
-        BBands, EMA, VWAP) on high-frequency trade data.
-        - For DEXSCREENER tokens: It analyzes a series of recent API snapshots to
-        confirm liquidity health and sustained buying momentum.
-
-        Args:
-            mint (str): The mint address of the token to check.
-
-        Returns:
-            bool: True if the trend reversal is confirmed or if no check is needed,
-                False if the reversal is not confirmed, blocking a potential re-buy.
+        This function now exits silently if the token has no previous sell history.
         """
-        # Globally disable the check if the feature flag is turned off in the config.
         if not self.config.get('USE_TREND_REVERSAL_CONFIRMATION', False):
             return True
 
-        #logger.debug(f"Performing trend reversal confirmation for {mint}...")
-
-        # --- Step 1: Fetch Token Status and Last Sell Information ---
-        # Get the token's current data_source and details of its last sell event.
+        # --- FIX: Refactored logic to handle new tokens cleanly ---
         async with self.db.pool.acquire() as conn:
             token_record = await conn.fetchrow("""
                 SELECT t.data_source, p.reason, p.timestamp
@@ -63,28 +47,29 @@ class TradingManager:
 
         if not token_record:
             logger.warning(f":triangular_flag: Could not find token record for {mint} during trend reversal check.")
-            return True # Cannot block a buy if the token record is missing.
+            return True
 
-        data_source = token_record['data_source']
         last_sell_reason = token_record['reason']
         last_sell_timestamp = token_record['timestamp']
 
-        # --- Step 2: Determine if a Reversal Check is Required ---
-        # The check is only necessary for tokens sold recently due to specific reasons (e.g., Stop Loss).
-        requires_reversal_check = False
-        if last_sell_reason:
-            apply_reversal_on_reasons = self.config.get('APPLY_TREND_REVERSAL_ON_SELL_REASONS', [])
-            recency_hours = self.config.get('TREND_REVERSAL_RECENCY_HOURS', 6)
-            # Check if the sell reason is in the configured list and if it happened recently.
-            if any(reason_str in last_sell_reason for reason_str in apply_reversal_on_reasons):
-                if (datetime.now(timezone.utc) - last_sell_timestamp.replace(tzinfo=timezone.utc)) < timedelta(hours=recency_hours):
-                    requires_reversal_check = True
+        # If there's no sell history, no reversal check is possible or needed. Exit silently.
+        if not last_sell_reason or not last_sell_timestamp:
+            return True
 
-        if not requires_reversal_check:
-            logger.debug(f":thumbs_up: Trend reversal check not required for {mint} (Reason: '{last_sell_reason}', Source: {data_source}).")
-            return True # If no check is needed, do not block the buy.
+        # A sell history exists. Now, determine if the reason and recency require a check.
+        apply_reversal_on_reasons = self.config.get('APPLY_TREND_REVERSAL_ON_SELL_REASONS', [])
+        recency_hours = self.config.get('TREND_REVERSAL_RECENCY_HOURS', 6)
 
-        # --- Step 3: Execute Source-Specific Reversal Logic ---
+        is_relevant_reason = any(reason_str in last_sell_reason for reason_str in apply_reversal_on_reasons)
+        is_recent = (datetime.now(timezone.utc) - last_sell_timestamp.replace(tzinfo=timezone.utc)) < timedelta(hours=recency_hours)
+
+        # If the sell was not recent or for an irrelevant reason, log it and allow the buy.
+        if not (is_relevant_reason and is_recent):
+            logger.debug(f":thumbs_up: Trend reversal check not required for {mint} (Reason: '{last_sell_reason}', IsRecent: {is_recent}).")
+            return True
+
+        # --- A reversal check is confirmed to be necessary. Proceed with analysis. ---
+        data_source = token_record['data_source']
 
         # ==============================================================================
         #  LOGIC FOR MIGRATED TOKENS (DEXSCREENER)
@@ -98,32 +83,25 @@ class TradingManager:
                     conn
                 )
 
-            # Ensure we have enough data points to make a reliable decision.
             if len(snapshots) < self.config['DEX_REVERSAL_MIN_SNAPSHOTS']:
                 logger.info(f":triangular_flag: DEX Reversal FAILED for {mint}: Not enough recent data points (have {len(snapshots)}, need {self.config['DEX_REVERSAL_MIN_SNAPSHOTS']}).")
                 return False
 
             latest_snapshot = snapshots[0]
-
-            # Stage 1: Health Check - Ensure the token has sufficient liquidity.
             min_liquidity_usd = self.config['DEX_REVERSAL_MIN_LIQUIDITY_USD']
             if float(latest_snapshot['liquidity_usd']) < min_liquidity_usd:
                 logger.info(f":thumbs_down: DEX Reversal FAILED for {mint}: Liquidity (${latest_snapshot['liquidity_usd']:.2f}) is below threshold (${min_liquidity_usd:.2f}).")
                 return False
 
-            # Stage 2: Momentum Confirmation - Analyze recent snapshots for buying pressure.
             strong_buy_pressure_count = 0
             for snap in snapshots:
-                # Check for strong buy/sell ratio in the last 5 minutes.
                 buys = snap['buys_m5']
                 sells = snap['sells_m5']
-                # A strong signal is very high buy pressure (many buys to few/no sells).
                 if buys > 0 and (sells == 0 or (buys / sells) >= self.config['DEX_REVERSAL_MIN_BUY_SELL_RATIO']):
                     strong_buy_pressure_count += 1
 
             logger.debug(f":bookmark: DEX Reversal analysis for {mint}: Strong Buy Pressure Signals={strong_buy_pressure_count} found in the last {len(snapshots)} snapshots.")
 
-            # Final Decision: The trend is confirmed only if we see enough signals of buying pressure.
             min_confirmations = self.config['DEX_REVERSAL_MIN_CONFIRMATIONS']
             if strong_buy_pressure_count >= min_confirmations:
                 logger.info(f":bookmark: DEXScreener Trend Reversal CONFIRMED for {mint}. Strong buy pressure found in {strong_buy_pressure_count}/{len(snapshots)} recent snapshots.")
@@ -137,7 +115,6 @@ class TradingManager:
         # ==============================================================================
         elif data_source == 'PUMP':
             logger.info(f"Token {mint} is on Pump.fun. Performing indicator-based trend reversal check...")
-            # This is the original logic using TA on high-frequency trade data.
             start_date_hist = datetime.now(timezone.utc) - timedelta(hours=self.config.get('INDICATOR_LOOKBACK_HOURS', 1))
             end_date_hist = datetime.now(timezone.utc)
             historical_data = await self.db.get_historical_data_for_backtesting([mint], start_date_hist, end_date_hist)
@@ -151,11 +128,9 @@ class TradingManager:
             if df_with_indicators.empty or len(df_with_indicators) < self.config.get('MIN_CANDLE_DATA_FOR_INDICATORS', 30):
                 return False
 
-            # Perform the indicator checks (RSI, BBands, VWAP, EMA crossover).
             latest = df_with_indicators.iloc[-1]
             previous = df_with_indicators.iloc[-2] if len(df_with_indicators) >= 2 else latest
 
-            # Stage 1: Check for bottoming signals like RSI or Bollinger Band crossover.
             stage1_passed = False
             rsi_neutral_level = self.config.get('TREND_REVERSAL_RSI_NEUTRAL_LEVEL', 45)
             rsi_val = latest.get('RSI', float('nan'))
@@ -170,7 +145,6 @@ class TradingManager:
             if not stage1_passed:
                 return False
 
-            # Stage 2: Confirm the new trend with VWAP and EMA crossover.
             is_above_vwap = latest.get('Close', 0) > latest.get('VWAP', float('-inf'))
             is_ema_bullish = latest.get('EMA_fast', float('-inf')) > latest.get('EMA_slow', float('inf'))
 
@@ -180,7 +154,6 @@ class TradingManager:
             else:
                 return False
                 
-        # Fallback for any other unknown data source.
         else:
             logger.warning(f":triangular_flag: Unknown data_source '{data_source}' for {mint} in trend reversal check.")
             return False
@@ -412,7 +385,7 @@ class TradingManager:
                         await self.db.insert_portfolio_buy_record(
                             mint=mint, current_price=executed_price, market_cap_sol=market_cap_sol_at_trigger,
                             sol_base_amount=sol_to_spend_on_tokens, sol_price_usd=sol_price_usd if sol_price_usd else 0.0,
-                            total_investment_sol=total_sol_outflow_for_pnl, 
+                            total_sol_investment=total_sol_outflow_for_pnl, 
                             tokens_bought=tokens_bought_actual,
                             buy_fee=0, buy_tip=api_priority_fee, 
                             initial_stop_loss_price=initial_sl_price_live,
@@ -469,7 +442,7 @@ class TradingManager:
                 return None
 
             tokens_to_sell_on_trigger: float
-            if reason == "🥇 First TP": 
+            if reason == "First TP": 
                 tokens_to_sell_on_trigger = initial_tokens_portfolio * sell_percentage
                 tokens_to_sell_on_trigger = min(tokens_to_sell_on_trigger, remaining_tokens_portfolio)
             else: 
@@ -497,7 +470,7 @@ class TradingManager:
                 await self.db.update_portfolio_entry_after_sell(position_id_to_update, sim_new_remaining_tokens, sim_new_status, conn)
                 sim_sell_settings = {
                     "mode": "simulate", "reason": reason, **sell_trigger_values,
-                    "sell_percentage_of_initial_request": sell_percentage * 100 if reason == "🥇 First TP" else (sell_percentage * 100.0 if reason in ["🛑 Stop Loss", "🛡️ Breakeven SL", "🎯 Second TP", "↘️ Trailing SL", "🆘 Emergency SL (MCap)", "manual_override"] else 0.0),
+                    "sell_percentage_of_initial_request": sell_percentage * 100 if reason == "First TP" else (sell_percentage * 100.0 if reason in ["Stop Loss", "Breakeven SL", "Second TP", "Trailing SL", "Emergency SL (MCap)", "manual_override"] else 0.0),
                     "actual_tokens_sold_as_fraction_of_remaining_at_sell_time": (tokens_to_sell_on_trigger / remaining_tokens_portfolio) if remaining_tokens_portfolio > 0 else 0,
                     "sell_fee_config": self.config['DEFAULT_SELL_FEE'],
                     "sell_tip_config": self.config['DEFAULT_SELL_TIP'],
@@ -531,8 +504,9 @@ class TradingManager:
                 log_msg = format_sell_order_log(mint=mint, token_name=token_name, market_cap_sol=market_cap_sol_at_trigger, profit=sim_profit, reason=reason, sol_price=sol_price_usd)
                 logger.info(log_msg)
                 if self.config.get('PLAY_SELL_SOUND'):
-                    if reason in ["🛑 Stop Loss", "🛡️ Breakeven SL", "🆘 Emergency SL (MCap)", "manual_override"]: asyncio.create_task(play_sell_sl_sound_async())
-                    elif reason in ["🥇 First TP", "🎯 Second TP", "↘️ Trailing SL"]: asyncio.create_task(play_sell_tp_sound_async())
+                    # MODIFICATION: Use substring check with clean reason strings
+                    if any(sl_reason in reason for sl_reason in ["Stop Loss", "Breakeven SL", "Emergency SL", "manual_override"]): asyncio.create_task(play_sell_sl_sound_async())
+                    elif any(tp_reason in reason for tp_reason in ["First TP", "Second TP", "Trailing SL"]): asyncio.create_task(play_sell_tp_sound_async())
                 if self.config.get('TELEGRAM_INTERACTION'):
                     telegram_msg = format_sell_order_log(mint=mint, token_name=token_name, market_cap_sol=market_cap_sol_at_trigger, profit=sim_profit, reason=reason, sol_price=sol_price_usd, for_telegram=True)
                     asyncio.create_task(send_telegram_message(telegram_msg))
@@ -600,7 +574,7 @@ class TradingManager:
                                 "api_executed_price": executed_price_live, "api_sol_received": sol_received_from_api,
                                 "api_priority_fee_sent": api_priority_fee, "api_slippage_sent": api_slippage,
                                 **sell_trigger_values,
-                                "sell_percentage_of_initial_request": sell_percentage * 100 if reason == "🥇 First TP" else (sell_percentage * 100.0 if reason in ["🛑 Stop Loss", "🛡️ Breakeven SL", "🎯 Second TP", "↘️ Trailing SL", "🆘 Emergency SL (MCap)", "manual_override"] else 0.0),
+                                "sell_percentage_of_initial_request": sell_percentage * 100 if reason == "First TP" else (sell_percentage * 100.0 if reason in ["Stop Loss", "Breakeven SL", "Second TP", "Trailing SL", "Emergency SL (MCap)", "manual_override"] else 0.0),
                                 "actual_tokens_sold_as_fraction_of_remaining_at_sell_time": (tokens_to_sell_on_trigger / remaining_tokens_portfolio) if remaining_tokens_portfolio > 0 else 0,
                                 "sell_fee_config": self.config['DEFAULT_SELL_FEE'],
                                 "sell_tip_config": self.config['DEFAULT_SELL_TIP'],
@@ -637,8 +611,9 @@ class TradingManager:
                             log_msg = format_sell_order_log(mint=mint, token_name=token_name, market_cap_sol=market_cap_sol_at_trigger, profit=profit_live, reason=reason, sol_price=sol_price_usd)
                             logger.info(f"[{trading_mode.upper()}] {log_msg}")
                             if self.config.get('PLAY_SELL_SOUND'):
-                                if reason in ["🛑 Stop Loss", "🛡️ Breakeven SL", "🆘 Emergency SL (MCap)", "manual_override"]: asyncio.create_task(play_sell_sl_sound_async())
-                                elif reason in ["🥇 First TP", "🎯 Second TP", "↘️ Trailing SL"]: asyncio.create_task(play_sell_tp_sound_async())
+                                # MODIFICATION: Use substring check with clean reason strings
+                                if any(sl_reason in reason for sl_reason in ["Stop Loss", "Breakeven SL", "Emergency SL", "manual_override"]): asyncio.create_task(play_sell_sl_sound_async())
+                                elif any(tp_reason in reason for tp_reason in ["First TP", "Second TP", "Trailing SL"]): asyncio.create_task(play_sell_tp_sound_async())
                             if self.config.get('TELEGRAM_INTERACTION'):
                                 telegram_msg = format_sell_order_log(mint=mint, token_name=token_name, market_cap_sol=market_cap_sol_at_trigger, profit=profit_live, reason=reason, sol_price=sol_price_usd, for_telegram=True)
                                 telegram_msg += f"\nMode: {trading_mode.upper()}\nSignature: {signature}"
@@ -686,36 +661,46 @@ class TradingManager:
                         pos_id = position['id']
                         mint = position['mint']
 
-                        # Fetch the token's data source to apply source-specific rules
                         token_data_source = position['data_source']
 
-                        # The data source check is GONE. This one call handles everything
-                        # because get_price_and_market_cap_for_decision now uses the unified live view.
                         price_data = await self.db.get_price_and_market_cap_for_decision(mint, self.config, conn)
                         current_price_to_use = price_data.get('price')
                         current_market_cap_sol_for_log = price_data.get('market_cap')
-                        logger.debug(f":abacus: Checking sell for {mint} (ID: {pos_id}) - Current Price: {current_price_to_use}, Market Cap (SOL): {current_market_cap_sol_for_log} on {token_data_source}")
+                        
+                        # --- MODIFICATION START: Calculate and format PnL for logging ---
+                        unrealized_pnl_str = ""
+                        if current_price_to_use is not None and current_price_to_use > 0:
+                            try:
+                                remaining_tokens = float(position['remaining_tokens'])
+                                initial_tokens = float(position['initial_tokens'])
+                                total_investment_sol = float(position['total_investment_sol'])
 
-                        # ======================================================================
-                        # --- NEW LOGIC: The "No Volume" Kill Switch for Migrated Tokens ---
-                        # This block is the definitive fix for the problem you identified.
-                        # ======================================================================
+                                if initial_tokens > 1e-9 and remaining_tokens > 1e-9:
+                                    cost_basis_per_token = total_investment_sol / initial_tokens
+                                    cost_basis_remaining = cost_basis_per_token * remaining_tokens
+                                    current_value = remaining_tokens * current_price_to_use
+                                    unrealized_pnl_sol = current_value - cost_basis_remaining
+                                    profit_percentage = (unrealized_pnl_sol / cost_basis_remaining) * 100 if cost_basis_remaining > 1e-9 else 0.0
+                                    
+                                    pnl_emoji = "📈" if unrealized_pnl_sol >= 0 else "📉"
+                                    unrealized_pnl_str = f", PnL: {unrealized_pnl_sol:+.4f} SOL ({profit_percentage:+.2f}%) {pnl_emoji}"
+                            except (TypeError, ValueError, ZeroDivisionError):
+                                unrealized_pnl_str = ", PnL: error"
+                        
+                        logger.debug(f":abacus: Checking sell for {mint} (ID: {pos_id}) - Price: {current_price_to_use}, MCap: {current_market_cap_sol_for_log} SOL ({token_data_source}){unrealized_pnl_str}")
+                        # --- MODIFICATION END ---
+                        
                         if token_data_source == 'DEXSCREENER' and current_price_to_use is None:
-                            sell_reason = "🆘 Emergency SL (No Volume)"
+                            sell_reason = "Emergency SL (No Volume)"
                             logger.info(f"{sell_reason} for migrated token {mint} (ID: {pos_id}). Price is invalid due to zero volume on DexScreener.")
                             
-                            # For the transaction record, we must use a fallback price. The original buy price is a safe,
-                            # conservative choice. The actual SOL received will be whatever dust, if any, is recovered.
                             fallback_price_for_record = float(position['buy_price']) 
                             
                             await self.execute_sell(
                                 conn, mint, fallback_price_for_record, 0, # Market cap is effectively 0
                                 sell_reason, 1.0, pos_id, {"reason": "Zero volume on DexScreener"}
                             )
-                            continue # IMPORTANT: Skip to the next position after selling.
-                        # ======================================================================
-                        # --- END OF NEW LOGIC ---
-                        # ======================================================================
+                            continue 
 
 
                         if isinstance(current_market_cap_sol_for_log, str): 
@@ -726,7 +711,7 @@ class TradingManager:
                             logger.warning(f"Skipping price-based sell checks for {mint} (ID: {pos_id}) due to invalid current price: {current_price_to_use} by method '{self.config.get('PRICE_DETERMINATION_METHOD')}'.")
                             if current_market_cap_sol_for_log is not None and current_market_cap_sol_for_log > 0 and \
                                (current_market_cap_sol_for_log * sol_price_usd) < self.config['MIN_MARKETCAP_THRESHOLD']:
-                                sell_reason_mc = "🆘 Emergency SL (MCap)"
+                                sell_reason_mc = "Emergency SL (MCap)"
                                 logger.info(f"{sell_reason_mc} for {mint} (ID: {pos_id}) due to low MCap. MCap_USD: {(current_market_cap_sol_for_log * sol_price_usd):.2f}")
                                 trigger_val_mc = {"current_market_cap_usd_at_trigger": (current_market_cap_sol_for_log * sol_price_usd)}
                                 fallback_price_for_mcap_sl = float(position['buy_price']) 
@@ -758,25 +743,25 @@ class TradingManager:
                         trigger_values_for_log = {}
 
                         if current_price_to_use <= active_stop_loss_price:
-                            sell_reason = "🛑 Stop Loss" if not first_tp_hit else "🛡️ Breakeven SL"
+                            sell_reason = "Stop Loss" if not first_tp_hit else "Breakeven SL"
                             sell_all = True
                             trigger_values_for_log = {"stop_loss_price_threshold": active_stop_loss_price}
                         elif current_price_to_use >= second_tp_price:
-                            sell_reason = "🎯 Second TP"
+                            sell_reason = "Second TP"
                             sell_all = True
                             trigger_values_for_log = {"second_tp_price_threshold": second_tp_price}
                         elif not first_tp_hit and current_price_to_use >= initial_tp_price:
-                            sell_reason = "🥇 First TP"
+                            sell_reason = "First TP"
                             sell_partial = True
                             sell_percentage_of_initial = self.config['FIRST_SELL_PERCENT'] / 100.0
                             trigger_values_for_log = {"first_tp_price_threshold": initial_tp_price}
                         elif first_tp_hit and trailing_sl_price > 0 and current_price_to_use <= trailing_sl_price:
-                            sell_reason = "↘️ Trailing SL"
+                            sell_reason = "Trailing SL"
                             sell_all = True
                             trigger_values_for_log = {"trailing_sl_price_threshold": trailing_sl_price, "highest_price_at_trigger": highest_price_since_buy}
                         elif current_market_cap_sol_for_log is not None and current_market_cap_sol_for_log > 0 and \
                            (current_market_cap_sol_for_log * sol_price_usd) < self.config['MIN_MARKETCAP_THRESHOLD']:
-                            sell_reason = "🆘 Emergency SL (MCap)"
+                            sell_reason = "Emergency SL (MCap)"
                             sell_all = True
                             trigger_values_for_log = {"current_market_cap_usd_at_trigger": (current_market_cap_sol_for_log * sol_price_usd), "min_mcap_threshold_config": self.config['MIN_MARKETCAP_THRESHOLD']}
                         elif current_market_cap_sol_for_log is not None and current_market_cap_sol_for_log > 0 and position.get('initial_market_cap_sol') is not None and float(position.get('initial_market_cap_sol')) > 0:
@@ -785,7 +770,7 @@ class TradingManager:
                             mc_sell_trigger_level = initial_mc * (1 - mc_drop_threshold_percent / 100.0)
                             
                             if current_market_cap_sol_for_log < mc_sell_trigger_level:
-                                sell_reason = "🆘 Emergency SL (MC Drop%)"
+                                sell_reason = "Emergency SL (MC Drop%)"
                                 sell_all = True
                                 trigger_values_for_log = {
                                     "current_market_cap_sol_at_trigger": current_market_cap_sol_for_log,
@@ -822,7 +807,7 @@ class TradingManager:
                                 pos_id, trigger_values_for_log
                             )
                             
-                            if profit_from_sell is not None and sell_reason == "🥇 First TP":
+                            if profit_from_sell is not None and sell_reason == "First TP":
                                 await self.db.mark_first_tp_hit_and_adjust_sl(pos_id, buy_price, conn)
                                 logger.info(f"📈 Marked First TP as hit for {mint} (ID: {pos_id}) and SL adjusted to breakeven ({buy_price:.9f}).")
                             

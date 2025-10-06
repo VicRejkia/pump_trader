@@ -353,7 +353,7 @@ class TradingBot:
         await asyncio.gather(*self.tasks, return_exceptions=True)
 
         if self.db_client and self.db_client.pool:
-            await self.db_client.backup_creator_wallets()
+            #await self.db_client.backup_creator_wallets()
             await self.db_client.close()
         log_info(":checkered_flag: Bot shutdown complete.")
 
@@ -375,7 +375,7 @@ class TradingBot:
             if self.backup: await self.db_client.backup_db(True)
             if self.cleanup: await self.db_client.cleanup_db(True)
             
-            await self.db_client.init_db()
+            #await self.db_client.init_db()
 
         except Exception as db_err:
             log_critical(f"CRITICAL: Failed database setup: {db_err}", exc_info=True)

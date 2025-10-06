@@ -1,3 +1,5 @@
+# path: utils.py
+
 """
 Helper functions and utilities for the trading bot.
 Includes URL validation, audio alerts, and log formatting.
@@ -125,6 +127,16 @@ def format_sell_order_log(mint: str, token_name: str, market_cap_sol: float, pro
     profit_sign = "📈" if profit >= 0 else "📉"
     profit_text = f"{profit:+.6f} SOL" # Always show sign
 
+    # MODIFICATION: Add emojis for display based on the clean reason string
+    display_reason = reason # Default
+    if "First TP" in reason: display_reason = f"🥇 {reason}"
+    elif "Second TP" in reason: display_reason = f"🎯 {reason}"
+    elif "Trailing SL" in reason: display_reason = f"↘️ {reason}"
+    elif "Stop Loss" in reason: display_reason = f"🛑 {reason}"
+    elif "Breakeven SL" in reason: display_reason = f"🛡️ {reason}"
+    elif "Emergency SL" in reason: display_reason = f"🆘 {reason}"
+    # 'manual_override' and other reasons are left as-is for clarity
+
     # URL construction
     base_url = "https://neo.bullx.io/terminal?chainId=1399811149&address="
     url = f"{base_url}{mint}"
@@ -154,7 +166,7 @@ def format_sell_order_log(mint: str, token_name: str, market_cap_sol: float, pro
     display_name = f"{token_name} ({formatted_mint})" if token_name else mint
 
     return (
-        f"*** {profit_sign} SELL Order ({reason}) {profit_sign} ***\n"
+        f"*** {profit_sign} SELL Order ({display_reason}) {profit_sign} ***\n"
         f"│ Token: {display_name}\n"
         f"│ Market Cap: {market_cap_text}\n"
         f"│ Profit: {profit_text}\n"
