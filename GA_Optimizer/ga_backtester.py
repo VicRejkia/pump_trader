@@ -333,5 +333,10 @@ def run_backtest_sync(
 
     # --- 6. Return Performance Metrics ---
     metrics = calculate_performance_metrics(trade_history, initial_capital, final_value, start_ts=start_ts_data, end_ts=end_ts_data, simulation_end_reason=simulation_end_reason)
-    metrics.update({"parameters": parameters, "initial_capital": initial_capital, "final_portfolio_value": final_value})
+    metrics.update({
+        "parameters": parameters,
+        "initial_capital": initial_capital, 
+        "final_portfolio_value": final_value,
+        "trade_history": trade_history
+    })
     return metrics

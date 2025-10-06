@@ -1,4 +1,4 @@
-# FILE: ga_optimizer.py
+# FILE: GA_Optimizer/ga_optimizer.py
 
 """
 Genetic Algorithm (GA) based Optimizer for Tuning Trading Bot Parameters.
@@ -19,7 +19,8 @@ from datetime import datetime, timezone
 import time
 import json
 import random
-from multiprocessing import Manager, freeze_support
+import uuid
+from multiprocessing import Manager, freeze_support, Process, Queue
 from typing import List, Dict, Any, Optional, Union
 
 # --- Project Modules ---
@@ -34,27 +35,50 @@ from GA_Optimizer.ga_config import (
     DATA_SPLIT, BACKTEST_INITIAL_CAPITAL, RESULTS_DIR,
     HISTORICAL_DATA_START_TS, HISTORICAL_DATA_END_TS, MULTIPROCESSING_CORES,
     KEEP_ELITISM, PARENT_SELECTION_TYPE, CROSSOVER_TYPE, MUTATION_TYPE,
-    GA_FITNESS_SAMPLE_SIZE
+    GA_FITNESS_SAMPLE_SIZE, DETAILED_LOG_FILENAME
 )
 from database_handler import DatabaseClient
 from GA_Optimizer.ga_backtester import run_backtest_sync
 from utils import load_and_split_data, NpEncoder
+from GA_Optimizer.ga_ingestion import run_ingestion
 
+
+def log_writer_process(log_queue: Queue, log_file_path: str):
+    """
+    A dedicated process that listens for log records on a queue
+    and writes them to a file. This is a process-safe way to handle
+    logging from multiple parallel workers.
+    """
+    try:
+        with open(log_file_path, 'w') as f:
+            while True:
+                # Blocks until an item is available in the queue.
+                record = log_queue.get()
+                # A 'None' value is used as a sentinel to signal termination.
+                if record is None:
+                    break
+                # Write the dictionary record as a JSON line.
+                f.write(json.dumps(record, cls=NpEncoder) + '\n')
+    except Exception as e:
+        # If the logger process itself fails, print to stdout.
+        print(f"Log writer process encountered an error: {e}")
 
 # --- Fitness Function (Executed in Parallel) ---
 def fitness_func_main_process(ga_instance, solution: np.ndarray, solution_idx: int) -> float:
     """
-    Fitness function called by PyGAD for each solution. It accesses shared
-    data attached to the ga_instance object to run the backtest.
+    Fitness function called by PyGAD for each solution in the population. It
+    runs the backtest and logs a detailed, flattened record for every simulation.
     """
     # Define the worst possible fitness score to return in case of errors.
     worst_fitness = -float('inf') if FITNESS_GOAL == 'max' else float('inf')
 
-    # Access the shared data for this worker process.
+    # Access the shared data attached to the ga_instance object.
     data_for_backtest = dict(ga_instance.historical_data_sets_shared.get('train', {}))
     token_lifespans = dict(ga_instance.token_lifespans_shared)
     dexscreener_snapshots = dict(ga_instance.dexscreener_snapshots_shared)
     indicator_cache = ga_instance.indicator_cache
+    log_queue = ga_instance.log_queue
+    run_id = ga_instance.run_id
 
     if not data_for_backtest:
         return worst_fitness
@@ -76,16 +100,48 @@ def fitness_func_main_process(ga_instance, solution: np.ndarray, solution_idx: i
         df_data, lifespan, snapshots = data_for_backtest.get(mint), token_lifespans.get(mint), dexscreener_snapshots.get(mint)
         max_timestamp = lifespan['end_ts'] if lifespan else None
         parameters['mint'] = mint
+        
+        # Prepare a structured log record for this specific simulation.
+        generation = ga_instance.generations_completed
+        log_record = {
+            "run_id": run_id,
+            "generation": generation,
+            "solution_idx": solution_idx,
+            "mint_tested": mint,
+            "parameters": parameters,
+            "status": "success", # Assumed success, updated on failure.
+        }
+
         try:
+            # Execute the backtest simulation.
             result = run_backtest_sync(parameters, df_data, BACKTEST_INITIAL_CAPITAL, max_timestamp, snapshots, indicator_cache)
+            
             if isinstance(result, dict):
+                # Separate the detailed trade history from the summary metrics.
+                trade_history = result.pop("trade_history", [])
+                # Flatten the summary metrics into the main log record.
+                log_record.update(result)
+                log_record["trade_history"] = trade_history
+                
+                # Get the specific metric used for fitness evaluation.
                 fitness = result.get(FITNESS_METRIC)
                 if fitness is not None and pd.notna(fitness) and np.isfinite(fitness):
                     fitness_values.append(float(fitness))
-        except Exception as e:
-            logger.error(f"Backtest failed for Sol {solution_idx}, Mint {mint}: {e}", exc_info=False)
+            else:
+                # Handle cases where the backtest fails to return a valid result.
+                log_record["status"] = "failed"
+                log_record["error_message"] = "Backtest did not return a valid result dictionary."
 
-    # Return the average fitness across all evaluated tokens.
+        except Exception as e:
+            # Log any exceptions that occur during the backtest.
+            logger.error(f"Backtest failed for Sol {solution_idx}, Mint {mint}: {e}", exc_info=False)
+            log_record["status"] = "failed"
+            log_record["error_message"] = str(e)
+
+        # Send the complete record (success or fail) to the logger process.
+        log_queue.put(log_record)
+
+    # Return the average fitness across all evaluated tokens for this solution.
     if not fitness_values:
         return worst_fitness
     average_fitness = np.mean(fitness_values)
@@ -132,7 +188,7 @@ async def evaluate_solution(parameters: Dict, data_set_key: str, historical_data
             snapshots_for_mint = dexscreener_snapshots.get(mint)
             parameters['mint'] = mint
             try:
-                # Direct synchronous call is appropriate here as this function is not parallelized.
+                # Direct synchronous call is appropriate here as this is not parallelized.
                 result = run_backtest_sync(parameters, df_data, initial_capital, max_timestamp, snapshots_for_mint, cache_for_eval)
                 results_raw.append(result)
             except Exception as e:
@@ -154,7 +210,7 @@ async def evaluate_solution(parameters: Dict, data_set_key: str, historical_data
     return {"data_set": data_set_key, "average_final_portfolio_value": avg_final_value, "average_total_pnl": avg_pnl, "overall_win_rate_percent": overall_win_rate, "total_trades_executed": total_trades_agg}
 
 # --- Main Execution Logic (Async) ---
-async def main_async_logic(shared_data_dict, shared_lifespan_dict, shared_snapshot_dict, shared_cache):
+async def main_async_logic(shared_data_dict, shared_lifespan_dict, shared_snapshot_dict, shared_cache, log_queue):
     """Main async function to set up and run the GA optimization."""
     setup_logging(logger_name="ga_optimizer")
     db_client = None
@@ -174,6 +230,10 @@ async def main_async_logic(shared_data_dict, shared_lifespan_dict, shared_snapsh
         shared_snapshot_dict.update(dexscreener_snapshots)
         logger.info("Data loaded into shared dictionaries for multiprocessing.")
 
+        # Generate a unique ID for this entire optimization run.
+        optimization_run_id = str(uuid.uuid4())
+        logger.info(f"Starting Optimization Run ID: {optimization_run_id}")
+
         # Prepare the gene space for PyGAD based on the defined optimizable parameters.
         gene_space = [{'low': p['low'], 'high': p['high']} if 'low' in p else p['values'] for p in OPTIMIZABLE_PARAMETERS]
         num_processes = os.cpu_count() - 2 if MULTIPROCESSING_CORES == "auto" and os.cpu_count() and os.cpu_count() > 2 else max(1, int(MULTIPROCESSING_CORES))
@@ -181,11 +241,13 @@ async def main_async_logic(shared_data_dict, shared_lifespan_dict, shared_snapsh
         # Initialize the PyGAD instance with all GA parameters.
         ga_instance = pygad.GA(num_generations=NUM_GENERATIONS, num_parents_mating=max(2, int(POPULATION_SIZE * 0.3)), fitness_func=fitness_func_main_process, sol_per_pop=POPULATION_SIZE, num_genes=len(OPTIMIZABLE_PARAMETERS), gene_space=gene_space, parent_selection_type=PARENT_SELECTION_TYPE, crossover_type=CROSSOVER_TYPE, crossover_probability=CROSSOVER_PROBABILITY, mutation_type=MUTATION_TYPE, mutation_probability=MUTATION_PROBABILITY, keep_elitism=max(0, KEEP_ELITISM), on_generation=on_generation, parallel_processing=['process', num_processes], stop_criteria="saturate_15")
         
-        # Attach the shared data dictionaries to the GA instance so they are accessible in the fitness function.
+        # Attach the shared data dictionaries and IDs to the GA instance so they are accessible in the fitness function.
         ga_instance.historical_data_sets_shared = shared_data_dict
         ga_instance.token_lifespans_shared = shared_lifespan_dict
         ga_instance.dexscreener_snapshots_shared = shared_snapshot_dict
         ga_instance.indicator_cache = shared_cache
+        ga_instance.log_queue = log_queue
+        ga_instance.run_id = optimization_run_id
 
         # Start the GA optimization process.
         logger.info(f"--- Starting Genetic Algorithm Optimization ({num_processes} processes) ---")
@@ -224,4 +286,38 @@ if __name__ == "__main__":
     # Use a multiprocessing Manager to create shared data structures that can be
     # safely accessed by all parallel worker processes.
     with Manager() as manager:
-        asyncio.run(main_async_logic(manager.dict(), manager.dict(), manager.dict(), manager.dict()))
+        # 1. Create the shared queue for logging.
+        log_queue = manager.Queue()
+
+        # 2. Define the log file path and ensure the directory exists.
+        os.makedirs(RESULTS_DIR, exist_ok=True)
+        log_file_path = os.path.join(RESULTS_DIR, DETAILED_LOG_FILENAME)
+        
+        # 3. Create and start the dedicated log writer process.
+        log_process = Process(target=log_writer_process, args=(log_queue, log_file_path))
+        log_process.start()
+        logger.info(f"Dedicated logging process started. Detailed logs will be saved to '{log_file_path}'.")
+
+        try:
+            # 4. Create all other shared data structures.
+            shared_data = manager.dict()
+            shared_lifespans = manager.dict()
+            shared_snapshots = manager.dict()
+            shared_cache = manager.dict()
+            # 5. Run the main GA logic, passing the log queue to it.
+            asyncio.run(main_async_logic(shared_data, shared_lifespans, shared_snapshots, shared_cache, log_queue))
+        finally:
+            # 6. Once the main logic is complete, signal the logger to terminate.
+            logger.info("Main logic finished. Shutting down logger process...")
+            log_queue.put(None) # Send the sentinel value.
+            log_process.join()  # Wait for the process to finish writing and exit cleanly.
+            logger.info("Logger process has been shut down.")
+
+         # --- AUTOMATIC DATABASE INGESTION ---
+        logger.info("--- Starting Automatic Database Ingestion ---")
+        try:
+            # Run the ingestion function now that the optimizer and logger are finished.
+            asyncio.run(run_ingestion(log_file_path))
+            logger.info("--- Database Ingestion Completed Successfully ---")
+        except Exception as e:
+            logger.error(f"An error occurred during automatic database ingestion: {e}", exc_info=True)

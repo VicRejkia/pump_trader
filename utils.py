@@ -502,7 +502,7 @@ def calculate_trend_indicators(df: pd.DataFrame, config: dict) -> pd.DataFrame:
         
         df_ta.dropna(inplace=True)
         
-        logger.debug(f"Successfully calculated indicators. Resulting data shape: {df_ta.shape}")
+        #logger.debug(f"Successfully calculated indicators. Resulting data shape: {df_ta.shape}")
         return df_ta
 
     except Exception as e:
