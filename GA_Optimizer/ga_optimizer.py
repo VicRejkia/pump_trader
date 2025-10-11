@@ -29,6 +29,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from bot_logger import logger, setup_logging
+import config.config as bot_config 
 from config.ga_config import (
     OPTIMIZABLE_PARAMETERS, POPULATION_SIZE, NUM_GENERATIONS,
     CROSSOVER_PROBABILITY, MUTATION_PROBABILITY, FITNESS_METRIC, FITNESS_GOAL,
@@ -210,6 +211,12 @@ async def evaluate_solution(parameters: Dict, data_set_key: str, historical_data
     return {"data_set": data_set_key, "average_final_portfolio_value": avg_final_value, "average_total_pnl": avg_pnl, "overall_win_rate_percent": overall_win_rate, "total_trades_executed": total_trades_agg}
 
 # --- Main Execution Logic (Async) ---
+# [MODIFIED] Add this new import at the top of your ga_optimizer.py file
+import config.config as bot_config
+
+# ... (rest of your existing imports and functions) ...
+
+# --- Main Execution Logic (Async) ---
 async def main_async_logic(shared_data_dict, shared_lifespan_dict, shared_snapshot_dict, shared_cache, log_queue):
     """Main async function to set up and run the GA optimization."""
     setup_logging(logger_name="ga_optimizer")
@@ -223,25 +230,84 @@ async def main_async_logic(shared_data_dict, shared_lifespan_dict, shared_snapsh
         if loaded_results is None:
             logger.critical("Failed to load or split data. Exiting."); return
         
-        # Unpack data and load it into shared dictionaries for multiprocessing.
         loaded_data_sets, token_lifespans, dexscreener_snapshots = loaded_results
         shared_data_dict.update(loaded_data_sets)
         shared_lifespan_dict.update(token_lifespans)
         shared_snapshot_dict.update(dexscreener_snapshots)
         logger.info("Data loaded into shared dictionaries for multiprocessing.")
 
-        # Generate a unique ID for this entire optimization run.
         optimization_run_id = str(uuid.uuid4())
         logger.info(f"Starting Optimization Run ID: {optimization_run_id}")
 
-        # Prepare the gene space for PyGAD based on the defined optimizable parameters.
         gene_space = [{'low': p['low'], 'high': p['high']} if 'low' in p else p['values'] for p in OPTIMIZABLE_PARAMETERS]
         num_processes = os.cpu_count() - 2 if MULTIPROCESSING_CORES == "auto" and os.cpu_count() and os.cpu_count() > 2 else max(1, int(MULTIPROCESSING_CORES))
         
-        # Initialize the PyGAD instance with all GA parameters.
-        ga_instance = pygad.GA(num_generations=NUM_GENERATIONS, num_parents_mating=max(2, int(POPULATION_SIZE * 0.3)), fitness_func=fitness_func_main_process, sol_per_pop=POPULATION_SIZE, num_genes=len(OPTIMIZABLE_PARAMETERS), gene_space=gene_space, parent_selection_type=PARENT_SELECTION_TYPE, crossover_type=CROSSOVER_TYPE, crossover_probability=CROSSOVER_PROBABILITY, mutation_type=MUTATION_TYPE, mutation_probability=MUTATION_PROBABILITY, keep_elitism=max(0, KEEP_ELITISM), on_generation=on_generation, parallel_processing=['process', num_processes], stop_criteria="saturate_15")
+        logger.info("Building a seeded initial population around default config values...")
+        initial_population = []
         
-        # Attach the shared data dictionaries and IDs to the GA instance so they are accessible in the fitness function.
+        seed_solution = []
+        for param in OPTIMIZABLE_PARAMETERS:
+            param_name = param['name']
+            if hasattr(bot_config, param_name):
+                value = getattr(bot_config, param_name)
+                
+                # --- [FIX #1] Handle single-element tuples from typos ---
+                if isinstance(value, tuple) and len(value) == 1:
+                    value = value[0]
+                
+                # --- [FIX #2] Convert booleans to integers for PyGAD ---
+                if isinstance(value, bool):
+                    value = int(value)
+                
+                seed_solution.append(value)
+            else:
+                # Fallback for parameters not in the main config
+                if 'values' in param:
+                    seed_solution.append(param['values'][len(param['values']) // 2])
+                else:
+                    seed_solution.append((param.get('low', 0) + param.get('high', 0)) / 2)
+        initial_population.append(seed_solution)
+
+        # Create variations of the seed solution
+        num_to_generate = POPULATION_SIZE - 1
+        for i in range(num_to_generate):
+            new_solution = list(seed_solution)
+            num_mutations = max(1, int(len(new_solution) * 0.20))
+            for _ in range(num_mutations):
+                gene_idx = random.randrange(len(new_solution))
+                param_space = OPTIMIZABLE_PARAMETERS[gene_idx]
+                if 'values' in param_space:
+                    new_gene = random.choice(param_space['values'])
+                else:
+                    low, high = param_space.get('low', 0), param_space.get('high', 1)
+                    new_gene = random.uniform(low, high)
+                
+                # The type conversion here already handles casting our new random gene to int/float,
+                # which correctly handles the boolean-as-int parameter.
+                new_solution[gene_idx] = param_space['type'](new_gene)
+            initial_population.append(new_solution)
+            
+        logger.info(f"Seeded population of {len(initial_population)} individuals created.")
+        
+        ga_instance = pygad.GA(
+            num_generations=NUM_GENERATIONS, 
+            num_parents_mating=max(2, int(POPULATION_SIZE * 0.3)), 
+            fitness_func=fitness_func_main_process, 
+            sol_per_pop=POPULATION_SIZE, 
+            num_genes=len(OPTIMIZABLE_PARAMETERS), 
+            initial_population=initial_population,
+            gene_space=gene_space, 
+            parent_selection_type=PARENT_SELECTION_TYPE, 
+            crossover_type=CROSSOVER_TYPE, 
+            crossover_probability=CROSSOVER_PROBABILITY, 
+            mutation_type=MUTATION_TYPE, 
+            mutation_probability=MUTATION_PROBABILITY, 
+            keep_elitism=max(0, KEEP_ELITISM), 
+            on_generation=on_generation, 
+            parallel_processing=['process', num_processes], 
+            stop_criteria="saturate_15"
+        )
+        
         ga_instance.historical_data_sets_shared = shared_data_dict
         ga_instance.token_lifespans_shared = shared_lifespan_dict
         ga_instance.dexscreener_snapshots_shared = shared_snapshot_dict
@@ -249,13 +315,11 @@ async def main_async_logic(shared_data_dict, shared_lifespan_dict, shared_snapsh
         ga_instance.log_queue = log_queue
         ga_instance.run_id = optimization_run_id
 
-        # Start the GA optimization process.
         logger.info(f"--- Starting Genetic Algorithm Optimization ({num_processes} processes) ---")
         start_time = time.time()
         ga_instance.run()
         logger.info(f"--- GA Optimization Finished (Duration: {(time.time() - start_time)/60:.2f} minutes) ---")
 
-        # After the GA finishes, evaluate the best solution on the validation and test sets.
         if hasattr(ga_instance, 'best_solution_generation') and ga_instance.best_solution_generation != -1:
             solution, solution_fitness, _ = ga_instance.best_solution()
             best_params = {p['name']: p['type'](solution[i]) for i, p in enumerate(OPTIMIZABLE_PARAMETERS)}
@@ -265,7 +329,6 @@ async def main_async_logic(shared_data_dict, shared_lifespan_dict, shared_snapsh
             validation_metrics = await evaluate_solution(best_params, 'validation', loaded_data_sets, token_lifespans, dexscreener_snapshots, BACKTEST_INITIAL_CAPITAL, eval_cache)
             test_metrics = await evaluate_solution(best_params, 'test', loaded_data_sets, token_lifespans, dexscreener_snapshots, BACKTEST_INITIAL_CAPITAL, eval_cache)
             
-            # Save the final results and fitness plot to the results directory.
             os.makedirs(RESULTS_DIR, exist_ok=True)
             results_filename = os.path.join(RESULTS_DIR, f"ga_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
             with open(results_filename, 'w') as f:
@@ -278,7 +341,7 @@ async def main_async_logic(shared_data_dict, shared_lifespan_dict, shared_snapsh
     finally:
         if db_client: await db_client.close()
         logger.info("Optimizer async logic finished.")
-
+        
 # --- Entry Point Guard for Multiprocessing ---
 if __name__ == "__main__":
     # `freeze_support()` is required for multiprocessing to work correctly on Windows.

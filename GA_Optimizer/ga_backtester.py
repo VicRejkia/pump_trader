@@ -210,11 +210,23 @@ def run_backtest_sync(
                 trailing_sl_price = pos['highest_price'] * (1.0 - trailing_stop_loss_percent / 100.0) if pos['first_tp_hit'] else 0.0
                 sell_reason, sell_all, sell_partial, sell_percentage = None, False, False, 0.0
 
+                # --- GET INITIAL MARKET CAP FROM POSITION DATA ---
+                # We need to store this at buy time to make the check possible.
+                # (We will add this to the active_position dict in the buy logic below)
+                initial_mcap_sol = pos.get('initial_market_cap_sol', 0.0)
+                mc_drop_threshold_percent = parameters.get('MC_DROP_THRESHOLD', 5.0) # Get this from GA params or config
+                
                 if price <= pos['stop_loss_price']: sell_reason, sell_all, sell_percentage = ("🛑 Stop Loss" if not pos['first_tp_hit'] else "🛡️ Breakeven SL"), True, 1.0
                 elif price >= pos['second_tp_price']: sell_reason, sell_all, sell_percentage = "Second TP", True, 1.0
                 elif not pos['first_tp_hit'] and price >= pos['initial_tp_price']: sell_reason, sell_partial, sell_percentage = "First TP", True, first_sell_percent / 100.0
                 elif pos['first_tp_hit'] and price <= trailing_sl_price: sell_reason, sell_all, sell_percentage = "↘️ Trailing SL", True, 1.0
                 elif market_cap_sol < min_emergency_mcap_usd and not sell_reason: sell_reason, sell_all, sell_percentage = "🆘 Emergency SL (MCap)", True, 1.0
+                
+                # --- [NEW LOGIC TO ADD] ---
+                elif initial_mcap_sol > 0 and market_cap_sol < (initial_mcap_sol * (1 - mc_drop_threshold_percent / 100.0)) and not sell_reason:
+                    sell_reason, sell_all, sell_percentage = "🆘 Emergency SL (MC Drop%)", True, 1.0
+                # --- [END OF NEW LOGIC] ---
+
                 elif is_migrated_token and volume <= 0 and not sell_reason: sell_reason, sell_all, sell_percentage = "🆘 Emergency SL (No Volume)", True, 1.0
 
                 if sell_reason:
@@ -310,7 +322,19 @@ def run_backtest_sync(
                         initial_tp = (gross_needed_tp1 / tokens_tp1) if tokens_tp1 > 1e-9 else float('inf')
                         second_tp = price * (1.0 + second_take_profit_percent / 100.0)
                         current_sol -= total_investment
-                        active_position = {'buy_price': price, 'initial_tokens': tokens_bought, 'remaining_tokens': tokens_bought, 'total_investment_sol': total_investment, 'stop_loss_price': initial_sl, 'initial_tp_price': initial_tp, 'second_tp_price': second_tp, 'highest_price': price, 'first_tp_hit': False, 'entry_timestamp': timestamp}
+                        active_position = {
+                            'buy_price': price, 
+                            'initial_tokens': tokens_bought, 
+                            'remaining_tokens': tokens_bought, 
+                            'total_investment_sol': total_investment, 
+                            'stop_loss_price': initial_sl, 
+                            'initial_tp_price': initial_tp, 
+                            'second_tp_price': second_tp, 
+                            'highest_price': price, 
+                            'first_tp_hit': False, 
+                            'entry_timestamp': timestamp,
+                            'initial_market_cap_sol': market_cap_sol # Store the market cap at the time of buy
+                        }
                         trade_history.append({'timestamp': timestamp, 'type': 'buy', 'price': price, 'amount_sol': total_investment, 'amount_tokens': tokens_bought, 'buy_fee': buy_fee, 'buy_tip': buy_tip, 'mint': mint_addr})
                         if mint_addr in simulated_active_cooldowns: del simulated_active_cooldowns[mint_addr]
         except (KeyError, ValueError) as e:

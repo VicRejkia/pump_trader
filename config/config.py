@@ -73,7 +73,7 @@ INDICATOR_LOOKBACK_HOURS = 1.7                # Lookback period for indicators i
 # Indicator Time Periods
 # MODIFICATION: Emojis removed from this list to ensure robust string comparisons.
 APPLY_TREND_REVERSAL_ON_SELL_REASONS = ["Stop Loss", "Emergency SL (MCap)", "Emergency SL (No Volume)", "Trailing SL", "Breakeven SL", "manual_override", "manual_override_all"]
-RSI_PERIOD = 9, 
+RSI_PERIOD = 9 
 BBANDS_PERIOD = 19
 BBANDS_STD_DEV = 1.5
 FAST_EMA_PERIOD = 11

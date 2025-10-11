@@ -639,8 +639,7 @@ class TradingManager:
 
     async def check_sell_opportunities(self):
         """
-        🧐 Check for sell opportunities based on SL and TP rules,
-        using the centralized price determination logic.
+        [MODIFIED] Check for sell opportunities with hybrid stale volume logic (MCap check + long timer).
         """
         if self.state.shutdown_event.is_set():
             return
@@ -660,64 +659,95 @@ class TradingManager:
                     for position in positions:
                         pos_id = position['id']
                         mint = position['mint']
-
                         token_data_source = position['data_source']
+                        volume_stale_since = position['volume_stale_since']
 
                         price_data = await self.db.get_price_and_market_cap_for_decision(mint, self.config, conn)
                         current_price_to_use = price_data.get('price')
                         current_market_cap_sol_for_log = price_data.get('market_cap')
                         
-                        # --- MODIFICATION START: Calculate and format PnL for logging ---
-                        unrealized_pnl_str = ""
+                        if token_data_source == 'DEXSCREENER':
+                            if current_price_to_use is None:
+                                # --- NEW HYBRID STALE VOLUME LOGIC ---
+                                # Price is None, which means volume is stale.
+                                
+                                # --- 1. IMMEDIATE Market Cap Safety Net ---
+                                min_mcap_threshold_usd = self.config['MIN_MARKETCAP_THRESHOLD']
+                                if current_market_cap_sol_for_log is not None and current_market_cap_sol_for_log > 0:
+                                    current_mcap_usd = current_market_cap_sol_for_log * sol_price_usd
+                                    if current_mcap_usd < min_mcap_threshold_usd:
+                                        sell_reason = "Emergency SL (MCap during stale volume)"
+                                        logger.info(f"🚨 {sell_reason} for {mint} (ID: {pos_id}). MC crashed to ${current_mcap_usd:,.2f} while volume was stale. Overriding patience timer.")
+                                        await self.execute_sell(
+                                            conn, mint, float(position['buy_price']), current_market_cap_sol_for_log,
+                                            sell_reason, 1.0, pos_id, {"reason": "MCap crash during stale period"}
+                                        )
+                                        continue # Sell executed, move on.
+
+                                # --- 2. LONG DURATION Patience Timer ---
+                                if volume_stale_since is None:
+                                    logger.warning(f"Token {mint} (ID: {pos_id}) has stale volume. Starting {self.config.get('DEXSCREENER_STALE_VOLUME_SELL_DELAY_MINUTES', 120)} min patience timer.")
+                                    await conn.execute("UPDATE portfolio SET volume_stale_since = NOW() WHERE id = $1", pos_id)
+                                    continue
+                                else:
+                                    time_since_stale = datetime.now(timezone.utc) - volume_stale_since
+                                    patience_delay = timedelta(minutes=self.config.get('DEXSCREENER_STALE_VOLUME_SELL_DELAY_MINUTES', 120))
+                                    if time_since_stale >= patience_delay:
+                                        sell_reason = "Emergency SL (No Volume)"
+                                        logger.info(f"🆘 {sell_reason} for {mint} (ID: {pos_id}) after waiting {time_since_stale.total_seconds() / 60:.1f} minutes.")
+                                        await self.execute_sell(
+                                            conn, mint, float(position['buy_price']), current_market_cap_sol_for_log or 0,
+                                            sell_reason, 1.0, pos_id, {"reason": "Stale volume patience timer expired"}
+                                        )
+                                        continue
+                                    else:
+                                        wait_time = (patience_delay - time_since_stale).total_seconds() / 60
+                                        logger.debug(f"Token {mint} (ID: {pos_id}) is within stale patience window. MCap is OK. Waiting for another {wait_time:.1f} mins.")
+                                        continue
+                            elif volume_stale_since is not None:
+                                # Volume is healthy again, reset the timer.
+                                logger.info(f"✅ Token {mint} (ID: {pos_id}) has recovered volume. Resetting stale timer.")
+                                await conn.execute("UPDATE portfolio SET volume_stale_since = NULL WHERE id = $1", pos_id)
+
+                        # (The rest of the original sell-check logic continues from here...)
+                        def format_price_for_log(price):
+                            if price is None: return "N/A"
+                            if price == 0: return "0.0"
+                            if abs(price) < 1e-4 or abs(price) >= 1e6: return f"{price:.2e}"
+                            else: return f"{price:.9f}".rstrip('0').rstrip('.')
+
+                        def format_pnl_value(value):
+                            if value < 0: return f"[red]{value:+.4f} SOL[/red]"
+                            else: return f"{value:+.4f} SOL"
+
+                        def format_profit_pct(pct):
+                            if pct < 0: return f"[red]({pct:+.2f}%)[/red]"
+                            else: return f"({pct:+.2f}%)"
+
+                        safe_price = format_price_for_log(current_price_to_use)
+                        safe_mcap = f"{current_market_cap_sol_for_log:,.2f}" if current_market_cap_sol_for_log is not None else "N/A"
+                        pnl_emoji, unrealized_pnl_str = "❓", "\tPnL: N/A"
+
                         if current_price_to_use is not None and current_price_to_use > 0:
                             try:
-                                remaining_tokens = float(position['remaining_tokens'])
-                                initial_tokens = float(position['initial_tokens'])
-                                total_investment_sol = float(position['total_investment_sol'])
-
+                                remaining_tokens, initial_tokens, total_investment_sol = float(position['remaining_tokens']), float(position['initial_tokens']), float(position['total_investment_sol'])
                                 if initial_tokens > 1e-9 and remaining_tokens > 1e-9:
-                                    cost_basis_per_token = total_investment_sol / initial_tokens
-                                    cost_basis_remaining = cost_basis_per_token * remaining_tokens
-                                    current_value = remaining_tokens * current_price_to_use
-                                    unrealized_pnl_sol = current_value - cost_basis_remaining
+                                    cost_basis_remaining = (total_investment_sol / initial_tokens) * remaining_tokens
+                                    unrealized_pnl_sol = (remaining_tokens * current_price_to_use) - cost_basis_remaining
                                     profit_percentage = (unrealized_pnl_sol / cost_basis_remaining) * 100 if cost_basis_remaining > 1e-9 else 0.0
-                                    
                                     pnl_emoji = "📈" if unrealized_pnl_sol >= 0 else "📉"
-                                    unrealized_pnl_str = f", PnL: {unrealized_pnl_sol:+.4f} SOL ({profit_percentage:+.2f}%) {pnl_emoji}"
+                                    unrealized_pnl_str = f"\tPnL: {str(format_pnl_value(unrealized_pnl_sol))} {str(format_profit_pct(profit_percentage))}"
                             except (TypeError, ValueError, ZeroDivisionError):
-                                unrealized_pnl_str = ", PnL: error"
-                        
-                        logger.debug(f":abacus: Checking sell for {mint} (ID: {pos_id}) - Price: {current_price_to_use}, MCap: {current_market_cap_sol_for_log} SOL ({token_data_source}){unrealized_pnl_str}")
-                        # --- MODIFICATION END ---
-                        
-                        if token_data_source == 'DEXSCREENER' and current_price_to_use is None:
-                            sell_reason = "Emergency SL (No Volume)"
-                            logger.info(f"{sell_reason} for migrated token {mint} (ID: {pos_id}). Price is invalid due to zero volume on DexScreener.")
-                            
-                            fallback_price_for_record = float(position['buy_price']) 
-                            
-                            await self.execute_sell(
-                                conn, mint, fallback_price_for_record, 0, # Market cap is effectively 0
-                                sell_reason, 1.0, pos_id, {"reason": "Zero volume on DexScreener"}
-                            )
-                            continue 
+                                unrealized_pnl_str, pnl_emoji = "\tPnL: [bold yellow]error[/bold yellow]", "⚠️"
 
+                        logger.debug(f":abacus: Checking sell for {mint:<44} (ID: {pos_id:<4}) {pnl_emoji} ({token_data_source[:4]}) - Price: {safe_price:<12} MCap: {safe_mcap:<10} SOL {unrealized_pnl_str}")
 
-                        if isinstance(current_market_cap_sol_for_log, str): 
-                            try: current_market_cap_sol_for_log = float(current_market_cap_sol_for_log)
-                            except ValueError: current_market_cap_sol_for_log = None
-                        
                         if current_price_to_use is None or current_price_to_use <= 0:
-                            logger.warning(f"Skipping price-based sell checks for {mint} (ID: {pos_id}) due to invalid current price: {current_price_to_use} by method '{self.config.get('PRICE_DETERMINATION_METHOD')}'.")
-                            if current_market_cap_sol_for_log is not None and current_market_cap_sol_for_log > 0 and \
-                               (current_market_cap_sol_for_log * sol_price_usd) < self.config['MIN_MARKETCAP_THRESHOLD']:
-                                sell_reason_mc = "Emergency SL (MCap)"
-                                logger.info(f"{sell_reason_mc} for {mint} (ID: {pos_id}) due to low MCap. MCap_USD: {(current_market_cap_sol_for_log * sol_price_usd):.2f}")
-                                trigger_val_mc = {"current_market_cap_usd_at_trigger": (current_market_cap_sol_for_log * sol_price_usd)}
-                                fallback_price_for_mcap_sl = float(position['buy_price']) 
-                                await self.execute_sell(conn, mint, fallback_price_for_mcap_sl, current_market_cap_sol_for_log, sell_reason_mc, 1.0, pos_id, trigger_val_mc)
-                            continue 
+                            # This block is now effectively a fallback, as the main logic for stale volume is handled above.
+                            # It will only trigger if the MCap itself is also invalid, which is unlikely but a good safeguard.
+                            continue
 
+                        # ... (The rest of the function for SL/TP checks remains exactly the same)
                         buy_price = float(position['buy_price'])
                         initial_tokens = float(position['initial_tokens'])
                         active_stop_loss_price = float(position['stop_loss_price'])

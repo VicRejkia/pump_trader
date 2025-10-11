@@ -26,7 +26,7 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
     },
     {
         "name": "INITIAL_STOP_LOSS_PERCENT",
-        "values": list(range(4, 56, 2)),    # Range: 8, 9, 10, ..., 50
+        "values": list(range(10, 41, 2)),    # Range: 8, 9, 10, ..., 50
         "type": float
     },
     {
@@ -178,7 +178,7 @@ POPULATION_SIZE: int = 150
 # Example & Effect:
 #   - 50 (Fewer): Finishes quickly but solutions may not be fully optimized.
 #   - 1000 (Larger): A very deep search, allowing for significant improvement over time. Expect long run times.
-NUM_GENERATIONS: int = 500
+NUM_GENERATIONS: int = 50
 
 # CROSSOVER_PROBABILITY
 # Explanation: The probability that two successful "parent" strategies will combine
@@ -196,7 +196,7 @@ CROSSOVER_PROBABILITY: float = 0.8
 # Example & Effect:
 #   - 0.1 (Lower): A more focused search that refines existing strategies. Risks getting stuck.
 #   - 0.7 (Higher): A more chaotic and exploratory search. Good for finding unique solutions but can slow down refinement.
-MUTATION_PROBABILITY: float = 0.6
+MUTATION_PROBABILITY: float = 0.2
 
 # KEEP_ELITISM
 # Explanation: The number of the absolute best strategies from a generation that are
@@ -236,7 +236,7 @@ FITNESS_GOAL: str = "max" # Maximize the metric
 # Example & Effect:
 #  - 0: Disables sampling, uses all available training tokens. Most accurate but slowest.
 #  - 30: Evaluates each strategy against 30 random tokens from the training set. A good balance of speed and accuracy.
-GA_FITNESS_SAMPLE_SIZE: Union[int, None] = 0
+GA_FITNESS_SAMPLE_SIZE: Union[int, None] = 30
 
 # --- Data Settings ---
 DATA_SPLIT: Dict[str, float] = {
@@ -245,7 +245,7 @@ DATA_SPLIT: Dict[str, float] = {
     "test": 0.2
 }
 HISTORICAL_DATA_START_TS: datetime = datetime(2025, 9, 20, 0, 0, 0)
-HISTORICAL_DATA_END_TS: datetime = datetime(2025, 10, 5, 0, 0, 0)
+HISTORICAL_DATA_END_TS: datetime = datetime(2025, 9, 25, 0, 0, 0)
 
 # --- Backtester Settings ---
 BACKTEST_INITIAL_CAPITAL: float = 100.0 # In SOL

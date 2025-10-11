@@ -3,6 +3,8 @@
 # correct parameter for stretching dataframes to the full container width.
 # Make sure to have 'psycopg2-binary' installed: pip install psycopg2-binary
 
+# run it with: streamlit run GA_Optimizer/ga_dashboard.py
+
 import os
 from pathlib import Path
 import json

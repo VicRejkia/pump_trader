@@ -432,8 +432,8 @@ class DatabaseClient:
             LEFT JOIN VolatilityData AS vd ON t.mint = vd.mint
             WHERE
                 t.is_active = TRUE AND
-                rc.score IS NOT NULL AND rc.score < $4 AND
-                t.socials_score IS NOT NULL AND t.socials_score < $5 AND
+                rc.score IS NOT NULL AND rc.score <= $4 AND
+                t.socials_score IS NOT NULL AND t.socials_score <= $5 AND
                 (COALESCE(rm.volume_recent_sol, 0) * $1) >= $2 AND
                 (ltd.market_cap_sol * $1) >= $3 AND
                 COALESCE(vd.volatility, 0) >= $7 AND
@@ -454,7 +454,7 @@ class DatabaseClient:
             SELECT p.id, p.mint, p.price AS buy_price, p.initial_tokens, p.remaining_tokens, p.total_investment_sol,
                 p.stop_loss_price, p.highest_price, p.initial_tp_price, p.second_tp_price, p.first_tp_hit,
                 t.marketCapSol as initial_market_cap_sol, t.data_source,
-                p.timestamp
+                p.timestamp, p.volume_stale_since
             FROM portfolio p
             JOIN tokens t ON p.mint = t.mint
             WHERE p.status = 'active' AND p.tx_type = 'buy'
