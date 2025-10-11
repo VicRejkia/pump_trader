@@ -408,12 +408,6 @@ class SocialsProcessor:
     async def _refresh_queue(self):
         """Refreshes the queue with tokens that have never had a socials check."""
         try:
-            # This clear operation is the source of the race condition.
-            # We will remove it and check attempts before putting items on the queue.
-            # while not self.queue.empty():
-            #     try: self.queue.get_nowait(); self.queue.task_done()
-            #     except asyncio.QueueEmpty: break
-            
             async with self.db_client.pool.acquire() as conn:
                 rows = await conn.fetch("""
                     SELECT t.mint, COALESCE(SUM(tr.sol_amount), 0) AS volume
@@ -429,8 +423,8 @@ class SocialsProcessor:
                 for row in rows:
                     mint = row["mint"]
                     # --- START: FIX ---
-                    # Only add the token to the queue if it hasn't already reached max fetch attempts.
-                    if self.fetch_attempts.get(mint, 0) < MAX_FETCH_ATTEMPTS:
+                    # Only add the token to the queue if it isn't already being processed or in a retry cycle.
+                    if mint not in self.fetch_attempts:
                         priority = -float(row["volume"] or Decimal(0))
                         await self.queue.put((priority, mint))
                         added_count += 1
@@ -459,6 +453,15 @@ class SocialsProcessor:
 
                 priority, mint = await asyncio.wait_for(self.queue.get(), timeout=1.0)
                 
+                # <<< FIX: ADD THIS BLOCK TO HANDLE DEPRIORITIZED TOKENS >>>
+                # Check if the token has already maxed out its attempts from a previous cycle.
+                # If so, just discard it and don't process it again.
+                if self.fetch_attempts.get(mint, 0) >= MAX_FETCH_ATTEMPTS:
+                    logger.debug(f"🗑️ Discarding deprioritized token {mint} that has already reached max attempts.")
+                    self.queue.task_done()
+                    continue
+                # <<< END OF FIX >>>
+                
                 try:
                     async with self.db_client.pool.acquire() as conn:
                         token_status = await conn.fetchrow("SELECT is_active FROM tokens WHERE mint = $1", mint)
@@ -484,17 +487,22 @@ class SocialsProcessor:
                                 break
                     
                     if process_status is True:
+                        # Success, clear any previous attempt history
                         self.fetch_attempts.pop(mint, None)
                     elif is_permanent_failure:
+                        # Permanent failure, log it and prevent all future retries
                         logger.warning(f" socials Socials Check for {mint} failed with permanent error: '{process_status}'. No more retries.")
                         self.fetch_attempts[mint] = MAX_FETCH_ATTEMPTS
                     else: 
+                        # Transient failure, perform retry logic
                         current_attempts = self.fetch_attempts.get(mint, 0) + 1
                         self.fetch_attempts[mint] = current_attempts
                         logger.warning(f" socials Socials Check for {mint} failed with transient error ('{process_status}'). Attempt {current_attempts}/{MAX_FETCH_ATTEMPTS}.")
                         if current_attempts < MAX_FETCH_ATTEMPTS:
+                            # Re-queue with original priority for another attempt
                             await self.queue.put((priority, mint))
                         else:
+                            # Max attempts reached, deprioritize it
                             await self.queue.put((DEPRIORITIZED_PRIORITY, mint))
                             logger.warning(f"🚩 Max socials check attempts ({MAX_FETCH_ATTEMPTS}) reached for {mint}. Deprioritizing.")
                     # --- END: REFINED ERROR HANDLING ---

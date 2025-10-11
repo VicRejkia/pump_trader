@@ -345,7 +345,7 @@ class DatabaseClient:
 
     async def find_trading_opportunities(self, sol_price: float, volume_threshold: float, marketcap_threshold: float, rugcheck_threshold: int, social_score_threshold: int, time_interval_minutes: int, min_volatility: float): 
         """
-        Identifies potential token buy opportunities.
+        [MODIFIED] Identifies potential token buy opportunities, ensuring only the latest rugcheck score is used.
         - Volume Calculation is source-aware:
             - PUMP: SUMs all individual trade sol_amounts.
             - DEXSCREENER: Takes only the SINGLE LATEST volume snapshot to prevent duplicate counting.
@@ -363,6 +363,17 @@ class DatabaseClient:
                 FROM v_unified_market_ticks_live -- Uses LIVE view, which is correct
                 WHERE timestamp >= NOW() - ($6::text || ' minutes')::interval
             ),
+            -- START OF FIX: Add a CTE to get only the latest rugcheck score per mint
+            LatestRugcheck AS (
+                SELECT
+                    mint,
+                    score,
+                    tokenMeta_name,
+                    tokenMeta_symbol,
+                    ROW_NUMBER() OVER(PARTITION BY mint ORDER BY last_checked DESC) as rn
+                FROM rugcheck
+            ),
+            -- END OF FIX
             RecentMetrics AS (
                 -- THIS CTE IS NOW SOURCE-AWARE TO PREVENT DOUBLE-COUNTING VOLUME
                 SELECT
@@ -423,16 +434,17 @@ class DatabaseClient:
                 t.mint, ltd.price_sol AS latest_price, ltd.market_cap_sol AS latest_market_cap_sol,
                 COALESCE(rm.volume_recent_sol, 0) AS volume_in_interval,
                 COALESCE(vd.volatility, 0) AS volatility_in_interval,
-                rc.tokenMeta_name AS name, rc.tokenMeta_symbol AS symbol,
-                rc.score AS rugcheck_score, t.socials_score
+                lrc.tokenMeta_name AS name, lrc.tokenMeta_symbol AS symbol, -- FIX: Use new CTE alias
+                lrc.score AS rugcheck_score, t.socials_score -- FIX: Use new CTE alias
             FROM tokens AS t
-            INNER JOIN rugcheck AS rc ON t.mint = rc.mint
+            -- FIX: Join with the new LatestRugcheck CTE instead of the raw table
+            INNER JOIN LatestRugcheck AS lrc ON t.mint = lrc.mint AND lrc.rn = 1
             INNER JOIN LatestTickData AS ltd ON t.mint = ltd.mint AND ltd.rn = 1
             LEFT JOIN RecentMetrics AS rm ON t.mint = rm.mint
             LEFT JOIN VolatilityData AS vd ON t.mint = vd.mint
             WHERE
                 t.is_active = TRUE AND
-                rc.score IS NOT NULL AND rc.score <= $4 AND
+                lrc.score IS NOT NULL AND lrc.score <= $4 AND -- FIX: Use new CTE alias
                 t.socials_score IS NOT NULL AND t.socials_score <= $5 AND
                 (COALESCE(rm.volume_recent_sol, 0) * $1) >= $2 AND
                 (ltd.market_cap_sol * $1) >= $3 AND

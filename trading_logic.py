@@ -61,7 +61,7 @@ class TradingManager:
         recency_hours = self.config.get('TREND_REVERSAL_RECENCY_HOURS', 6)
 
         is_relevant_reason = any(reason_str in last_sell_reason for reason_str in apply_reversal_on_reasons)
-        is_recent = (datetime.now(timezone.utc) - last_sell_timestamp.replace(tzinfo=timezone.utc)) < timedelta(hours=recency_hours)
+        is_recent = (datetime.now(timezone.utc) - last_sell_timestamp.astimezone(timezone.utc)) < timedelta(hours=recency_hours)
 
         # If the sell was not recent or for an irrelevant reason, log it and allow the buy.
         if not (is_relevant_reason and is_recent):
