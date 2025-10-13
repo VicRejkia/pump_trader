@@ -77,8 +77,14 @@ async def ingest_log_file_bulk(pool: asyncpg.Pool, file_path: str):
 
     # 1. Prepare and Ingest `ga_runs`
     runs_df = df[['run_id']].drop_duplicates().dropna()
+    run_records = runs_df.to_records(index=False)
+    
     async with pool.acquire() as conn:
-        await conn.copy_records_to_table('ga_runs', records=runs_df.to_records(index=False), columns=['run_id'], if_exists='ignore')
+        async with conn.transaction():
+            await conn.executemany(
+                "INSERT INTO ga_runs (run_id) VALUES ($1) ON CONFLICT (run_id) DO NOTHING",
+                run_records
+            )
     print(f"Ingested {len(runs_df)} unique runs.")
 
     # 2. Prepare and Ingest `ga_solutions`
@@ -86,7 +92,6 @@ async def ingest_log_file_bulk(pool: asyncpg.Pool, file_path: str):
     solutions_df['parameters'] = solutions_df['parameters'].apply(json.dumps)
     
     async with pool.acquire() as conn:
-        # We need the returned IDs to link backtests
         stmt = await conn.prepare("""
             INSERT INTO ga_solutions (run_id, generation, solution_idx, parameters)
             VALUES ($1, $2, $3, $4)
@@ -95,23 +100,42 @@ async def ingest_log_file_bulk(pool: asyncpg.Pool, file_path: str):
             RETURNING id, run_id, generation, solution_idx
         """)
         
-        # Fetch IDs and map them back to our DataFrame
         returned_ids = await stmt.fetchmany(solutions_df.to_records(index=False))
         id_map_df = pd.DataFrame(returned_ids, columns=['solution_id', 'run_id', 'generation', 'solution_idx'])
+        
+        # --- FIX 1: Robustly merge and cast solution_id ---
         df = pd.merge(df, id_map_df, on=['run_id', 'generation', 'solution_idx'], how='left')
+        if df['solution_id'].isnull().any():
+            print(f"Warning: {df['solution_id'].isnull().sum()} records failed to match a solution_id and will be dropped.")
+            df.dropna(subset=['solution_id'], inplace=True)
+        df['solution_id'] = df['solution_id'].astype(int)
+        # --- END FIX 1 ---
+
     print(f"Ingested {len(solutions_df)} unique solutions.")
 
     # 3. Prepare and Ingest `ga_backtests`
     backtests_df = df.drop_duplicates(subset=['solution_id', 'mint_tested']).copy()
+    
+    if 'error_message' not in backtests_df.columns:
+        backtests_df['error_message'] = None
+
     backtest_cols = [
         'solution_id', 'mint_tested', 'status', 'error_message',
         'final_portfolio_value', 'total_pnl', 'total_return_pct', 'win_rate',
         'profit_factor', 'max_drawdown', 'total_trades',
         'simulation_start_ts', 'simulation_end_ts', 'simulation_end_reason'
     ]
-    # Sanitize and parse data before insertion
-    for col in ['final_portfolio_value', 'total_pnl', 'total_return_pct', 'win_rate', 'profit_factor', 'max_drawdown']:
-        backtests_df[col] = backtests_df[col].apply(sanitize_metric)
+    
+    # --- FIX 2: Sanitize ALL numeric metrics, including `total_trades` ---
+    numeric_metric_cols = [
+        'final_portfolio_value', 'total_pnl', 'total_return_pct', 'win_rate',
+        'profit_factor', 'max_drawdown', 'total_trades'
+    ]
+    for col in numeric_metric_cols:
+        if col in backtests_df.columns:
+            backtests_df[col] = backtests_df[col].apply(sanitize_metric)
+    # --- END FIX 2 ---
+    
     backtests_df['simulation_start_ts'] = backtests_df['simulation_start_ts'].apply(parse_iso_datetime)
     backtests_df['simulation_end_ts'] = backtests_df['simulation_end_ts'].apply(parse_iso_datetime)
     
@@ -124,22 +148,33 @@ async def ingest_log_file_bulk(pool: asyncpg.Pool, file_path: str):
         """)
         returned_bt_ids = await stmt_bt.fetchmany(backtests_df[backtest_cols].to_records(index=False))
         bt_id_map_df = pd.DataFrame(returned_bt_ids, columns=['backtest_id', 'solution_id', 'mint_tested'])
+        
+        if not bt_id_map_df.empty:
+            bt_id_map_df['backtest_id'] = bt_id_map_df['backtest_id'].astype(int)
+        
         df = pd.merge(df, bt_id_map_df, on=['solution_id', 'mint_tested'], how='left')
     print(f"Ingested {len(backtests_df)} unique backtests.")
 
     # 4. Prepare and Ingest `ga_trades`
-    df.dropna(subset=['backtest_id'], inplace=True)
+    # --- FIX 3: Robustly handle and cast backtest_id ---
+    if df['backtest_id'].isnull().any():
+        print(f"Warning: {df['backtest_id'].isnull().sum()} records could not be matched to a backtest_id and will be dropped before trade ingestion.")
+        df.dropna(subset=['backtest_id'], inplace=True)
+
+    if df.empty:
+        print("No valid records remain after filtering. No trades to ingest.")
+        return # Exit if no data is left
+
     df['backtest_id'] = df['backtest_id'].astype(int)
+    # --- END FIX 3 ---
     
     trades_df = df[df['trade_history'].apply(lambda x: isinstance(x, list) and len(x) > 0)][['backtest_id', 'trade_history']]
     if not trades_df.empty:
-        # Explode the trade history list into separate rows
         trades_exploded = trades_df.explode('trade_history').reset_index(drop=True)
         trade_details = pd.json_normalize(trades_exploded['trade_history'])
         final_trades_df = pd.concat([trades_exploded[['backtest_id']], trade_details], axis=1)
 
-        # Clean and prepare data for bulk copy
-        final_trades_df.rename(columns={'timestamp': 'trade_timestamp'}, inplace=True) # Avoid name collision
+        final_trades_df.rename(columns={'timestamp': 'trade_timestamp'}, inplace=True)
         trade_cols_to_ingest = ['backtest_id', 'trade_timestamp', 'type', 'price', 'amount_sol', 'amount_tokens', 'reason', 'pnl']
         final_trades_df = final_trades_df.reindex(columns=trade_cols_to_ingest)
         
@@ -148,11 +183,11 @@ async def ingest_log_file_bulk(pool: asyncpg.Pool, file_path: str):
             final_trades_df[col] = final_trades_df[col].apply(sanitize_metric)
 
         async with pool.acquire() as conn:
-            # Clear old trades for the affected backtests before inserting new ones
             affected_backtest_ids = final_trades_df['backtest_id'].unique().tolist()
-            await conn.execute("DELETE FROM ga_trades WHERE backtest_id = ANY($1::int[])", affected_backtest_ids)
+            # It's safer to delete only from the backtests we are about to re-insert trades for
+            if affected_backtest_ids:
+                await conn.execute("DELETE FROM ga_trades WHERE backtest_id = ANY($1::int[])", affected_backtest_ids)
             
-            # Bulk insert new trades
             await conn.copy_records_to_table('ga_trades', records=final_trades_df.to_records(index=False), columns=['backtest_id', 'timestamp', 'type', 'price', 'amount_sol', 'amount_tokens', 'reason', 'pnl'])
         print(f"Ingested {len(final_trades_df)} trades for {len(affected_backtest_ids)} backtests.")
 
@@ -162,12 +197,17 @@ async def run_ingestion(log_file_path: str):
         print("Error: Database credentials are not fully configured. Skipping ingestion.")
         return
     
-    pool = await asyncpg.create_pool(**DB_CONFIG)
+    pool = None
     try:
+        pool = await asyncpg.create_pool(**DB_CONFIG)
         await ingest_log_file_bulk(pool, log_file_path)
+    except Exception as e:
+        print(f"A critical error occurred during the ingestion process: {e}")
     finally:
-        await pool.close()
+        if pool:
+            await pool.close()
     print("Database ingestion process finished.")
+
 
 if __name__ == "__main__":
     print("Running ingestion script in standalone mode...")

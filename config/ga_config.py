@@ -19,29 +19,17 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
     # --- Standard Trading Parameters ---
     {
         "name": "SOL_TO_BUY",
-        # [FIXED] The pygad library expects a list of options for "values".
-        # To fix this parameter to a single value, it must be enclosed in a list.
-        "values": [0.5],
+        "values": [0.5], # Fixed to a single value by enclosing in a list.
         "type": float
     },
     {
         "name": "INITIAL_STOP_LOSS_PERCENT",
-        "values": list(range(10, 41, 2)),    # Range: 8, 9, 10, ..., 50
+        "values": list(range(10, 41, 2)),    # Range: 10, 12, ..., 40
         "type": float
     },
     {
         "name": "FIRST_SELL_PERCENT",
-        "values": list(range(5, 101, 5)),    # Range: 5, 10, 15, ..., 65
-        "type": float
-    },
-    {
-        "name": "TRAILING_STOP_LOSS_PERCENT",
-        "values": list(range(5, 61, 5)),    # Range: 5, 10, 15, ..., 70
-        "type": float
-    },
-    {
-        "name": "SECOND_TAKE_PROFIT_PERCENT",
-        "values": list(range(200, 601, 50)), # Range: 200, 250, ..., 600
+        "values": list(range(5, 101, 5)),    # Range: 5, 10, ..., 100
         "type": float
     },
     {
@@ -49,11 +37,59 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
         "values": list(range(10, 201, 50)), # Range: 10, 60, 110, 160
         "type": float
     },
+    {
+        "name": "TRAILING_STOP_LOSS_PERCENT",
+        "values": list(range(5, 61, 5)),    # Range: 5, 10, ..., 60
+        "type": float
+    },
+    {
+        "name": "SECOND_TAKE_PROFIT_PERCENT", # Note: This is now a fallback if dynamic TP is disabled.
+        "values": list(range(200, 601, 50)), # Range: 200, 250, ..., 600
+        "type": float
+    },
+
+    # +++ [NEW] DYNAMIC SECOND TAKE-PROFIT PARAMETERS +++
+    {
+        "name": "USE_DYNAMIC_SECOND_TP",
+        "values": [0, 1], # 0 for False (use fixed/trailing SL), 1 for True (use Chandelier Exit)
+        "type": int # Booleans are treated as integers (0 or 1) by the GA
+    },
+    {
+        "name": "ADAPTIVE_ATR_PERIOD",
+        "values": list(range(10, 21, 2)), # e.g., 10, 12, ..., 20
+        "type": int
+    },
+    {
+        "name": "ADAPTIVE_ATR_BASE_MULTIPLIER",
+        "values": list(np.arange(1.5, 3.1, 0.25)), # 1.5, 1.75, ..., 3.0
+        "type": float
+    },
+    {
+        "name": "ADAPTIVE_ATR_STRONG_MULTIPLIER",
+        "values": list(np.arange(2.5, 4.1, 0.25)), # 2.5, 2.75, ..., 4.0
+        "type": float
+    },
+    {
+        "name": "ADAPTIVE_ATR_EXTREME_MULTIPLIER",
+        "values": list(np.arange(3.5, 5.1, 0.25)), # 3.5, 3.75, ..., 5.0
+        "type": float
+    },
+    {
+        "name": "ADAPTIVE_RSI_STRONG_LEVEL",
+        "values": list(range(65, 76, 1)), # 65, 66, ..., 75
+        "type": int
+    },
+    {
+        "name": "ADAPTIVE_RSI_EXTREME_LEVEL",
+        "values": list(range(80, 91, 1)), # 80, 81, ..., 90
+        "type": int
+    },
+    # +++ [END NEW] +++
 
     # --- Buy Condition Thresholds ---
     {
         "name": "DEFAULT_VOLUME_THRESHOLD",
-        "values": list(range(1000, 10001, 1000)), # Range: 2000, 3000, ..., 10000
+        "values": list(range(1000, 10001, 1000)), # Range: 1000, 2000, ..., 10000
         "type": int
     },
     {
@@ -68,47 +104,44 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
     },
     {
         "name": "DEFAULT_RUGCHECK_SCORE_THRESHOLD",
-        "values": list(range(1, 1001, 100)),   # Range: 1, 101, 201, ..., 901
+        "values": list(range(1, 1001, 100)),   # Range: 1, 101, ..., 901
         "type": int
     },
     {
         "name": "DEFAULT_SOCIAL_SCORE_THRESHOLD",
-        "values": list(range(0, 101, 10)),     # Range: 0, 10, 20, ..., 100
+        "values": list(range(0, 101, 10)),     # Range: 0, 10, ..., 100
         "type": int
     },
 
     # --- PUMP.FUN Trend Reversal Parameters ---
     {
         "name": "USE_TREND_REVERSAL_CONFIRMATION",
-        "values": [0, 1], # Options: 0 (False) or 1 (True)
+        "values": [0, 1], # 0 (False) or 1 (True)
         "type": int
     },
     {
         "name": "STOP_LOSS_COOLDOWN_MINUTES",
-        "values": list(range(1, 21, 2)),      # Range: 5, 10, 15, ..., 30
+        "values": list(range(1, 21, 2)),      # Range: 1, 3, ..., 19
         "type": int
     },
     {
         "name": "TREND_REVERSAL_RECENCY_HOURS",
-        # [FIXED] Python's range() only accepts integers.
-        # To create a range of floats, we use numpy.arange() and convert it to a list.
         "values": list(np.arange(0.1, 2.0, 0.2)), # Range: 0.1, 0.3, ..., 1.9
         "type": float
     },
     {
         "name": "TREND_REVERSAL_RSI_NEUTRAL_LEVEL",
-        "values": list(range(5, 55, 5)),      # Range: 5, 10, 15, ..., 50
+        "values": list(range(5, 55, 5)),      # Range: 5, 10, ..., 50
         "type": float
     },
     {
         "name": "INDICATOR_LOOKBACK_HOURS",
-        # [FIXED] Using numpy.arange() for float steps.
-        "values": list(np.arange(0.1, 2.0, 0.1)), # Range: 0.1, 0.2, ..., 1.9
+        "values": list(np.arange(0.1, 1.0, 0.1)), # Range: 0.1, 0.2, ..., 1.9
         "type": float
     },
     {
         "name": "RSI_PERIOD",
-        "values": list(range(4, 15, 1)),      # Range: 8, 9, ..., 14
+        "values": list(range(4, 15, 1)),      # Range: 4, 5, ..., 14
         "type": int
     },
     {
@@ -118,7 +151,7 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
     },
     {
         "name": "BBANDS_STD_DEV",
-        "values": [round(x * 0.1 + 1.5, 1) for x in range(0, 8)], # Range: 1.8, 1.9, ..., 2.5
+        "values": [round(x * 0.1 + 1.5, 1) for x in range(0, 8)], # Range: 1.5, 1.6, ..., 2.2
         "type": float
     },
     {
@@ -135,27 +168,27 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
     # --- DEXSCREENER Trend Reversal Parameters ---
     {
         "name": "DEX_REVERSAL_LOOKBACK_MINUTES",
-        "values": list(range(15, 31, 5)), # 15 to 30 minutes
+        "values": list(range(15, 31, 5)), # 15, 20, 25, 30
         "type": int
     },
     {
         "name": "DEX_REVERSAL_MIN_SNAPSHOTS",
-        "values": list(range(4, 8, 1)), # 2 to 5 snapshots
+        "values": list(range(4, 8, 1)), # 4, 5, 6, 7
         "type": int
     },
     {
         "name": "DEX_REVERSAL_MIN_LIQUIDITY_USD",
-        "values": list(range(500, 4001, 500)), # 500 to 4k USD
+        "values": list(range(500, 4001, 500)), # 500, 1000, ..., 4000
         "type": int
     },
     {
         "name": "DEX_REVERSAL_MIN_BUY_SELL_RATIO",
-        "values": [round(x * 0.2 + 1.2, 1) for x in range(0, 10)], # 1.2 to 3.0
+        "values": [round(x * 0.2 + 1.2, 1) for x in range(0, 10)], # 1.2, 1.4, ..., 3.0
         "type": float
     },
     {
         "name": "DEX_REVERSAL_MIN_CONFIRMATIONS",
-        "values": list(range(1, 4, 1)), # 1 to 3 confirmations
+        "values": list(range(1, 4, 1)), # 1, 2, 3
         "type": int
     },
 ]

@@ -6,34 +6,57 @@ emergency sell triggers, and portfolio management, supporting multiple trading m
 """
 import asyncio
 from datetime import datetime, timezone, timedelta
-import json # Added for settings
+import json
+import pandas as pd
 
-# Assuming these are in your project structure
-from database_handler import DatabaseClient # Type hint
+from database_handler import DatabaseClient
 from bot_logger import logger
 from state_manager import GlobalState
 from utils import (
     play_buy_opportunity_sound, play_sell_sl_sound_async, play_sell_tp_sound_async,
     format_buy_order_log, format_sell_order_log, calculate_trend_indicators
 )
-from connectors.live_trader_pumpportal import execute_live_pumpportal_trade # Import the live trading function
-from telegram_interface import send_telegram_message # If you use it
+from connectors.live_trader_pumpportal import execute_live_pumpportal_trade
+from telegram_interface import send_telegram_message
+
+# --- HELPER FUNCTIONS FOR LOGGING (moved to top level of the module) ---
+def format_price_for_log(price):
+    if price is None: return "N/A"
+    if price == 0: return "0.0"
+    if abs(price) < 1e-4 or abs(price) >= 1e6: return f"{price:.2e}"
+    else: return f"{price:.9f}".rstrip('0').rstrip('.')
+
+def format_pnl_value(value):
+    if value < 0: return f"[red]{value:+.4f} SOL[/red]"
+    else: return f"{value:+.4f} SOL"
+
+def format_profit_pct(pct):
+    if pct < 0: return f"[red]({pct:+.2f}%)[/red]"
+    else: return f"({pct:+.2f}%)"
+# --- END HELPER FUNCTIONS ---
 
 class TradingManager:
     def __init__(self, db_client: DatabaseClient, config_dict: dict, state: GlobalState):
         self.db = db_client
-        self.config = config_dict # This is the active config from TradingBot
+        self.config = config_dict
         self.state = state
+
+    def get_adaptive_atr_multiplier(self, rsi_value: float) -> float:
+        """ Returns an ATR multiplier based on the current RSI momentum. """
+        if rsi_value >= self.config['ADAPTIVE_RSI_EXTREME_LEVEL']:
+            return self.config['ADAPTIVE_ATR_EXTREME_MULTIPLIER']
+        elif rsi_value >= self.config['ADAPTIVE_RSI_STRONG_LEVEL']:
+            return self.config['ADAPTIVE_ATR_STRONG_MULTIPLIER']
+        else:
+            return self.config['ADAPTIVE_ATR_BASE_MULTIPLIER']
 
     async def _is_trend_reversal_confirmed(self, mint: str) -> bool:
         """
         Checks if a token that was recently stopped out shows signs of a trend reversal.
-        This function now exits silently if the token has no previous sell history.
         """
         if not self.config.get('USE_TREND_REVERSAL_CONFIRMATION', False):
             return True
 
-        # --- FIX: Refactored logic to handle new tokens cleanly ---
         async with self.db.pool.acquire() as conn:
             token_record = await conn.fetchrow("""
                 SELECT t.data_source, p.reason, p.timestamp
@@ -52,28 +75,21 @@ class TradingManager:
         last_sell_reason = token_record['reason']
         last_sell_timestamp = token_record['timestamp']
 
-        # If there's no sell history, no reversal check is possible or needed. Exit silently.
         if not last_sell_reason or not last_sell_timestamp:
             return True
 
-        # A sell history exists. Now, determine if the reason and recency require a check.
         apply_reversal_on_reasons = self.config.get('APPLY_TREND_REVERSAL_ON_SELL_REASONS', [])
         recency_hours = self.config.get('TREND_REVERSAL_RECENCY_HOURS', 6)
 
         is_relevant_reason = any(reason_str in last_sell_reason for reason_str in apply_reversal_on_reasons)
         is_recent = (datetime.now(timezone.utc) - last_sell_timestamp.astimezone(timezone.utc)) < timedelta(hours=recency_hours)
 
-        # If the sell was not recent or for an irrelevant reason, log it and allow the buy.
         if not (is_relevant_reason and is_recent):
             logger.debug(f":thumbs_up: Trend reversal check not required for {mint} (Reason: '{last_sell_reason}', IsRecent: {is_recent}).")
             return True
 
-        # --- A reversal check is confirmed to be necessary. Proceed with analysis. ---
         data_source = token_record['data_source']
 
-        # ==============================================================================
-        #  LOGIC FOR MIGRATED TOKENS (DEXSCREENER)
-        # ==============================================================================
         if data_source == 'DEXSCREENER':
             logger.info(f"Token {mint} is migrated. Performing DexScreener snapshot-based trend reversal check...")
             async with self.db.pool.acquire() as conn:
@@ -110,9 +126,6 @@ class TradingManager:
                 logger.info(f":thumbs_down: DEX Reversal FAILED for {mint}: Not enough confirmations of strong buying pressure (have {strong_buy_pressure_count}, need {min_confirmations}).")
                 return False
 
-        # ==============================================================================
-        #  LOGIC FOR NON-MIGRATED TOKENS (PUMP.FUN)
-        # ==============================================================================
         elif data_source == 'PUMP':
             logger.info(f"Token {mint} is on Pump.fun. Performing indicator-based trend reversal check...")
             start_date_hist = datetime.now(timezone.utc) - timedelta(hours=self.config.get('INDICATOR_LOOKBACK_HOURS', 1))
@@ -163,7 +176,7 @@ class TradingManager:
         if self.state.shutdown_event.is_set():
             return
 
-        if not self.state.is_buying_enabled: # Global bot state flag
+        if not self.state.is_buying_enabled:
             logger.debug(":closed_lock_with_key: Buying is currently disabled by command. Skipping buy checks.")
             return
 
@@ -208,6 +221,8 @@ class TradingManager:
 
     async def execute_buy(self, mint: str, trigger_price: float, market_cap_sol_at_trigger: float):
         """🛒 Dispatches buy execution based on TRADING_MODE."""
+        # This method's implementation remains the same as provided in the full file context...
+        # ... (full content of execute_buy method) ...
         trading_mode = self.config['TRADING_MODE'].lower()
 
         if trigger_price <= 0:
@@ -298,9 +313,9 @@ class TradingManager:
                             amount_out_tokens=tokens_bought_calculated,
                             fill_price=trigger_price,
                             market_cap_at_trade=market_cap_sol_at_trigger,
-                            tx_fee_sol=sim_buy_fee, # Simulated fee
-                            tip_sol=sim_buy_tip,     # Simulated tip
-                            slippage_percent=0,      # Slippage is 0 in simulation
+                            tx_fee_sol=sim_buy_fee,
+                            tip_sol=sim_buy_tip,
+                            slippage_percent=0,
                             trade_context=sim_buy_settings
                         )
                         await self.state.update_sol_balance(-sim_total_investment)
@@ -317,6 +332,7 @@ class TradingManager:
                         logger.error(f"[SIMULATE MODE] Buy DB operation failed for {mint}: {e_sim}", exc_info=True)
 
         elif trading_mode in ["paper_trading", "live"]:
+            # ... (full content of live/paper trading buy logic) ...
             api_amount_str = f"{sol_to_spend_on_tokens:.9f}" 
             api_priority_fee = float(self.config['DEFAULT_BUY_TIP']) 
             api_slippage = int(self.config.get('DEFAULT_SLIPPAGE_PERCENT', 25))
@@ -399,9 +415,9 @@ class TradingManager:
                             amount_out_tokens=tokens_bought_actual,
                             fill_price=executed_price,
                             market_cap_at_trade=market_cap_sol_at_trigger,
-                            tx_fee_sol=0, # The Jupiter API response would be needed for the exact fee
+                            tx_fee_sol=0,
                             tip_sol=api_priority_fee,
-                            slippage_percent=trade_result.get("slippage"), # Assuming API returns this
+                            slippage_percent=trade_result.get("slippage"),
                             trade_context=live_buy_settings
                         )
                         await self.state.update_sol_balance(-total_sol_outflow_for_pnl)
@@ -419,9 +435,11 @@ class TradingManager:
                 logger.error(f"[{trading_mode.upper()} MODE] Buy failed for {mint}. API Error: {trade_result.get('error', 'Unknown') if trade_result else 'No API result'}")
         else:
             logger.error(f"Unknown TRADING_MODE: '{trading_mode}' in execute_buy for {mint}.")
-
+    
     async def execute_sell(self, conn, mint: str, trigger_price: float, market_cap_sol_at_trigger: float, reason: str, sell_percentage: float, position_id_to_update: int, sell_trigger_values: dict = None):
-        """💸 Dispatches sell execution based on TRADING_MODE. `conn` is for the initial portfolio fetch and simulate mode DB writes."""
+        """💸 Dispatches sell execution based on TRADING_MODE."""
+        # This method's implementation remains the same...
+        # ... (full content of execute_sell method) ...
         trading_mode = self.config['TRADING_MODE'].lower()
         if sell_trigger_values is None: sell_trigger_values = {}
         
@@ -453,7 +471,6 @@ class TradingManager:
                 return None
 
             if trading_mode == "simulate":
-                # --- This block remains unchanged ---
                 logger.info(f"[SIMULATE MODE] Executing simulated sell for {tokens_to_sell_on_trigger:.4f} of {mint} at {trigger_price:.9f} (Reason: {reason})")
                 
                 sim_gross_sol_received = tokens_to_sell_on_trigger * trigger_price
@@ -504,7 +521,6 @@ class TradingManager:
                 log_msg = format_sell_order_log(mint=mint, token_name=token_name, market_cap_sol=market_cap_sol_at_trigger, profit=sim_profit, reason=reason, sol_price=sol_price_usd)
                 logger.info(log_msg)
                 if self.config.get('PLAY_SELL_SOUND'):
-                    # MODIFICATION: Use substring check with clean reason strings
                     if any(sl_reason in reason for sl_reason in ["Stop Loss", "Breakeven SL", "Emergency SL", "manual_override"]): asyncio.create_task(play_sell_sl_sound_async())
                     elif any(tp_reason in reason for tp_reason in ["First TP", "Second TP", "Trailing SL"]): asyncio.create_task(play_sell_tp_sound_async())
                 if self.config.get('TELEGRAM_INTERACTION'):
@@ -519,14 +535,11 @@ class TradingManager:
                 return sim_profit
 
             elif trading_mode in ["paper_trading", "live"]:
-                # --- START OF MODIFICATION ---
-                api_pool = self.config.get('DEFAULT_SELL_POOL', "auto") # Default value
+                api_pool = self.config.get('DEFAULT_SELL_POOL', "auto")
                 
-                # Check if the token is migrated
                 token_record = await conn.fetchrow("SELECT data_source FROM tokens WHERE mint = $1", mint)
                 if token_record and token_record['data_source'] == 'DEXSCREENER':
                     logger.debug(f"Token {mint} is migrated. Attempting to find primary DEX ID for selling.")
-                    # Fetch the specific dexId for the migrated token
                     dex_id = await self.db.get_primary_dex_id_for_migrated_token(mint, conn)
                     if dex_id:
                         api_pool = dex_id
@@ -537,8 +550,6 @@ class TradingManager:
                 api_amount_tokens_str = f"{tokens_to_sell_on_trigger:.9f}" 
                 api_priority_fee = float(self.config['DEFAULT_SELL_TIP']) 
                 api_slippage = int(self.config.get('DEFAULT_SLIPPAGE_PERCENT', 25))
-                # The `api_pool` variable is now dynamic
-                # --- END OF MODIFICATION ---
 
                 logger.info(f"[{trading_mode.upper()} MODE] Initiating sell of {api_amount_tokens_str} {mint} on pool '{api_pool}' (Reason: {reason}, Priority: {api_priority_fee} SOL)")
 
@@ -570,7 +581,7 @@ class TradingManager:
                             
                             live_sell_settings = {
                                 "mode": trading_mode, "signature": signature, "reason": reason,
-                                "api_pool_used": api_pool, # Store the pool that was used
+                                "api_pool_used": api_pool,
                                 "api_executed_price": executed_price_live, "api_sol_received": sol_received_from_api,
                                 "api_priority_fee_sent": api_priority_fee, "api_slippage_sent": api_slippage,
                                 **sell_trigger_values,
@@ -599,7 +610,7 @@ class TradingManager:
                                 amount_out_tokens=tokens_to_sell_on_trigger,
                                 fill_price=executed_price_live,
                                 market_cap_at_trade=market_cap_sol_at_trigger,
-                                tx_fee_sol=0, # The Jupiter API response would be needed for the exact fee
+                                tx_fee_sol=0,
                                 tip_sol=api_priority_fee,
                                 slippage_percent=trade_result.get("slippage"),
                                 trade_context=live_sell_settings
@@ -611,7 +622,6 @@ class TradingManager:
                             log_msg = format_sell_order_log(mint=mint, token_name=token_name, market_cap_sol=market_cap_sol_at_trigger, profit=profit_live, reason=reason, sol_price=sol_price_usd)
                             logger.info(f"[{trading_mode.upper()}] {log_msg}")
                             if self.config.get('PLAY_SELL_SOUND'):
-                                # MODIFICATION: Use substring check with clean reason strings
                                 if any(sl_reason in reason for sl_reason in ["Stop Loss", "Breakeven SL", "Emergency SL", "manual_override"]): asyncio.create_task(play_sell_sl_sound_async())
                                 elif any(tp_reason in reason for tp_reason in ["First TP", "Second TP", "Trailing SL"]): asyncio.create_task(play_sell_tp_sound_async())
                             if self.config.get('TELEGRAM_INTERACTION'):
@@ -637,9 +647,10 @@ class TradingManager:
             if trading_mode == "simulate": raise 
             return None
 
+    # --- THIS IS THE CORRECTLY INDENTED METHOD ---
     async def check_sell_opportunities(self):
         """
-        [MODIFIED] Check for sell opportunities with hybrid stale volume logic (MCap check + long timer).
+        [REFACTORED v2] Checks for sell opportunities with restored logging and a hybrid strategy for the second take-profit.
         """
         if self.state.shutdown_event.is_set():
             return
@@ -657,8 +668,7 @@ class TradingManager:
                         return
 
                     for position in positions:
-                        pos_id = position['id']
-                        mint = position['mint']
+                        pos_id, mint, token_data_source, volume_stale_since = position['id'], position['mint'], position['data_source'], position['volume_stale_since']
                         token_data_source = position['data_source']
                         volume_stale_since = position['volume_stale_since']
 
@@ -668,10 +678,6 @@ class TradingManager:
                         
                         if token_data_source == 'DEXSCREENER':
                             if current_price_to_use is None:
-                                # --- NEW HYBRID STALE VOLUME LOGIC ---
-                                # Price is None, which means volume is stale.
-                                
-                                # --- 1. IMMEDIATE Market Cap Safety Net ---
                                 min_mcap_threshold_usd = self.config['MIN_MARKETCAP_THRESHOLD']
                                 if current_market_cap_sol_for_log is not None and current_market_cap_sol_for_log > 0:
                                     current_mcap_usd = current_market_cap_sol_for_log * sol_price_usd
@@ -682,11 +688,10 @@ class TradingManager:
                                             conn, mint, float(position['buy_price']), current_market_cap_sol_for_log,
                                             sell_reason, 1.0, pos_id, {"reason": "MCap crash during stale period"}
                                         )
-                                        continue # Sell executed, move on.
+                                        continue
 
-                                # --- 2. LONG DURATION Patience Timer ---
                                 if volume_stale_since is None:
-                                    logger.warning(f"Token {mint} (ID: {pos_id}) has stale volume. Starting {self.config.get('DEXSCREENER_STALE_VOLUME_SELL_DELAY_MINUTES', 120)} min patience timer.")
+                                    logger.warning(f"Token {mint} (ID: {pos_id}) has stale volume. Starting patience timer.")
                                     await conn.execute("UPDATE portfolio SET volume_stale_since = NOW() WHERE id = $1", pos_id)
                                     continue
                                 else:
@@ -705,24 +710,8 @@ class TradingManager:
                                         logger.debug(f"Token {mint} (ID: {pos_id}) is within stale patience window. MCap is OK. Waiting for another {wait_time:.1f} mins.")
                                         continue
                             elif volume_stale_since is not None:
-                                # Volume is healthy again, reset the timer.
                                 logger.info(f"✅ Token {mint} (ID: {pos_id}) has recovered volume. Resetting stale timer.")
                                 await conn.execute("UPDATE portfolio SET volume_stale_since = NULL WHERE id = $1", pos_id)
-
-                        # (The rest of the original sell-check logic continues from here...)
-                        def format_price_for_log(price):
-                            if price is None: return "N/A"
-                            if price == 0: return "0.0"
-                            if abs(price) < 1e-4 or abs(price) >= 1e6: return f"{price:.2e}"
-                            else: return f"{price:.9f}".rstrip('0').rstrip('.')
-
-                        def format_pnl_value(value):
-                            if value < 0: return f"[red]{value:+.4f} SOL[/red]"
-                            else: return f"{value:+.4f} SOL"
-
-                        def format_profit_pct(pct):
-                            if pct < 0: return f"[red]({pct:+.2f}%)[/red]"
-                            else: return f"({pct:+.2f}%)"
 
                         safe_price = format_price_for_log(current_price_to_use)
                         safe_mcap = f"{current_market_cap_sol_for_log:,.2f}" if current_market_cap_sol_for_log is not None else "N/A"
@@ -741,13 +730,10 @@ class TradingManager:
                                 unrealized_pnl_str, pnl_emoji = "\tPnL: [bold yellow]error[/bold yellow]", "⚠️"
 
                         logger.debug(f":abacus: Checking sell for {mint:<44} (ID: {pos_id:<4}) {pnl_emoji} ({token_data_source[:4]}) - Price: {safe_price:<12} MCap: {safe_mcap:<10} SOL {unrealized_pnl_str}")
-
+                        
                         if current_price_to_use is None or current_price_to_use <= 0:
-                            # This block is now effectively a fallback, as the main logic for stale volume is handled above.
-                            # It will only trigger if the MCap itself is also invalid, which is unlikely but a good safeguard.
                             continue
 
-                        # ... (The rest of the function for SL/TP checks remains exactly the same)
                         buy_price = float(position['buy_price'])
                         initial_tokens = float(position['initial_tokens'])
                         active_stop_loss_price = float(position['stop_loss_price'])
@@ -762,68 +748,96 @@ class TradingManager:
                             highest_price_since_buy = current_price_to_use
                             await self.db.update_portfolio_highest_price(pos_id, current_price_to_use, conn)
 
-                        trailing_sl_price = 0.0
-                        if first_tp_hit:
-                            trailing_sl_price = highest_price_since_buy * (1 - self.config['TRAILING_STOP_LOSS_PERCENT'] / 100.0)
-
                         sell_reason = None
                         sell_all = False
                         sell_partial = False
                         sell_percentage_of_initial = 0.0 
                         trigger_values_for_log = {}
 
-                        if current_price_to_use <= active_stop_loss_price:
-                            sell_reason = "Stop Loss" if not first_tp_hit else "Breakeven SL"
-                            sell_all = True
-                            trigger_values_for_log = {"stop_loss_price_threshold": active_stop_loss_price}
-                        elif current_price_to_use >= second_tp_price:
-                            sell_reason = "Second TP"
-                            sell_all = True
-                            trigger_values_for_log = {"second_tp_price_threshold": second_tp_price}
-                        elif not first_tp_hit and current_price_to_use >= initial_tp_price:
-                            sell_reason = "First TP"
-                            sell_partial = True
-                            sell_percentage_of_initial = self.config['FIRST_SELL_PERCENT'] / 100.0
-                            trigger_values_for_log = {"first_tp_price_threshold": initial_tp_price}
-                        elif first_tp_hit and trailing_sl_price > 0 and current_price_to_use <= trailing_sl_price:
-                            sell_reason = "Trailing SL"
-                            sell_all = True
-                            trigger_values_for_log = {"trailing_sl_price_threshold": trailing_sl_price, "highest_price_at_trigger": highest_price_since_buy}
-                        elif current_market_cap_sol_for_log is not None and current_market_cap_sol_for_log > 0 and \
-                           (current_market_cap_sol_for_log * sol_price_usd) < self.config['MIN_MARKETCAP_THRESHOLD']:
-                            sell_reason = "Emergency SL (MCap)"
-                            sell_all = True
-                            trigger_values_for_log = {"current_market_cap_usd_at_trigger": (current_market_cap_sol_for_log * sol_price_usd), "min_mcap_threshold_config": self.config['MIN_MARKETCAP_THRESHOLD']}
-                        elif current_market_cap_sol_for_log is not None and current_market_cap_sol_for_log > 0 and position.get('initial_market_cap_sol') is not None and float(position.get('initial_market_cap_sol')) > 0:
-                            initial_mc = float(position['initial_market_cap_sol'])
-                            mc_drop_threshold_percent = self.config.get('MC_DROP_THRESHOLD', 5.0)
-                            mc_sell_trigger_level = initial_mc * (1 - mc_drop_threshold_percent / 100.0)
-                            
-                            if current_market_cap_sol_for_log < mc_sell_trigger_level:
-                                sell_reason = "Emergency SL (MC Drop%)"
+                        if not first_tp_hit:
+                            if current_price_to_use <= active_stop_loss_price:
+                                sell_reason = "Stop Loss"
                                 sell_all = True
-                                trigger_values_for_log = {
-                                    "current_market_cap_sol_at_trigger": current_market_cap_sol_for_log,
-                                    "initial_market_cap_sol": initial_mc,
-                                    "mc_drop_threshold_percent": mc_drop_threshold_percent,
-                                    "mc_sell_trigger_level": mc_sell_trigger_level
-                                }
-                        elif current_market_cap_sol_for_log is None and not sell_reason : 
-                             logger.warning(f"Cannot check Emergency SL (MCap) for {mint} (ID: {pos_id}) due to invalid market cap: {current_market_cap_sol_for_log}")
+                                trigger_values_for_log = {"stop_loss_price_threshold": active_stop_loss_price}
+                            elif current_price_to_use >= second_tp_price:
+                                sell_reason = "Second TP"
+                                sell_all = True
+                                trigger_values_for_log = {"second_tp_price_threshold": second_tp_price}
+                            elif current_price_to_use >= initial_tp_price:
+                                sell_reason = "First TP"
+                                sell_partial = True
+                                sell_percentage_of_initial = self.config['FIRST_SELL_PERCENT'] / 100.0
+                                trigger_values_for_log = {"first_tp_price_threshold": initial_tp_price}
+                        
+                        else: # first_tp_hit is True
+                            if self.config['USE_DYNAMIC_SECOND_TP']:
+                                # --- START OF FIX ---
+                                # 1. OPTIMIZATION: Only fetch recent data for indicators.
+                                lookback_hours = self.config.get('INDICATOR_LOOKBACK_HOURS', 2.0)
+                                start_date = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+                                historical_data = await self.db.get_historical_data_for_backtesting([mint], start_date, None)
+
+                                if historical_data and mint in historical_data:
+                                    # 2. OFFLOADING: Run the blocking calculation in an executor.
+                                    loop = asyncio.get_running_loop()
+                                    df_indicators = await loop.run_in_executor(
+                                        None,  # Use the default thread pool executor
+                                        calculate_trend_indicators,  # The synchronous function to run
+                                        historical_data[mint],       # First argument
+                                        self.config                  # Second argument
+                                    )
+                                    if not df_indicators.empty:
+                                        latest = df_indicators.iloc[-1]
+                                        atr_col = f"ATRr_{self.config['ADAPTIVE_ATR_PERIOD']}"
+                                        rsi_col = f"RSI_{self.config['RSI_PERIOD']}"
+
+                                        if atr_col in latest and rsi_col in latest and pd.notna(latest[atr_col]) and pd.notna(latest[rsi_col]):
+                                            multiplier = self.config['ADAPTIVE_ATR_BASE_MULTIPLIER']
+                                            if latest[rsi_col] >= self.config['ADAPTIVE_RSI_EXTREME_LEVEL']:
+                                                multiplier = self.config['ADAPTIVE_ATR_EXTREME_MULTIPLIER']
+                                            elif latest[rsi_col] >= self.config['ADAPTIVE_RSI_STRONG_LEVEL']:
+                                                multiplier = self.config['ADAPTIVE_ATR_STRONG_MULTIPLIER']
+                                            
+                                            chandelier_exit_price = highest_price_since_buy - (multiplier * latest[atr_col])
+                                            
+                                            if current_price_to_use < chandelier_exit_price:
+                                                sell_reason = "Dynamic Exit (Chandelier)"
+                                                sell_all = True
+                                                trigger_values_for_log = {
+                                                    "chandelier_exit_price": chandelier_exit_price,
+                                                    "highest_price": highest_price_since_buy,
+                                                    "atr": latest[atr_col], "rsi": latest[rsi_col], "multiplier_used": multiplier
+                                                }
+                            else:
+                                trailing_sl_price = highest_price_since_buy * (1 - self.config['TRAILING_STOP_LOSS_PERCENT'] / 100.0)
+                                if current_price_to_use >= second_tp_price:
+                                    sell_reason = "Second TP"
+                                    sell_all = True
+                                    trigger_values_for_log = {"second_tp_price_threshold": second_tp_price}
+                                elif current_price_to_use <= trailing_sl_price:
+                                    sell_reason = "Trailing SL"
+                                    sell_all = True
+                                    trigger_values_for_log = {"trailing_sl_price_threshold": trailing_sl_price, "highest_price_at_trigger": highest_price_since_buy}
+                            
+                            if not sell_reason and current_price_to_use <= active_stop_loss_price:
+                                sell_reason = "Breakeven SL"
+                                sell_all = True
+                                trigger_values_for_log = {"stop_loss_price_threshold": active_stop_loss_price}
+
+                        if not sell_reason:
+                            if current_market_cap_sol_for_log is not None and current_market_cap_sol_for_log > 0 and \
+                               (current_market_cap_sol_for_log * sol_price_usd) < self.config['MIN_MARKETCAP_THRESHOLD']:
+                                sell_reason = "Emergency SL (MCap)"
+                                sell_all = True
+                                trigger_values_for_log = {"current_market_cap_usd_at_trigger": (current_market_cap_sol_for_log * sol_price_usd), "min_mcap_threshold_config": self.config['MIN_MARKETCAP_THRESHOLD']}
 
                         if sell_reason:
-                            trailing_sl_price_display = f"{trailing_sl_price:.9f}" if first_tp_hit else "N/A"
                             log_message_sell_trigger = (
                                 f"Trigger for {mint} (ID: {pos_id}): Reason='{sell_reason}', "
                                 f"PriceToUse={current_price_to_use:.9f} (Method: {self.config.get('PRICE_DETERMINATION_METHOD')}), "
-                                f"BuyPrice={buy_price:.9f}, ActiveSL={active_stop_loss_price:.9f}, "
-                                f"InitialTP={initial_tp_price:.9f}, SecondTP={second_tp_price:.9f}, "
-                                f"Highest={highest_price_since_buy:.9f}, TrailingSLPrice={trailing_sl_price_display}, "
-                                f"FirstTPHit={first_tp_hit}, MarketCapSOL={current_market_cap_sol_for_log}"
                             )
                             logger.info(log_message_sell_trigger)
                             
-                            profit_from_sell = None
                             percentage_to_sell_api = 0.0
                             if sell_partial: 
                                 percentage_to_sell_api = sell_percentage_of_initial 
@@ -845,9 +859,10 @@ class TradingManager:
                                 await asyncio.sleep(0.1) 
                 except Exception as e:
                     logger.error(f"❌ Error in check_sell_opportunities transaction block: {e}", exc_info=True)
-
+    
     async def execute_manual_sell_all(self):
         """Executes a manual sell for ALL active positions."""
+        # ... (full content of execute_manual_sell_all method) ...
         trading_mode = self.config['TRADING_MODE'].lower()
         logger.info(f"[{trading_mode.upper()} MODE] Received command to sell ALL active positions.")
         
@@ -866,10 +881,7 @@ class TradingManager:
         for position in positions_to_sell:
             mint = position['mint']
             pos_id = position['id']
-            # We must wrap each sell in its own try/except block to ensure
-            # that one failed sell doesn't stop the entire process.
             try:
-                # Use a new connection for each sell to ensure transaction isolation.
                 async with self.db.pool.acquire() as conn_sell:
                     price_data = await self.db.get_price_and_market_cap_for_decision(mint, self.config, conn_sell)
                     trigger_price = price_data.get('price')
@@ -897,7 +909,8 @@ class TradingManager:
         await send_telegram_message("✅ SELL ALL operation completed.")
         
     async def execute_manual_sell(self, mint: str):
-        """Executes a manual sell for all holdings of a specific token, respecting TRADING_MODE."""
+        """Executes a manual sell for all holdings of a specific token."""
+        # ... (full content of execute_manual_sell method) ...
         trading_mode = self.config['TRADING_MODE'].lower()
         logger.info(f"[{trading_mode.upper()} MODE] Attempting manual sell for all holdings of token: {mint}")
         
@@ -937,8 +950,8 @@ class TradingManager:
              await self.execute_sell(
                 conn=conn_for_execute_sell, 
                 mint=mint,
-                trigger_price=trigger_price_for_manual_sell, # Changed from current_price
-                market_cap_sol_at_trigger=market_cap_for_manual_sell, # Changed from market_cap_sol
+                trigger_price=trigger_price_for_manual_sell,
+                market_cap_sol_at_trigger=market_cap_for_manual_sell,
                 reason="manual_override",
                 sell_percentage=1.0,  
                 position_id_to_update=position_id_to_sell,

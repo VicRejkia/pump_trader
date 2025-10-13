@@ -505,6 +505,12 @@ def calculate_trend_indicators(df: pd.DataFrame, config: dict) -> pd.DataFrame:
         # Calculate EMAs using the specified close price series
         df_ta.ta.ema(close=close_prices, length=config['FAST_EMA_PERIOD'], append=True, col_names=('EMA_fast',))
         df_ta.ta.ema(close=close_prices, length=config['SLOW_EMA_PERIOD'], append=True, col_names=('EMA_slow',))
+
+        # Calculate ATR for the Chandelier Exit
+        df_ta.ta.atr(length=config['ADAPTIVE_ATR_PERIOD'], append=True)
+
+        # Calculate Parabolic SAR (optional, but good for confirmation strategies)
+        df_ta.ta.psar(append=True)
         
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)

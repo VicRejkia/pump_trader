@@ -110,7 +110,7 @@ def run_backtest_sync(
     mint_addr = parameters.get("mint", "UNKNOWN_MINT")
     simulation_end_reason = "Completed"
 
-    # --- [FIX] Early exit conditions now create a complete metrics dictionary ---
+    # --- Early exit conditions now create a complete metrics dictionary ---
     if ohlcv_data.empty:
         metrics = calculate_performance_metrics([], initial_capital, initial_capital, simulation_end_reason="No Data")
         metrics["final_portfolio_value"] = initial_capital
@@ -129,9 +129,24 @@ def run_backtest_sync(
     start_ts_data = df.index.min()
     end_ts_data = df.index.max()
 
+    # --- Pre-calculate indicators for the entire dataframe ---
+    indicator_config = {
+        'MIN_CANDLE_DATA_FOR_INDICATORS': parameters.get('MIN_CANDLE_DATA_FOR_INDICATORS', config_module.MIN_CANDLE_DATA_FOR_INDICATORS),
+        'RSI_PERIOD': parameters.get('RSI_PERIOD', config_module.RSI_PERIOD),
+        'BBANDS_PERIOD': parameters.get('BBANDS_PERIOD', config_module.BBANDS_PERIOD),
+        'BBANDS_STD_DEV': parameters.get('BBANDS_STD_DEV', config_module.BBANDS_STD_DEV),
+        'FAST_EMA_PERIOD': parameters.get('FAST_EMA_PERIOD', config_module.FAST_EMA_PERIOD),
+        'SLOW_EMA_PERIOD': parameters.get('SLOW_EMA_PERIOD', config_module.SLOW_EMA_PERIOD),
+        'ADAPTIVE_ATR_PERIOD': parameters.get('ADAPTIVE_ATR_PERIOD', config_module.ADAPTIVE_ATR_PERIOD)
+    }
+    df_with_indicators = utils.calculate_trend_indicators(df, indicator_config)
+    
+    if not df_with_indicators.empty:
+        df = df_with_indicators
+
     if max_timestamp:
         if max_timestamp.tzinfo is None: max_timestamp = max_timestamp.replace(tzinfo=timezone.utc)
-        df = df[df.index <= max_timestamp]
+        df = df[df.index <= max_timestamp].copy()
         end_ts_data = max_timestamp
         simulation_end_reason = "Token Death"
         if df.empty:
@@ -152,7 +167,7 @@ def run_backtest_sync(
     df['cooldown_until'] = df['cooldown_until'].fillna(pd.NaT)
     
     df = df[df["Close"] > 1e-12]
-    # --- [FIX] Another early exit condition with the complete metrics dictionary ---
+
     if df.empty:
          metrics = calculate_performance_metrics([], initial_capital, initial_capital, start_ts_data, end_ts_data, "No Candle Data")
          metrics["final_portfolio_value"] = initial_capital
@@ -189,6 +204,15 @@ def run_backtest_sync(
     dex_min_ratio = parameters.get('DEX_REVERSAL_MIN_BUY_SELL_RATIO', config_module.DEX_REVERSAL_MIN_BUY_SELL_RATIO)
     dex_min_confirmations = parameters.get('DEX_REVERSAL_MIN_CONFIRMATIONS', config_module.DEX_REVERSAL_MIN_CONFIRMATIONS)
 
+    use_dynamic_second_tp = bool(parameters.get('USE_DYNAMIC_SECOND_TP', config_module.USE_DYNAMIC_SECOND_TP))
+    adaptive_atr_period = parameters.get('ADAPTIVE_ATR_PERIOD', config_module.ADAPTIVE_ATR_PERIOD)
+    rsi_period = parameters.get('RSI_PERIOD', config_module.RSI_PERIOD)
+    adaptive_rsi_strong = parameters.get('ADAPTIVE_RSI_STRONG_LEVEL', config_module.ADAPTIVE_RSI_STRONG_LEVEL)
+    adaptive_rsi_extreme = parameters.get('ADAPTIVE_RSI_EXTREME_LEVEL', config_module.ADAPTIVE_RSI_EXTREME_LEVEL)
+    adaptive_atr_base_mult = parameters.get('ADAPTIVE_ATR_BASE_MULTIPLIER', config_module.ADAPTIVE_ATR_BASE_MULTIPLIER)
+    adaptive_atr_strong_mult = parameters.get('ADAPTIVE_ATR_STRONG_MULTIPLIER', config_module.ADAPTIVE_ATR_STRONG_MULTIPLIER)
+    adaptive_atr_extreme_mult = parameters.get('ADAPTIVE_ATR_EXTREME_MULTIPLIER', config_module.ADAPTIVE_ATR_EXTREME_MULTIPLIER)
+
     # --- 3. Simulation State Initialization ---
     current_sol, trade_history, active_position = initial_capital, [], None
     simulated_active_cooldowns: Dict[str, datetime] = {}
@@ -206,43 +230,100 @@ def run_backtest_sync(
             # --- 4a. Sell Logic ---
             if active_position:
                 pos = active_position
+                # Update the highest price seen since the buy
                 pos['highest_price'] = max(pos['highest_price'], high_price)
-                trailing_sl_price = pos['highest_price'] * (1.0 - trailing_stop_loss_percent / 100.0) if pos['first_tp_hit'] else 0.0
+                
+                # Initialize sell trigger variables for the current timestep
                 sell_reason, sell_all, sell_partial, sell_percentage = None, False, False, 0.0
 
-                # --- GET INITIAL MARKET CAP FROM POSITION DATA ---
-                # We need to store this at buy time to make the check possible.
-                # (We will add this to the active_position dict in the buy logic below)
-                initial_mcap_sol = pos.get('initial_market_cap_sol', 0.0)
-                mc_drop_threshold_percent = parameters.get('MC_DROP_THRESHOLD', 5.0) # Get this from GA params or config
+                # --- Stage 1: Logic before the first take-profit is hit ---
+                if not pos['first_tp_hit']:
+                    if price <= pos['stop_loss_price']:
+                        sell_reason, sell_all, sell_percentage = "🛑 Stop Loss", True, 1.0
+                    # A very high TP can still be hit before the first one
+                    elif price >= pos['second_tp_price']:
+                        sell_reason, sell_all, sell_percentage = "Second TP", True, 1.0
+                    # Check for the first take-profit
+                    elif price >= pos['initial_tp_price']:
+                        sell_reason, sell_partial, sell_percentage = "First TP", True, first_sell_percent / 100.0
                 
-                if price <= pos['stop_loss_price']: sell_reason, sell_all, sell_percentage = ("🛑 Stop Loss" if not pos['first_tp_hit'] else "🛡️ Breakeven SL"), True, 1.0
-                elif price >= pos['second_tp_price']: sell_reason, sell_all, sell_percentage = "Second TP", True, 1.0
-                elif not pos['first_tp_hit'] and price >= pos['initial_tp_price']: sell_reason, sell_partial, sell_percentage = "First TP", True, first_sell_percent / 100.0
-                elif pos['first_tp_hit'] and price <= trailing_sl_price: sell_reason, sell_all, sell_percentage = "↘️ Trailing SL", True, 1.0
-                elif market_cap_sol < min_emergency_mcap_usd and not sell_reason: sell_reason, sell_all, sell_percentage = "🆘 Emergency SL (MCap)", True, 1.0
+                # --- Stage 2: Logic after the first take-profit has been hit ---
+                else:
+                    # --- DYNAMIC SELL LOGIC BRANCH ---
+                    if use_dynamic_second_tp:
+                        # Use the Adaptive Chandelier Exit logic
+                        atr_col = f"ATRr_{adaptive_atr_period}"
+                        rsi_col = f"RSI_{rsi_period}"
+
+                        if atr_col in row and rsi_col in row and pd.notna(row[atr_col]) and pd.notna(row[rsi_col]):
+                            # Determine the adaptive ATR multiplier based on RSI
+                            multiplier = adaptive_atr_base_mult
+                            if row[rsi_col] >= adaptive_rsi_extreme:
+                                multiplier = adaptive_atr_extreme_mult
+                            elif row[rsi_col] >= adaptive_rsi_strong:
+                                multiplier = adaptive_atr_strong_mult
+                            
+                            # Calculate the dynamic exit price
+                            chandelier_exit_price = pos['highest_price'] - (multiplier * row[atr_col])
+                            
+                            if price < chandelier_exit_price:
+                                sell_reason = "Dynamic Exit (Chandelier)"
+                                sell_all = True
+                                sell_percentage = 1.0
+                    
+                    # --- Original Trailing SL logic (fallback if dynamic TP is off or indicators fail) ---
+                    if not sell_reason:
+                        trailing_sl_price = pos['highest_price'] * (1.0 - trailing_stop_loss_percent / 100.0)
+                        if price >= pos['second_tp_price']:
+                            sell_reason, sell_all, sell_percentage = "Second TP", True, 1.0
+                        elif price <= trailing_sl_price:
+                            sell_reason, sell_all, sell_percentage = "↘️ Trailing SL", True, 1.0
+
+                    # The breakeven stop loss is always active after the first TP is hit
+                    if not sell_reason and price <= pos['stop_loss_price']:
+                        sell_reason, sell_all, sell_percentage = "🛡️ Breakeven SL", True, 1.0
                 
-                # --- [NEW LOGIC TO ADD] ---
-                elif initial_mcap_sol > 0 and market_cap_sol < (initial_mcap_sol * (1 - mc_drop_threshold_percent / 100.0)) and not sell_reason:
-                    sell_reason, sell_all, sell_percentage = "🆘 Emergency SL (MC Drop%)", True, 1.0
-                # --- [END OF NEW LOGIC] ---
+                # --- Emergency Sell Conditions (checked at every step) ---
+                if not sell_reason:
+                    initial_mcap_sol = pos.get('initial_market_cap_sol', 0.0)
+                    mc_drop_threshold_percent = parameters.get('MC_DROP_THRESHOLD', 5.0)
 
-                elif is_migrated_token and volume <= 0 and not sell_reason: sell_reason, sell_all, sell_percentage = "🆘 Emergency SL (No Volume)", True, 1.0
+                    if market_cap_sol < min_emergency_mcap_usd:
+                        sell_reason, sell_all, sell_percentage = "🆘 Emergency SL (MCap)", True, 1.0
+                    elif initial_mcap_sol > 0 and market_cap_sol < (initial_mcap_sol * (1 - mc_drop_threshold_percent / 100.0)):
+                        sell_reason, sell_all, sell_percentage = "🆘 Emergency SL (MC Drop%)", True, 1.0
+                    elif is_migrated_token and volume <= 0:
+                        sell_reason, sell_all, sell_percentage = "🆘 Emergency SL (No Volume)", True, 1.0
 
+                # --- Execute Sell Action if a reason was triggered ---
                 if sell_reason:
+                    # Determine how many tokens to sell based on the trigger
                     tokens_to_sell = (pos['initial_tokens'] * sell_percentage) if sell_partial else (pos['remaining_tokens'] * sell_percentage)
-                    tokens_to_sell = min(tokens_to_sell, pos['remaining_tokens'])
-                    if tokens_to_sell > 1e-9:
+                    tokens_to_sell = min(tokens_to_sell, pos['remaining_tokens']) # Cannot sell more than held
+
+                    if tokens_to_sell > 1e-9: # Ensure there's a non-trivial amount to sell
+                        # Simulate the transaction
                         net_sol = (tokens_to_sell * price) - sell_fee - sell_tip
                         cost_basis = pos['total_investment_sol'] * (tokens_to_sell / pos['initial_tokens']) if pos['initial_tokens'] > 0 else 0
                         pnl = net_sol - cost_basis
+                        
+                        # Update portfolio state
                         current_sol += net_sol
                         pos['remaining_tokens'] -= tokens_to_sell
+                        
+                        # Log the trade
                         trade_history.append({'timestamp': timestamp, 'type': 'sell', 'price': price, 'amount_sol': net_sol, 'amount_tokens': tokens_to_sell, 'reason': sell_reason, 'pnl': pnl, 'mint': mint_addr})
+                        
+                        # Update position state after a partial sell (First TP)
                         if sell_partial:
-                            pos['first_tp_hit'], pos['stop_loss_price'] = True, pos['buy_price']
+                            pos['first_tp_hit'] = True
+                            pos['stop_loss_price'] = pos['buy_price'] # Move SL to breakeven
+                        
+                        # Close the position if all tokens are sold
                         if pos['remaining_tokens'] < 1e-9:
                             active_position = None
+                        
+                        # Apply cooldown period for stop-loss related sells
                         if stop_loss_cooldown_minutes_ga > 0 and any(trigger in sell_reason for trigger in apply_trend_reversal_on_sell_reasons_config):
                             cooldown_end_ts = timestamp + pd.Timedelta(minutes=stop_loss_cooldown_minutes_ga)
                             simulated_active_cooldowns[mint_addr] = cooldown_end_ts
@@ -291,7 +372,17 @@ def run_backtest_sync(
                                 if indicator_cache is not None and cache_key in indicator_cache:
                                     df_with_indicators = indicator_cache[cache_key]
                                 else:
-                                    indicator_config = {'MIN_CANDLE_DATA_FOR_INDICATORS': min_candle_data_for_indicators_config, 'RSI_PERIOD': rsi_period_ga, 'BBANDS_PERIOD': bbands_period_ga, 'BBANDS_STD_DEV': bbands_std_dev_ga, 'FAST_EMA_PERIOD': fast_ema_period_ga, 'SLOW_EMA_PERIOD': slow_ema_period_ga}
+                                    # --- FIX: Add missing ADAPTIVE_ATR_PERIOD key ---
+                                    indicator_config = {
+                                        'MIN_CANDLE_DATA_FOR_INDICATORS': min_candle_data_for_indicators_config, 
+                                        'RSI_PERIOD': rsi_period_ga, 
+                                        'BBANDS_PERIOD': bbands_period_ga, 
+                                        'BBANDS_STD_DEV': bbands_std_dev_ga, 
+                                        'FAST_EMA_PERIOD': fast_ema_period_ga, 
+                                        'SLOW_EMA_PERIOD': slow_ema_period_ga,
+                                        'ADAPTIVE_ATR_PERIOD': adaptive_atr_period
+                                    }
+                                    # --- END FIX ---
                                     df_with_indicators = utils.calculate_trend_indicators(indicator_slice.copy(), indicator_config)
                                     if indicator_cache is not None and df_with_indicators is not None and not df_with_indicators.empty:
                                         indicator_cache[cache_key] = df_with_indicators

@@ -28,6 +28,17 @@ INITIAL_STOP_LOSS_PERCENT = 29.0            # Initial SL as % below buy price (e
 TRAILING_STOP_LOSS_PERCENT = 5.0           # Trailing SL % drop from highest price *after* First TP (e.g., 15.0 for -15%)
 SECOND_TAKE_PROFIT_PERCENT = 600.0          # Second TP as % above buy price (e.g., 200.0 for +200%)
 
+# --- NEW: Dynamic Second Take-Profit Configuration ---
+USE_DYNAMIC_SECOND_TP = True                # Master switch. If False, uses fixed SECOND_TAKE_PROFIT_PERCENT.
+
+# Parameters for the Adaptive Chandelier Exit
+ADAPTIVE_ATR_PERIOD = 14                    # Period for the ATR calculation.
+ADAPTIVE_ATR_BASE_MULTIPLIER = 2.0          # Base multiplier for moderate momentum.
+ADAPTIVE_ATR_STRONG_MULTIPLIER = 3.0        # Multiplier for strong momentum.
+ADAPTIVE_ATR_EXTREME_MULTIPLIER = 4.0       # Multiplier for extreme parabolic momentum.
+ADAPTIVE_RSI_STRONG_LEVEL = 70              # RSI level considered "strong" momentum.
+ADAPTIVE_RSI_EXTREME_LEVEL = 85             # RSI level considered "extreme" momentum.
+
 # --- Fees and Tips ---
 DEFAULT_BUY_FEE = 0.001                     # Fee for buying in SOL
 DEFAULT_BUY_TIP = 0.001                     # Tip for buying in SOL

@@ -321,7 +321,8 @@ async def main_async_logic(shared_data_dict, shared_lifespan_dict, shared_snapsh
         logger.info(f"--- GA Optimization Finished (Duration: {(time.time() - start_time)/60:.2f} minutes) ---")
 
         if hasattr(ga_instance, 'best_solution_generation') and ga_instance.best_solution_generation != -1:
-            solution, solution_fitness, _ = ga_instance.best_solution()
+            # --- [MODIFICATION] Unpack solution_idx and create a unique ID ---
+            solution, solution_fitness, solution_idx = ga_instance.best_solution()
             best_params = {p['name']: p['type'](solution[i]) for i, p in enumerate(OPTIMIZABLE_PARAMETERS)}
             logger.info(f"Best solution (Training Fitness = {solution_fitness:.6f}):\n{json.dumps(best_params, indent=2)}")
 
@@ -330,9 +331,26 @@ async def main_async_logic(shared_data_dict, shared_lifespan_dict, shared_snapsh
             test_metrics = await evaluate_solution(best_params, 'test', loaded_data_sets, token_lifespans, dexscreener_snapshots, BACKTEST_INITIAL_CAPITAL, eval_cache)
             
             os.makedirs(RESULTS_DIR, exist_ok=True)
-            results_filename = os.path.join(RESULTS_DIR, f"ga_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+            
+            # Create a unique, readable ID for the best solution for the filename
+            best_solution_id_str = optimization_run_id # f"gen{ga_instance.best_solution_generation}_idx{solution_idx}"
+            
+            # Use the new filename format as requested
+            results_filename = os.path.join(RESULTS_DIR, f"ga_results_{datetime.now().strftime('%Y%m%d')}_{best_solution_id_str}.json")
+            
+            # Prepare the final results dictionary, including the new ID for traceability
+            final_results_data = {
+                'best_solution_id': best_solution_id_str,
+                'best_solution_parameters': best_params,
+                'best_solution_fitness_training': solution_fitness,
+                'validation_metrics': validation_metrics,
+                'test_metrics': test_metrics
+            }
+            
             with open(results_filename, 'w') as f:
-                json.dump({'best_solution_parameters': best_params, 'best_solution_fitness_training': solution_fitness, 'validation_metrics': validation_metrics, 'test_metrics': test_metrics}, f, indent=4, cls=NpEncoder)
+                json.dump(final_results_data, f, indent=4, cls=NpEncoder)
+            # --- [END MODIFICATION] ---
+                
             logger.info(f"Saved GA results to {results_filename}")
             ga_instance.plot_fitness(save_dir=os.path.join(RESULTS_DIR, f"ga_fitness_plot_{datetime.now().strftime('%Y%m%d_%H%M%S')}"))
         
