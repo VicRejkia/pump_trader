@@ -372,7 +372,8 @@ def run_backtest_sync(
                                 if indicator_cache is not None and cache_key in indicator_cache:
                                     df_with_indicators = indicator_cache[cache_key]
                                 else:
-                                    # --- FIX: Add missing ADAPTIVE_ATR_PERIOD key ---
+                                    # --- FIX: Add missing ADAPTIVE_ATR_PERIOD key to this config dict ---
+                                    # This prevents a potential KeyError in the utility function.
                                     indicator_config = {
                                         'MIN_CANDLE_DATA_FOR_INDICATORS': min_candle_data_for_indicators_config, 
                                         'RSI_PERIOD': rsi_period_ga, 
@@ -380,7 +381,7 @@ def run_backtest_sync(
                                         'BBANDS_STD_DEV': bbands_std_dev_ga, 
                                         'FAST_EMA_PERIOD': fast_ema_period_ga, 
                                         'SLOW_EMA_PERIOD': slow_ema_period_ga,
-                                        'ADAPTIVE_ATR_PERIOD': adaptive_atr_period
+                                        'ADAPTIVE_ATR_PERIOD': adaptive_atr_period # This key was missing
                                     }
                                     # --- END FIX ---
                                     df_with_indicators = utils.calculate_trend_indicators(indicator_slice.copy(), indicator_config)

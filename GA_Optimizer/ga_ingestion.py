@@ -32,7 +32,7 @@ if raw_db_host:
     else: db_host_val = raw_db_host
 
 DB_CONFIG = {"user": os.getenv("DB_USER"),"password": os.getenv("DB_PASSWORD"),"database": os.getenv("DB_DATABASE"),"host": db_host_val,"port": db_port_val}
-DEFAULT_LOG_FILE_PATH = project_root / "ga_optimization_results" / "ga_detailed_trade_log.jsonl"
+DEFAULT_LOG_FILE_PATH = project_root / "ga_optimization_results" / "ga_detailed_trade_log.parquet"
 
 # --- Helper Functions (for data cleaning) ---
 def sanitize_metric(value):
@@ -50,29 +50,32 @@ def parse_iso_datetime(ts_string: str | None) -> datetime | None:
     except (ValueError, TypeError):
         return None
 
-# --- Main Ingestion Logic (Refactored for Bulk Processing) ---
+# --- REFACTORED FOR PARQUET ---
 async def ingest_log_file_bulk(pool: asyncpg.Pool, file_path: str):
     """
-    Reads the entire .jsonl log file, processes it with pandas, and bulk-inserts
+    Reads the entire .parquet log file with pandas and bulk-inserts
     the data into the database for maximum performance.
     """
     if not os.path.exists(file_path):
         print(f"Error: Log file not found at '{file_path}'")
         return
 
-    print("Reading log file into memory...")
+    print("Reading Parquet log file into memory...")
     try:
-        with open(file_path, 'r') as f:
-            lines = f.readlines()
-        if not lines:
-            print("Log file is empty. Nothing to ingest.")
+        df = pd.read_parquet(file_path)
+        if df.empty:
+            print("Log file is empty or could not be read. Nothing to ingest.")
             return
-        records = [json.loads(line) for line in lines]
-        df = pd.DataFrame(records)
-    except (json.JSONDecodeError, ValueError) as e:
-        print(f"Error reading or parsing log file: {e}")
+    except Exception as e:
+        print(f"Error reading or parsing Parquet file: {e}")
         return
 
+    # --- DESERIALIZE JSON STRINGS ---
+    if 'parameters' in df.columns:
+        df['parameters'] = df['parameters'].apply(json.loads)
+    if 'trade_history' in df.columns:
+        df['trade_history'] = df['trade_history'].apply(lambda x: json.loads(x) if pd.notna(x) and isinstance(x, str) else [])
+    
     print(f"Preparing {len(df)} records for database ingestion...")
 
     # 1. Prepare and Ingest `ga_runs`
@@ -101,15 +104,19 @@ async def ingest_log_file_bulk(pool: asyncpg.Pool, file_path: str):
         """)
         
         returned_ids = await stmt.fetchmany(solutions_df.to_records(index=False))
-        id_map_df = pd.DataFrame(returned_ids, columns=['solution_id', 'run_id', 'generation', 'solution_idx'])
+        returned_ids_list = [dict(rec) for rec in returned_ids]
+        id_map_df = pd.DataFrame(returned_ids_list)
+
+        if not id_map_df.empty:
+            id_map_df.rename(columns={'id': 'solution_id'}, inplace=True)
+            id_map_df['run_id'] = id_map_df['run_id'].astype(str)
         
-        # --- FIX 1: Robustly merge and cast solution_id ---
         df = pd.merge(df, id_map_df, on=['run_id', 'generation', 'solution_idx'], how='left')
+
         if df['solution_id'].isnull().any():
             print(f"Warning: {df['solution_id'].isnull().sum()} records failed to match a solution_id and will be dropped.")
             df.dropna(subset=['solution_id'], inplace=True)
         df['solution_id'] = df['solution_id'].astype(int)
-        # --- END FIX 1 ---
 
     print(f"Ingested {len(solutions_df)} unique solutions.")
 
@@ -126,7 +133,6 @@ async def ingest_log_file_bulk(pool: asyncpg.Pool, file_path: str):
         'simulation_start_ts', 'simulation_end_ts', 'simulation_end_reason'
     ]
     
-    # --- FIX 2: Sanitize ALL numeric metrics, including `total_trades` ---
     numeric_metric_cols = [
         'final_portfolio_value', 'total_pnl', 'total_return_pct', 'win_rate',
         'profit_factor', 'max_drawdown', 'total_trades'
@@ -134,14 +140,17 @@ async def ingest_log_file_bulk(pool: asyncpg.Pool, file_path: str):
     for col in numeric_metric_cols:
         if col in backtests_df.columns:
             backtests_df[col] = backtests_df[col].apply(sanitize_metric)
-    # --- END FIX 2 ---
     
     backtests_df['simulation_start_ts'] = backtests_df['simulation_start_ts'].apply(parse_iso_datetime)
     backtests_df['simulation_end_ts'] = backtests_df['simulation_end_ts'].apply(parse_iso_datetime)
     
+    for col in backtest_cols:
+        if col not in backtests_df.columns:
+            backtests_df[col] = pd.NaT if 'ts' in col else None
+            
     async with pool.acquire() as conn:
         stmt_bt = await conn.prepare(f"""
-            INSERT INTO ga_backtests ({', '.join(backtest_cols)})
+            INSERT INTO ga_backtests ({', '.join(f'"{c}"' for c in backtest_cols)})
             VALUES ({', '.join([f'${i+1}' for i in range(len(backtest_cols))])})
             ON CONFLICT (solution_id, mint_tested) DO NOTHING
             RETURNING id, solution_id, mint_tested
@@ -156,17 +165,19 @@ async def ingest_log_file_bulk(pool: asyncpg.Pool, file_path: str):
     print(f"Ingested {len(backtests_df)} unique backtests.")
 
     # 4. Prepare and Ingest `ga_trades`
-    # --- FIX 3: Robustly handle and cast backtest_id ---
+    if 'backtest_id' not in df.columns or df['backtest_id'].isnull().all():
+        print("No valid backtest IDs were generated. Skipping trade ingestion.")
+        return
+        
     if df['backtest_id'].isnull().any():
         print(f"Warning: {df['backtest_id'].isnull().sum()} records could not be matched to a backtest_id and will be dropped before trade ingestion.")
         df.dropna(subset=['backtest_id'], inplace=True)
 
     if df.empty:
         print("No valid records remain after filtering. No trades to ingest.")
-        return # Exit if no data is left
+        return
 
     df['backtest_id'] = df['backtest_id'].astype(int)
-    # --- END FIX 3 ---
     
     trades_df = df[df['trade_history'].apply(lambda x: isinstance(x, list) and len(x) > 0)][['backtest_id', 'trade_history']]
     if not trades_df.empty:
@@ -176,19 +187,48 @@ async def ingest_log_file_bulk(pool: asyncpg.Pool, file_path: str):
 
         final_trades_df.rename(columns={'timestamp': 'trade_timestamp'}, inplace=True)
         trade_cols_to_ingest = ['backtest_id', 'trade_timestamp', 'type', 'price', 'amount_sol', 'amount_tokens', 'reason', 'pnl']
+        
+        # --- FIX 1: Ensure all expected columns exist, filling missing ones with None ---
+        for col in trade_cols_to_ingest:
+            if col not in final_trades_df.columns:
+                final_trades_df[col] = None
+        
         final_trades_df = final_trades_df.reindex(columns=trade_cols_to_ingest)
+        # --- END FIX 1 ---
         
         final_trades_df['trade_timestamp'] = final_trades_df['trade_timestamp'].apply(parse_iso_datetime)
+        
+        # --- FIX 2: Apply sanitation to all numeric trade columns to handle NaNs ---
         for col in ['price', 'amount_sol', 'amount_tokens', 'pnl']:
-            final_trades_df[col] = final_trades_df[col].apply(sanitize_metric)
+            if col in final_trades_df.columns:
+                final_trades_df[col] = final_trades_df[col].apply(sanitize_metric)
+        # --- END FIX 2 ---
+
+        # --- FIX 3 (APPLIED): Explicitly handle non-string types in text columns ---
+        # `pd.json_normalize` can introduce NaN (a float) for missing keys (e.g., 'reason' on a buy trade).
+        # This causes a TypeError on ingestion into a TEXT column. We convert NaN to None (which becomes NULL).
+        if 'reason' in final_trades_df.columns:
+            final_trades_df['reason'] = final_trades_df['reason'].apply(lambda x: str(x) if pd.notna(x) else None)
+        # --- END FIX 3 ---
 
         async with pool.acquire() as conn:
+            final_trades_df['backtest_id'] = final_trades_df['backtest_id'].astype(int)
             affected_backtest_ids = final_trades_df['backtest_id'].unique().tolist()
-            # It's safer to delete only from the backtests we are about to re-insert trades for
+
             if affected_backtest_ids:
                 await conn.execute("DELETE FROM ga_trades WHERE backtest_id = ANY($1::int[])", affected_backtest_ids)
             
-            await conn.copy_records_to_table('ga_trades', records=final_trades_df.to_records(index=False), columns=['backtest_id', 'timestamp', 'type', 'price', 'amount_sol', 'amount_tokens', 'reason', 'pnl'])
+            # The columns list for copy_records_to_table MUST match the database schema exactly
+            db_trade_columns = ['backtest_id', 'timestamp', 'type', 'price', 'amount_sol', 'amount_tokens', 'reason', 'pnl']
+            
+            # Rename dataframe column to match DB schema for copy_records_to_table
+            final_trades_df.rename(columns={'trade_timestamp': 'timestamp'}, inplace=True)
+            
+            await conn.copy_records_to_table(
+                'ga_trades', 
+                records=final_trades_df.to_records(index=False), 
+                columns=db_trade_columns
+            )
         print(f"Ingested {len(final_trades_df)} trades for {len(affected_backtest_ids)} backtests.")
 
 async def run_ingestion(log_file_path: str):
@@ -211,4 +251,5 @@ async def run_ingestion(log_file_path: str):
 
 if __name__ == "__main__":
     print("Running ingestion script in standalone mode...")
-    asyncio.run(run_ingestion(DEFAULT_LOG_FILE_PATH))
+    log_file_path_str = str(DEFAULT_LOG_FILE_PATH)
+    asyncio.run(run_ingestion(log_file_path_str))

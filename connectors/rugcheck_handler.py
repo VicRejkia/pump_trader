@@ -475,7 +475,7 @@ class Rugcheck:
                     if cull_reason:
                         logger.warning(f"🧹 Culling deprioritized token {mint} due to {cull_reason} for RugCheck.")
                         try:
-                            if self.websocket_handler and self.websocket_handler.websocket and self.websocket_handler.websocket.open:
+                            if self.websocket_handler and self.websocket_handler.get_status().get('is_connected'):
                                 async with self.state.lock:
                                     if mint in self.state.active_token_subscriptions:
                                         self.state.active_token_subscriptions.discard(mint)

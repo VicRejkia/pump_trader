@@ -278,7 +278,7 @@ DATA_SPLIT: Dict[str, float] = {
     "test": 0.2
 }
 HISTORICAL_DATA_START_TS: datetime = datetime(2025, 9, 20, 0, 0, 0)
-HISTORICAL_DATA_END_TS: datetime = datetime(2025, 9, 25, 0, 0, 0)
+HISTORICAL_DATA_END_TS: datetime = datetime(2025, 10, 12, 0, 0, 0)
 
 # --- Backtester Settings ---
 BACKTEST_INITIAL_CAPITAL: float = 100.0 # In SOL
@@ -291,4 +291,4 @@ MULTIPROCESSING_CORES: str = "12"
 
 # --- Results ---
 RESULTS_DIR: str = "ga_optimization_results"
-DETAILED_LOG_FILENAME: str = "ga_detailed_trade_log.jsonl"
+DETAILED_LOG_FILENAME: str = "ga_detailed_trade_log.parquet"
