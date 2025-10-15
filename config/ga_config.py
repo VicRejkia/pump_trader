@@ -269,7 +269,7 @@ FITNESS_GOAL: str = "max" # Maximize the metric
 # Example & Effect:
 #  - 0: Disables sampling, uses all available training tokens. Most accurate but slowest.
 #  - 30: Evaluates each strategy against 30 random tokens from the training set. A good balance of speed and accuracy.
-GA_FITNESS_SAMPLE_SIZE: Union[int, None] = 50
+GA_FITNESS_SAMPLE_SIZE: Union[int, None] = 0
 
 # --- Data Settings ---
 DATA_SPLIT: Dict[str, float] = {

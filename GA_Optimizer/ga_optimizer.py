@@ -13,6 +13,7 @@ import uuid
 from multiprocessing import Manager, freeze_support, Process, Queue
 from typing import Dict, List, Optional
 from glob import glob
+import gc  # For manual garbage collection
 
 # --- Project Setup ---
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -61,7 +62,7 @@ def fitness_func_main_process(ga_instance, solution: np.ndarray, solution_idx: i
     try:
         # --- ONE-TIME INITIALIZATION PER WORKER (FROM CACHE) ---
         if not WORKER_DATA:
-            logger.debug(f"Worker PID {os.getpid()}: Initializing... Loading data from Parquet cache.")
+            logger.debug(f"Worker PID {os.getpid()}: Initializing... Loading metadata (paths, lifespans, snapshots) from Parquet cache.")
             date_str = f"{HISTORICAL_DATA_START_TS.strftime('%Y%m%d')}_{HISTORICAL_DATA_END_TS.strftime('%Y%m%d')}"
             cache_dir = os.path.join(GA_CACHE_PATH, date_str)
 
@@ -70,9 +71,10 @@ def fitness_func_main_process(ga_instance, solution: np.ndarray, solution_idx: i
                 logger.debug("Please run 'python GA_Optimizer/prepare_ga_dataset.py' first.")
                 return worst_fitness
             
-            # 1. Load main OHLCV data
+            # 1. Load mint-to-path for OHLCV (LAZY: don't load data yet)
             ohlcv_dir = os.path.join(cache_dir, "ohlcv_data")
-            all_data = {os.path.basename(f).replace('.parquet', ''): pd.read_parquet(f) for f in glob(os.path.join(ohlcv_dir, "*.parquet"))}
+            mint_to_path = {os.path.basename(f).replace('.parquet', ''): f for f in glob(os.path.join(ohlcv_dir, "*.parquet"))}
+            all_mints = list(mint_to_path.keys())
 
             # 2. Load lifespans
             lifespans_df = pd.read_parquet(os.path.join(cache_dir, "token_lifespans.parquet"))
@@ -83,55 +85,84 @@ def fitness_func_main_process(ga_instance, solution: np.ndarray, solution_idx: i
             dexscreener_snapshots = {os.path.basename(f).replace('.parquet', ''): pd.read_parquet(f) for f in glob(os.path.join(snapshots_dir, "*.parquet"))}
 
             # Split data into train/validation/test sets
-            all_mints = sorted(list(all_data.keys()))
+            all_mints = sorted(list(mint_to_path.keys()))
             random.Random(42).shuffle(all_mints) # Use a fixed seed for reproducibility
             train_ratio, val_ratio = DATA_SPLIT['training'], DATA_SPLIT['validation']
             train_idx = int(len(all_mints) * train_ratio)
             val_idx = int(len(all_mints) * (train_ratio + val_ratio))
             
             train_mints = all_mints[:train_idx]
-            
-            WORKER_DATA['train_data'] = {m: all_data[m] for m in train_mints}
+            val_mints = all_mints[train_idx:val_idx]
+            test_mints = all_mints[val_idx:]
+
+            # Store paths for train set (lazy)
+            WORKER_DATA['train_data_paths'] = {m: mint_to_path[m] for m in train_mints}
+            WORKER_DATA['validation_data'] = {m: pd.read_parquet(mint_to_path[m]) for m in val_mints}
+            WORKER_DATA['test_data'] = {m: pd.read_parquet(mint_to_path[m]) for m in test_mints}
             WORKER_DATA['lifespans'] = token_lifespans
             WORKER_DATA['snapshots'] = dexscreener_snapshots
-            logger.debug(f"Worker PID {os.getpid()}: Data loaded. {len(train_mints)} training tokens available.")
+            WORKER_DATA['train_mints'] = train_mints  # Store for sampling
+            logger.debug(f"Worker PID {os.getpid()}: Loaded {len(WORKER_DATA['train_mints'])} train mints, {len(WORKER_DATA['validation_data'])} validation mints, {len(WORKER_DATA['test_data'])} test mints.")
 
         # --- REGULAR FITNESS CALCULATION ---
-        training_data = WORKER_DATA.get('train_data', {})
-        if not training_data: return worst_fitness
+        train_mints = WORKER_DATA.get('train_mints', [])
+        if not train_mints:
+            logger.warning(f"Worker PID {os.getpid()}: No training mints available.")
+            return worst_fitness
         
-        available_mints = list(training_data.keys())
-        parameters = {p['name']: p['type'](np.round(solution[i]) if p['type'] == int else solution[i]) for i, p in enumerate(OPTIMIZABLE_PARAMETERS)}
+        parameters = {p['name']: p['type'](float(solution[i]) if p['type'] in [float, 'float'] else int(round(solution[i]))) for i, p in enumerate(OPTIMIZABLE_PARAMETERS)}
         
         sample_size = GA_FITNESS_SAMPLE_SIZE
-        mints_to_evaluate = available_mints if not sample_size or sample_size >= len(available_mints) else random.sample(available_mints, min(sample_size, len(available_mints)))
+        mints_to_evaluate = train_mints if not sample_size or sample_size >= len(train_mints) else random.sample(train_mints, min(sample_size, len(train_mints)))
+        logger.debug(f"Worker PID {os.getpid()}: Evaluating solution {solution_idx} on {len(mints_to_evaluate)} mints (sample size: {sample_size})")
 
         fitness_values = []
         for mint in mints_to_evaluate:
-            df_data = training_data.get(mint)
+            # Lazy load ONLY this mint's OHLCV data
+            path = WORKER_DATA['train_data_paths'].get(mint)
+            if not path or not os.path.exists(path):
+                logger.warning(f"No Parquet file found for mint {mint}. Skipping.")
+                continue
+            df_data = pd.read_parquet(path)
+            
             lifespan = WORKER_DATA['lifespans'].get(mint)
             snapshots = WORKER_DATA['snapshots'].get(mint)
 
-            if df_data is None: continue
+            if df_data is None:
+                logger.warning(f"No data loaded for mint {mint}. Skipping.")
+                continue
 
             max_timestamp = lifespan['end_ts'] if lifespan else None
             parameters['mint'] = mint
             
-            log_record = { "run_id": ga_instance.run_id, "generation": ga_instance.generations_completed, "solution_idx": solution_idx, "mint_tested": mint, "parameters": parameters, "status": "success" }
+            log_record = {
+                "run_id": ga_instance.run_id,
+                "generation": ga_instance.generations_completed,
+                "solution_idx": solution_idx,
+                "mint_tested": mint,
+                "parameters": parameters,
+                "status": "success"
+            }
             try:
                 result = run_backtest_sync(parameters, df_data, BACKTEST_INITIAL_CAPITAL, max_timestamp, snapshots, ga_instance.indicator_cache)
                 if isinstance(result, dict):
                     log_record.update(result)
                     fitness = result.get(FITNESS_METRIC)
-                    if fitness is not None and pd.notna(fitness) and np.isfinite(fitness): fitness_values.append(float(fitness))
+                    if fitness is not None and pd.notna(fitness) and np.isfinite(fitness):
+                        fitness_values.append(float(fitness))
                 else:
                     log_record.update({"status": "failed", "error_message": "Backtest returned invalid result."})
             except Exception as e:
                 log_record.update({"status": "failed", "error_message": str(e)})
+            finally:
+                del df_data  # Free memory
+                gc.collect()  # Force garbage collection
 
             ga_instance.log_queue.put(log_record)
 
-        if not fitness_values: return worst_fitness
+        if not fitness_values:
+            logger.warning(f"No valid backtests completed for solution {solution_idx}.")
+            return worst_fitness
         average_fitness = np.mean(fitness_values)
         return average_fitness if np.isfinite(average_fitness) else worst_fitness
 
@@ -139,7 +170,7 @@ def fitness_func_main_process(ga_instance, solution: np.ndarray, solution_idx: i
         logger.debug(f"CRITICAL ERROR in worker PID {os.getpid()}: {e}")
         return worst_fitness
 
-# --- PyGAD Callbacks (Unchanged from original) ---
+# --- PyGAD Callbacks (Unchanged) ---
 def on_generation(ga_instance):
     generation = ga_instance.generations_completed
     if not hasattr(ga_instance, 'best_solutions_fitness') or not ga_instance.best_solutions_fitness:
@@ -155,19 +186,17 @@ def on_generation(ga_instance):
         if generation > 0 and (generation % 5 == 0 or generation == ga_instance.num_generations):
             if ga_instance.best_solutions:
                 best_solution = ga_instance.best_solutions[-1]
-                best_params_dict = {p['name']: p['type'](np.round(best_solution[i]) if p['type'] == int else best_solution[i]) for i, p in enumerate(OPTIMIZABLE_PARAMETERS)}
+                best_params_dict = {p['name']: p['type'](float(best_solution[i]) if p['type'] in [float, 'float'] else int(round(best_solution[i]))) for i, p in enumerate(OPTIMIZABLE_PARAMETERS)}
                 logger.info(f"Best Solution Parameters @ Gen {generation}:\n{json.dumps(best_params_dict, indent=2)}")
     except Exception as e:
         logger.error(f"Error in on_generation callback: {e}", exc_info=True)
 
-# --- Final Evaluation Helper (Simplified for brevity, can be expanded) ---
+# --- Final Evaluation Helper (Unchanged) ---
 async def evaluate_solution(parameters: Dict, data_set_key: str, initial_capital: float, cache_for_eval: Optional[Dict] = None):
-    # This function would also need to be adapted to load data from the cache for a full implementation.
-    # For now, it serves as a placeholder as it's outside the main parallel loop.
     logger.warning(f"Evaluation on '{data_set_key}' set is a placeholder. Full implementation should load from cache.")
     return {"data_set": data_set_key, "status": "placeholder"}
 
-# --- Main Logic (Simplified, No DB Connection) ---
+# --- Main Logic ---
 async def main_async_logic(log_queue, shared_cache):
     setup_logging(logger_name="ga_optimizer")
     try:
@@ -183,10 +212,21 @@ async def main_async_logic(log_queue, shared_cache):
         optimization_run_id = str(uuid.uuid4())
         logger.info(f"Starting Optimization Run ID: {optimization_run_id}")
         
+        # Validate OPTIMIZABLE_PARAMETERS
+        for param in OPTIMIZABLE_PARAMETERS:
+            param_name = param.get('name', 'Unnamed')
+            param_type = param.get('type', float)
+            if 'values' not in param and ('low' not in param or 'high' not in param):
+                logger.error(f"Parameter {param_name} is missing 'values' or both 'low' and 'high'. Configuration: {param}")
+                raise ValueError(f"Invalid parameter configuration for {param_name}")
+            if param_type not in [float, int, bool, 'float', 'int', 'bool']:
+                logger.error(f"Parameter {param_name} has invalid type '{param_type}'. Must be float, int, bool, 'float', 'int', or 'bool'. Configuration: {param}")
+                raise ValueError(f"Invalid parameter type for {param_name}")
+
         gene_space = [{'low': p['low'], 'high': p['high']} if 'low' in p else p['values'] for p in OPTIMIZABLE_PARAMETERS]
         num_processes = os.cpu_count() - 2 if MULTIPROCESSING_CORES == "auto" and os.cpu_count() and os.cpu_count() > 2 else int(MULTIPROCESSING_CORES)
         
-        # --- THIS IS THE FIX: Restored Population Seeding Logic ---
+        # --- Population Seeding Logic ---
         logger.info("Building a seeded initial population...")
         initial_population = []
         
@@ -220,7 +260,6 @@ async def main_async_logic(log_queue, shared_cache):
                 new_solution[gene_idx] = param_space['type'](new_gene)
             initial_population.append(new_solution)
         logger.info(f"Seeded population of {len(initial_population)} individuals created.")
-        # --- END OF FIX ---
         
         ga_instance = pygad.GA(
             num_generations=NUM_GENERATIONS, 
@@ -250,14 +289,14 @@ async def main_async_logic(log_queue, shared_cache):
         ga_instance.run()
         logger.info(f"--- GA Optimization Finished (Duration: {(time.time() - start_time)/60:.2f} minutes) ---")
         
-        # --- NEW: SAVE BEST SOLUTION TO JSON ---
+        # --- Save Best Solution to JSON ---
         if hasattr(ga_instance, 'best_solution_generation') and ga_instance.best_solution_generation != -1:
             solution, solution_fitness, solution_idx = ga_instance.best_solution()
             
             logger.info(f"Best solution found at generation {ga_instance.best_solution_generation} with fitness: {solution_fitness}")
             
             best_params_dict = {
-                p['name']: p['type'](np.round(solution[i]) if p['type'] == int else solution[i])
+                p['name']: p['type'](float(solution[i]) if p['type'] in [float, 'float'] else int(round(solution[i])))
                 for i, p in enumerate(OPTIMIZABLE_PARAMETERS)
             }
             
@@ -266,8 +305,8 @@ async def main_async_logic(log_queue, shared_cache):
                 "best_solution_id": f"gen{ga_instance.best_solution_generation}_idx{solution_idx}",
                 "best_solution_parameters": best_params_dict,
                 "best_solution_fitness_training": solution_fitness,
-                "validation_metrics": {"status": "not_run"}, # Placeholder
-                "test_metrics": {"status": "not_run"} # Placeholder
+                "validation_metrics": {"status": "not_run"},
+                "test_metrics": {"status": "not_run"}
             }
             
             # Generate filename and save
@@ -283,7 +322,6 @@ async def main_async_logic(log_queue, shared_cache):
                 logger.error(f"Failed to save best parameters to JSON: {e}", exc_info=True)
         else:
             logger.warning("No best solution was found or recorded by the GA instance. Skipping JSON export.")
-        # --- END NEW ---
 
     except Exception as e:
         logger.critical(f"A critical error occurred in main_async_logic: {e}", exc_info=True)
@@ -317,3 +355,4 @@ if __name__ == "__main__":
                 logger.info("--- Database Ingestion Completed Successfully ---")
         except Exception as e:
             logger.error(f"DB ingestion failed: {e}", exc_info=True)
+        logger.info("Open GA Dashboard with: 'streamlit run GA_Optimizer/ga_dashboard.py'")
