@@ -24,27 +24,27 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
     },
     {
         "name": "INITIAL_STOP_LOSS_PERCENT",
-        "values": list(range(10, 41, 2)),    # Range: 10, 12, ..., 40
+        "values": list(range(5, 51, 5)),    # Range: 10, 12, ..., 40
         "type": float
     },
     {
         "name": "FIRST_SELL_PERCENT",
-        "values": list(range(5, 101, 5)),    # Range: 5, 10, ..., 100
+        "values": list(range(10, 81, 10)),    # Range: 5, 10, ..., 100
         "type": float
     },
     {
         "name": "FIRST_SELL_PROFIT_MARGIN",
-        "values": list(range(10, 201, 50)), # Range: 10, 60, 110, 160
+        "values": list(range(20, 151, 10)), # Range: 10, 60, 110, 160
         "type": float
     },
     {
         "name": "TRAILING_STOP_LOSS_PERCENT",
-        "values": list(range(5, 61, 5)),    # Range: 5, 10, ..., 60
+        "values": list(range(5, 31, 2)),    # Range: 5, 10, ..., 60
         "type": float
     },
     {
         "name": "SECOND_TAKE_PROFIT_PERCENT", # Note: This is now a fallback if dynamic TP is disabled.
-        "values": list(range(200, 601, 50)), # Range: 200, 250, ..., 600
+        "values": list(range(150, 801, 50)), # Range: 200, 250, ..., 600
         "type": float
     },
 
@@ -99,7 +99,7 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
     },
     {
         "name": "MIN_VOLATILITY",
-        "values": [round(x * 0.01, 2) for x in range(10, 31)], # Range: 0.10, 0.11, ..., 0.30
+        "values": [round(x * 0.01, 2) for x in range(5, 41)], # Range: 0.10, 0.11, ..., 0.30
         "type": float
     },
     {
@@ -121,7 +121,7 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
     },
     {
         "name": "STOP_LOSS_COOLDOWN_MINUTES",
-        "values": list(range(1, 21, 2)),      # Range: 1, 3, ..., 19
+        "values": list(range(5, 46, 5)),      # Range: 1, 3, ..., 19
         "type": int
     },
     {
@@ -141,7 +141,7 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
     },
     {
         "name": "RSI_PERIOD",
-        "values": list(range(4, 15, 1)),      # Range: 4, 5, ..., 14
+        "values": list(range(4, 21, 2)),      # Range: 4, 5, ..., 14
         "type": int
     },
     {
@@ -202,7 +202,7 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
 # Example & Effect:
 #   - 50 (Smaller): Faster, narrower search. Good for quick tests but might miss optimal strategies.
 #   - 200 (Larger): Slower, more comprehensive search. Less likely to get stuck on a suboptimal solution.
-POPULATION_SIZE: int = 150
+POPULATION_SIZE: int = 50
 
 # NUM_GENERATIONS
 # Explanation: The number of evolutionary cycles the algorithm will run. More generations
@@ -211,7 +211,7 @@ POPULATION_SIZE: int = 150
 # Example & Effect:
 #   - 50 (Fewer): Finishes quickly but solutions may not be fully optimized.
 #   - 1000 (Larger): A very deep search, allowing for significant improvement over time. Expect long run times.
-NUM_GENERATIONS: int = 50
+NUM_GENERATIONS: int = 100
 
 # CROSSOVER_PROBABILITY
 # Explanation: The probability that two successful "parent" strategies will combine
@@ -229,7 +229,7 @@ CROSSOVER_PROBABILITY: float = 0.8
 # Example & Effect:
 #   - 0.1 (Lower): A more focused search that refines existing strategies. Risks getting stuck.
 #   - 0.7 (Higher): A more chaotic and exploratory search. Good for finding unique solutions but can slow down refinement.
-MUTATION_PROBABILITY: float = 0.2
+MUTATION_PROBABILITY: float = 0.5
 
 # KEEP_ELITISM
 # Explanation: The number of the absolute best strategies from a generation that are
@@ -269,7 +269,7 @@ FITNESS_GOAL: str = "max" # Maximize the metric
 # Example & Effect:
 #  - 0: Disables sampling, uses all available training tokens. Most accurate but slowest.
 #  - 30: Evaluates each strategy against 30 random tokens from the training set. A good balance of speed and accuracy.
-GA_FITNESS_SAMPLE_SIZE: Union[int, None] = 30
+GA_FITNESS_SAMPLE_SIZE: Union[int, None] = 50
 
 # --- Data Settings ---
 DATA_SPLIT: Dict[str, float] = {

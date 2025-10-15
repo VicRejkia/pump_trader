@@ -250,11 +250,40 @@ async def main_async_logic(log_queue, shared_cache):
         ga_instance.run()
         logger.info(f"--- GA Optimization Finished (Duration: {(time.time() - start_time)/60:.2f} minutes) ---")
         
-        # Final evaluation logic
+        # --- NEW: SAVE BEST SOLUTION TO JSON ---
         if hasattr(ga_instance, 'best_solution_generation') and ga_instance.best_solution_generation != -1:
             solution, solution_fitness, solution_idx = ga_instance.best_solution()
-            best_params = {p['name']: p['type'](solution[i]) for i, p in enumerate(OPTIMIZABLE_PARAMETERS)}
-            # ... (rest of the post-run analysis remains the same)
+            
+            logger.info(f"Best solution found at generation {ga_instance.best_solution_generation} with fitness: {solution_fitness}")
+            
+            best_params_dict = {
+                p['name']: p['type'](np.round(solution[i]) if p['type'] == int else solution[i])
+                for i, p in enumerate(OPTIMIZABLE_PARAMETERS)
+            }
+            
+            # Construct the final JSON object
+            results_to_save = {
+                "best_solution_id": f"gen{ga_instance.best_solution_generation}_idx{solution_idx}",
+                "best_solution_parameters": best_params_dict,
+                "best_solution_fitness_training": solution_fitness,
+                "validation_metrics": {"status": "not_run"}, # Placeholder
+                "test_metrics": {"status": "not_run"} # Placeholder
+            }
+            
+            # Generate filename and save
+            date_today_str = datetime.now().strftime("%Y%m%d")
+            filename = f"ga_results_{date_today_str}_{optimization_run_id}.json"
+            output_path = os.path.join(RESULTS_DIR, filename)
+            
+            try:
+                with open(output_path, 'w') as f:
+                    json.dump(results_to_save, f, indent=4, cls=NpEncoder)
+                logger.info(f"✅ Successfully saved best parameters to {output_path}")
+            except Exception as e:
+                logger.error(f"Failed to save best parameters to JSON: {e}", exc_info=True)
+        else:
+            logger.warning("No best solution was found or recorded by the GA instance. Skipping JSON export.")
+        # --- END NEW ---
 
     except Exception as e:
         logger.critical(f"A critical error occurred in main_async_logic: {e}", exc_info=True)
