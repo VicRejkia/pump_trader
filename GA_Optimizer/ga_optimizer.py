@@ -27,7 +27,7 @@ from config.ga_config import (
     MUTATION_PROBABILITY, FITNESS_METRIC, FITNESS_GOAL, DATA_SPLIT,
     BACKTEST_INITIAL_CAPITAL, RESULTS_DIR, HISTORICAL_DATA_START_TS,
     HISTORICAL_DATA_END_TS, MULTIPROCESSING_CORES, KEEP_ELITISM, PARENT_SELECTION_TYPE,
-    CROSSOVER_TYPE, MUTATION_TYPE, GA_FITNESS_SAMPLE_SIZE, DETAILED_LOG_FILENAME
+    CROSSOVER_TYPE, MUTATION_TYPE, GA_FITNESS_SAMPLE_SIZE, DETAILED_LOG_FILENAME, STOP_CRITERIA
 )
 from GA_Optimizer.ga_backtester import run_backtest_sync
 from utils import NpEncoder
@@ -277,7 +277,7 @@ async def main_async_logic(log_queue, shared_cache):
             keep_elitism=max(0, KEEP_ELITISM), 
             on_generation=on_generation, 
             parallel_processing=['process', num_processes], 
-            stop_criteria="saturate_15"
+            stop_criteria=STOP_CRITERIA
         )
         
         ga_instance.log_queue = log_queue

@@ -1349,10 +1349,16 @@ class DatabaseClient:
                 logger.debug(f"Token {mint} is within the {grace_period_minutes}-minute migration grace period ({time_since_migration.total_seconds():.0f}s ago). Stale volume check will be bypassed.")
 
         # The price is considered invalid ONLY IF it's stale by volume AND we are NOT within the grace period.
+        # If the volume is stale and we are outside the grace period, the price is invalid.
+        # However, we MUST still return the last known market cap.
         if is_stale_by_volume and not is_within_grace_period:
-            logger.warning(f"DEXScreener data for {mint} is stale (0 volume in m5) and outside the migration grace period. Treating price AND market cap as invalid.")
-            return {'price': None, 'market_cap': None}
-        # --- END OF FIX ---
+            logger.warning(f"DEXScreener data for {mint} is stale (0 volume in m5). Price is invalid, but using latest market cap for safety checks.")
+            # Calculate the market cap in SOL from the USD values in the record
+            market_cap_usd = float(record['market_cap'])
+            sol_price_usd = float(record['sol_price_usd'])
+            market_cap_sol = market_cap_usd / sol_price_usd
+            # Return a valid market cap but an invalid price
+            return {'price': None, 'market_cap': market_cap_sol}
 
         price_usd = float(record['price_usd'])
         market_cap_usd = float(record['market_cap'])

@@ -650,7 +650,10 @@ class TradingManager:
     # --- THIS IS THE CORRECTLY INDENTED METHOD ---
     async def check_sell_opportunities(self):
         """
-        [REFACTORED v2] Checks for sell opportunities with restored logging and a hybrid strategy for the second take-profit.
+        [REFACTORED v3] Checks for sell opportunities with combined post-TP1 logic.
+        - After TP1, it uses a hybrid trailing stop: the higher of (breakeven, simple % trail, dynamic Chandelier Exit).
+        - It also sells if a trend reversal (EMA cross-down) is detected.
+        - Includes full logic for stale volume checks on migrated tokens and detailed logging.
         """
         if self.state.shutdown_event.is_set():
             return
@@ -669,13 +672,12 @@ class TradingManager:
 
                     for position in positions:
                         pos_id, mint, token_data_source, volume_stale_since = position['id'], position['mint'], position['data_source'], position['volume_stale_since']
-                        token_data_source = position['data_source']
-                        volume_stale_since = position['volume_stale_since']
-
+                        
                         price_data = await self.db.get_price_and_market_cap_for_decision(mint, self.config, conn)
                         current_price_to_use = price_data.get('price')
                         current_market_cap_sol_for_log = price_data.get('market_cap')
                         
+                        # --- Stale Volume Check for Migrated Tokens (Restored) ---
                         if token_data_source == 'DEXSCREENER':
                             if current_price_to_use is None:
                                 min_mcap_threshold_usd = self.config['MIN_MARKETCAP_THRESHOLD']
@@ -712,7 +714,8 @@ class TradingManager:
                             elif volume_stale_since is not None:
                                 logger.info(f"✅ Token {mint} (ID: {pos_id}) has recovered volume. Resetting stale timer.")
                                 await conn.execute("UPDATE portfolio SET volume_stale_since = NULL WHERE id = $1", pos_id)
-
+                        
+                        # --- Detailed Logging (Restored) ---
                         safe_price = format_price_for_log(current_price_to_use)
                         safe_mcap = f"{current_market_cap_sol_for_log:,.2f}" if current_market_cap_sol_for_log is not None else "N/A"
                         pnl_emoji, unrealized_pnl_str = "❓", "\tPnL: N/A"
@@ -730,10 +733,11 @@ class TradingManager:
                                 unrealized_pnl_str, pnl_emoji = "\tPnL: [bold yellow]error[/bold yellow]", "⚠️"
 
                         logger.debug(f":abacus: Checking sell for {mint:<44} (ID: {pos_id:<4}) {pnl_emoji} ({token_data_source[:4]}) - Price: {safe_price:<12} MCap: {safe_mcap:<10} SOL {unrealized_pnl_str}")
-                        
+
                         if current_price_to_use is None or current_price_to_use <= 0:
                             continue
 
+                        # --- Variable Initialization (Unchanged) ---
                         buy_price = float(position['buy_price'])
                         initial_tokens = float(position['initial_tokens'])
                         active_stop_loss_price = float(position['stop_loss_price'])
@@ -749,105 +753,102 @@ class TradingManager:
                             await self.db.update_portfolio_highest_price(pos_id, current_price_to_use, conn)
 
                         sell_reason = None
-                        sell_all = False
-                        sell_partial = False
-                        sell_percentage_of_initial = 0.0 
                         trigger_values_for_log = {}
 
+                        # --- PRE-TP1 LOGIC (Unchanged) ---
                         if not first_tp_hit:
                             if current_price_to_use <= active_stop_loss_price:
                                 sell_reason = "Stop Loss"
-                                sell_all = True
                                 trigger_values_for_log = {"stop_loss_price_threshold": active_stop_loss_price}
                             elif current_price_to_use >= second_tp_price:
                                 sell_reason = "Second TP"
-                                sell_all = True
                                 trigger_values_for_log = {"second_tp_price_threshold": second_tp_price}
                             elif current_price_to_use >= initial_tp_price:
                                 sell_reason = "First TP"
-                                sell_partial = True
-                                sell_percentage_of_initial = self.config['FIRST_SELL_PERCENT'] / 100.0
                                 trigger_values_for_log = {"first_tp_price_threshold": initial_tp_price}
                         
-                        else: # first_tp_hit is True
-                            if self.config['USE_DYNAMIC_SECOND_TP']:
-                                # --- START OF FIX ---
-                                # 1. OPTIMIZATION: Only fetch recent data for indicators.
-                                lookback_hours = self.config.get('INDICATOR_LOOKBACK_HOURS', 2.0)
-                                start_date = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
-                                historical_data = await self.db.get_historical_data_for_backtesting([mint], start_date, None)
-
-                                if historical_data and mint in historical_data:
-                                    # 2. OFFLOADING: Run the blocking calculation in an executor.
-                                    loop = asyncio.get_running_loop()
-                                    df_indicators = await loop.run_in_executor(
-                                        None,  # Use the default thread pool executor
-                                        calculate_trend_indicators,  # The synchronous function to run
-                                        historical_data[mint],       # First argument
-                                        self.config                  # Second argument
-                                    )
-                                    if not df_indicators.empty:
-                                        latest = df_indicators.iloc[-1]
-                                        atr_col = f"ATRr_{self.config['ADAPTIVE_ATR_PERIOD']}"
-                                        rsi_col = f"RSI_{self.config['RSI_PERIOD']}"
-
-                                        if atr_col in latest and rsi_col in latest and pd.notna(latest[atr_col]) and pd.notna(latest[rsi_col]):
-                                            multiplier = self.config['ADAPTIVE_ATR_BASE_MULTIPLIER']
-                                            if latest[rsi_col] >= self.config['ADAPTIVE_RSI_EXTREME_LEVEL']:
-                                                multiplier = self.config['ADAPTIVE_ATR_EXTREME_MULTIPLIER']
-                                            elif latest[rsi_col] >= self.config['ADAPTIVE_RSI_STRONG_LEVEL']:
-                                                multiplier = self.config['ADAPTIVE_ATR_STRONG_MULTIPLIER']
-                                            
-                                            chandelier_exit_price = highest_price_since_buy - (multiplier * latest[atr_col])
-                                            
-                                            if current_price_to_use < chandelier_exit_price:
-                                                sell_reason = "Dynamic Exit (Chandelier)"
-                                                sell_all = True
-                                                trigger_values_for_log = {
-                                                    "chandelier_exit_price": chandelier_exit_price,
-                                                    "highest_price": highest_price_since_buy,
-                                                    "atr": latest[atr_col], "rsi": latest[rsi_col], "multiplier_used": multiplier
-                                                }
-                            else:
-                                trailing_sl_price = highest_price_since_buy * (1 - self.config['TRAILING_STOP_LOSS_PERCENT'] / 100.0)
-                                if current_price_to_use >= second_tp_price:
-                                    sell_reason = "Second TP"
-                                    sell_all = True
-                                    trigger_values_for_log = {"second_tp_price_threshold": second_tp_price}
-                                elif current_price_to_use <= trailing_sl_price:
-                                    sell_reason = "Trailing SL"
-                                    sell_all = True
-                                    trigger_values_for_log = {"trailing_sl_price_threshold": trailing_sl_price, "highest_price_at_trigger": highest_price_since_buy}
+                        # --- START REFACTORED SECTION ---
+                        # --- POST-TP1 LOGIC (Refactored) ---
+                        else:
+                            # 1. Fetch indicator data once for all post-TP1 checks
+                            lookback_hours = self.config.get('INDICATOR_LOOKBACK_HOURS', 2.0)
+                            start_date = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+                            historical_data = await self.db.get_historical_data_for_backtesting([mint], start_date, None)
                             
-                            if not sell_reason and current_price_to_use <= active_stop_loss_price:
-                                sell_reason = "Breakeven SL"
-                                sell_all = True
-                                trigger_values_for_log = {"stop_loss_price_threshold": active_stop_loss_price}
+                            df_indicators = pd.DataFrame() # Default to empty
+                            if historical_data and mint in historical_data:
+                                if len(historical_data[mint]) >= self.config.get('MIN_CANDLE_DATA_FOR_INDICATORS', 30):
+                                    loop = asyncio.get_running_loop()
+                                    df_indicators = await loop.run_in_executor(None, calculate_trend_indicators, historical_data[mint], self.config)
+                                else:
+                                    logger.debug(f"Not enough historical data for {mint} ({len(historical_data[mint])} points) to calculate indicators for sell logic.")
 
+                            # 2. Check for Trend Reversal Signal (EMA Cross) first
+                            if not df_indicators.empty and len(df_indicators) >= 2:
+                                latest = df_indicators.iloc[-1]
+                                previous = df_indicators.iloc[-2]
+                                # Check for a bearish crossover event
+                                if latest.get('EMA_fast') < latest.get('EMA_slow') and previous.get('EMA_fast') >= previous.get('EMA_slow'):
+                                    sell_reason = "Trend Reversal (EMA Cross)"
+                                    trigger_values_for_log = {"ema_fast": latest.get('EMA_fast'), "ema_slow": latest.get('EMA_slow')}
+                                    logger.info(f" EMA cross-down detected for {mint}. Fast EMA: {latest.get('EMA_fast'):.9f}, Slow EMA: {latest.get('EMA_slow'):.9f}")
+
+
+                            # 3. If no trend reversal, then check the hybrid trailing stop-loss
+                            if not sell_reason:
+                                # Start with the breakeven price as the minimum SL
+                                effective_sl_price = active_stop_loss_price
+                                
+                                # Calculate simple percentage-based trailing stop
+                                simple_trailing_sl = highest_price_since_buy * (1 - self.config['TRAILING_STOP_LOSS_PERCENT'] / 100.0)
+                                effective_sl_price = max(effective_sl_price, simple_trailing_sl)
+                                
+                                # If dynamic mode is on, calculate Chandelier Exit and see if it's an even higher (more protective) SL
+                                if self.config['USE_DYNAMIC_SECOND_TP'] and not df_indicators.empty:
+                                    latest = df_indicators.iloc[-1]
+                                    atr_col = f"ATRr_{self.config['ADAPTIVE_ATR_PERIOD']}"
+                                    rsi_col = f"RSI_{self.config['RSI_PERIOD']}"
+                                    
+                                    if atr_col in latest and rsi_col in latest and pd.notna(latest[atr_col]) and pd.notna(latest[rsi_col]):
+                                        multiplier = self.get_adaptive_atr_multiplier(latest[rsi_col])
+                                        chandelier_exit = highest_price_since_buy - (multiplier * latest[atr_col])
+                                        effective_sl_price = max(effective_sl_price, chandelier_exit)
+                                        # Log for debugging which SL is being chosen
+                                        logger.debug(f"Dynamic SL for {mint}: Breakeven={active_stop_loss_price:.9f}, SimpleTrail={simple_trailing_sl:.9f}, Chandelier={chandelier_exit:.9f} -> Effective SL={effective_sl_price:.9f}")
+
+                                # Check if the current price has breached the final effective stop-loss
+                                if current_price_to_use <= effective_sl_price:
+                                    sell_reason = "Trailing SL Hybrid"
+                                    trigger_values_for_log = {
+                                        "effective_sl_price": effective_sl_price, 
+                                        "highest_price": highest_price_since_buy,
+                                        "breakeven_price": active_stop_loss_price,
+                                        "simple_trail_price": simple_trailing_sl
+                                    }
+                        # --- END REFACTORED SECTION ---
+
+                        # --- EMERGENCY & FINAL SELL EXECUTION (Restored) ---
                         if not sell_reason:
                             if current_market_cap_sol_for_log is not None and current_market_cap_sol_for_log > 0 and \
                                (current_market_cap_sol_for_log * sol_price_usd) < self.config['MIN_MARKETCAP_THRESHOLD']:
                                 sell_reason = "Emergency SL (MCap)"
-                                sell_all = True
-                                trigger_values_for_log = {"current_market_cap_usd_at_trigger": (current_market_cap_sol_for_log * sol_price_usd), "min_mcap_threshold_config": self.config['MIN_MARKETCAP_THRESHOLD']}
+                                sell_trigger_values = {"current_market_cap_usd_at_trigger": (current_market_cap_sol_for_log * sol_price_usd), "min_mcap_threshold_config": self.config['MIN_MARKETCAP_THRESHOLD']}
 
                         if sell_reason:
-                            log_message_sell_trigger = (
-                                f"Trigger for {mint} (ID: {pos_id}): Reason='{sell_reason}', "
-                                f"PriceToUse={current_price_to_use:.9f} (Method: {self.config.get('PRICE_DETERMINATION_METHOD')}), "
-                            )
+                            # Determine sell percentage based on reason
+                            sell_percentage_of_initial = 0.0 
+                            if sell_reason == "First TP":
+                                sell_percentage_of_initial = self.config['FIRST_SELL_PERCENT'] / 100.0
+                            else: # All other reasons sell 100% of remaining
+                                sell_percentage_of_initial = 1.0 
+                            
+                            log_message_sell_trigger = (f"Trigger for {mint} (ID: {pos_id}): Reason='{sell_reason}', PriceToUse={current_price_to_use:.9f}")
                             logger.info(log_message_sell_trigger)
                             
-                            percentage_to_sell_api = 0.0
-                            if sell_partial: 
-                                percentage_to_sell_api = sell_percentage_of_initial 
-                            elif sell_all:
-                                percentage_to_sell_api = 1.0 
-
                             profit_from_sell = await self.execute_sell(
                                 conn, mint, current_price_to_use, 
                                 current_market_cap_sol_for_log if current_market_cap_sol_for_log is not None else 0.0,
-                                sell_reason, percentage_to_sell_api, 
+                                sell_reason, sell_percentage_of_initial, 
                                 pos_id, trigger_values_for_log
                             )
                             

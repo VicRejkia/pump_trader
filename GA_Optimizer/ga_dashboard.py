@@ -1,9 +1,6 @@
 # FILE: GA_Optimizer/ga_dashboard.py
-# **FIX:** This version corrects a NumPy data type error and uses the
-# correct parameter for stretching dataframes to the full container width.
-# Make sure to have 'psycopg2-binary' installed: pip install psycopg2-binary
-
-# run it with: streamlit run GA_Optimizer/ga_dashboard.py
+# **MODIFIED:** This version makes the parameter plot dynamic, improves
+# the chart layout for dark mode, and uses the latest Streamlit APIs.
 
 import os
 from pathlib import Path
@@ -13,6 +10,8 @@ import psycopg2
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
+import plotly.express as px
+import plotly.graph_objects as go 
 
 # --- Page Configuration ---
 st.set_page_config(layout="wide", page_title="GA Optimizer Dashboard")
@@ -44,8 +43,7 @@ def init_connection():
     )
     return conn
 
-# --- Data Fetching Functions (Synchronous) ---
-# No changes needed in the data fetching functions themselves
+# --- Data Fetching Functions (Unchanged) ---
 def get_runs(conn):
     """Fetches all run_ids from the database."""
     with conn.cursor() as cur:
@@ -100,78 +98,172 @@ def main():
     runs_df = get_runs(conn)
 
     if runs_df.empty:
-        st.error("No runs found in the database. Please run the optimizer first.")
+        st.error("No runs found in the database. Please run the optimizer and ingestion script first.")
         st.stop()
-
-    st.sidebar.header("Navigation")
-    runs_df['display'] = runs_df.apply(lambda row: f"{row['created_at'].strftime('%Y-%m-%d %H:%M')} ({str(row['run_id'])[:8]})", axis=1)
-    selected_display = st.sidebar.selectbox("Select Optimization Run", runs_df['display'])
-    
-    selected_run_id = runs_df[runs_df['display'] == selected_display]['run_id'].iloc[0]
-
-    st.header(f"Run Overview: {str(selected_run_id)[:8]}...")
-    
-    with st.spinner("Fetching optimization data..."):
-        solutions_df = get_ranked_solutions(conn, selected_run_id)
-
-    if solutions_df.empty:
-        st.warning("This run has no successful backtests to analyze.")
-        st.stop()
-
-    best_solution = solutions_df.iloc[0]
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Top Portfolio Value", f"{float(best_solution['avg_portfolio']):.2f} SOL")
-    col2.metric("Total Solutions Tested", f"{len(solutions_df)}")
-    col3.metric("Best Solution's Win Rate", f"{float(best_solution['avg_win_rate']):.2f}%")
-
-    st.subheader("Ranked Strategies")
-    st.info("Click on any row in the table below to load its details.")
-    
-    display_cols = ['solution_id', 'generation', 'avg_portfolio', 'avg_win_rate', 'avg_profit_factor', 'total_trades', 'backtest_count']
-    
-    # **FIX:** Use `width='stretch'` to make the dataframe stretch to the full width.
-    st.dataframe(
-        solutions_df[display_cols],
-        width='stretch',
-        on_select="rerun",
-        selection_mode="single-row",
-        key="ranked_strategies_df"
-    )
-
-    selection = st.session_state.ranked_strategies_df.selection
-
-    selected_solution_id = None
-    if selection["rows"]:
-        selected_index = selection["rows"][0]
-        # **FIX:** Cast the numpy.int64 to a standard Python int.
-        selected_solution_id = int(solutions_df.iloc[selected_index]['solution_id'])
-    else:
-        # **FIX:** Cast this default value as well for consistency.
-        selected_solution_id = int(best_solution['solution_id'])
-
-    st.subheader("Strategy Deep Dive")
-    st.markdown(f"#### Details for Solution ID: `{selected_solution_id}`")
-
-    if selected_solution_id:
-        solution_params = solutions_df.loc[solutions_df['solution_id'] == selected_solution_id, 'parameters'].iloc[0]
         
-        with st.expander(f"Parameters", expanded=True):
-            st.json(solution_params)
+    runs_df['display'] = runs_df.apply(lambda row: f"{row['created_at'].strftime('%Y-%m-%d %H:%M')} ({str(row['run_id'])[:8]})", axis=1)
 
-        st.write("**Individual Backtest Performance** (one test per token)")
-        backtests_df = get_solution_backtests(conn, selected_solution_id)
-        st.dataframe(backtests_df, width='stretch')
+    # --- TABS FOR SINGLE AND COMPARISON VIEWS ---
+    tab1, tab2 = st.tabs(["Single Run Analysis", "Cross-Run Comparison"])
 
-        if not backtests_df.empty:
-            selected_backtest_id = st.selectbox(
-                "Select a 'backtest_id' to view its trade history:",
-                backtests_df['backtest_id']
+    # --- TAB 1: ORIGINAL SINGLE RUN ANALYSIS VIEW ---
+    with tab1:
+        st.header("Single Run Deep Dive")
+        selected_display = st.selectbox("Select Optimization Run", runs_df['display'])
+        
+        selected_run_id = runs_df[runs_df['display'] == selected_display]['run_id'].iloc[0]
+
+        st.info(f"Analyzing Run ID: `{selected_run_id}`")
+        
+        with st.spinner("Fetching optimization data for selected run..."):
+            solutions_df = get_ranked_solutions(conn, selected_run_id)
+
+        if solutions_df.empty:
+            st.warning("This run has no successful backtests to analyze.")
+        else:
+            best_solution = solutions_df.iloc[0]
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Top Portfolio Value", f"{float(best_solution['avg_portfolio']):.2f} SOL")
+            col2.metric("Total Solutions Tested", f"{len(solutions_df)}")
+            col3.metric("Best Solution's Win Rate", f"{float(best_solution['avg_win_rate']):.2f}%")
+
+            st.subheader("Ranked Strategies")
+            st.text("Click on any row to load its details below.")
+            
+            display_cols = ['solution_id', 'generation', 'avg_portfolio', 'avg_win_rate', 'avg_profit_factor', 'total_trades', 'backtest_count']
+            
+            st.dataframe(
+                solutions_df[display_cols],
+                width='stretch',
+                on_select="rerun",
+                selection_mode="single-row",
+                key="ranked_strategies_df"
             )
-            if selected_backtest_id:
-                st.write(f"**Trade History for Backtest ID {selected_backtest_id}**")
-                # **FIX:** Cast the selected backtest ID to int before passing it to the database function.
-                trades_df = get_trade_history(conn, int(selected_backtest_id))
-                st.dataframe(trades_df, width='stretch')
+
+            selection = st.session_state.get('ranked_strategies_df', {}).get('selection', {})
+            selected_solution_id = None
+            if selection and selection.get("rows"):
+                selected_index = selection["rows"][0]
+                selected_solution_id = int(solutions_df.iloc[selected_index]['solution_id'])
+            else:
+                selected_solution_id = int(best_solution['solution_id'])
+
+            st.subheader(f"Strategy Deep Dive (Solution ID: `{selected_solution_id}`)")
+
+            if selected_solution_id:
+                solution_params = solutions_df.loc[solutions_df['solution_id'] == selected_solution_id, 'parameters'].iloc[0]
+                
+                with st.expander(f"View Parameters", expanded=False):
+                    st.json(solution_params)
+
+                st.write("**Individual Backtest Performance**")
+                backtests_df = get_solution_backtests(conn, selected_solution_id)
+                st.dataframe(backtests_df, width='stretch')
+
+                if not backtests_df.empty:
+                    selected_backtest_id = st.selectbox(
+                        "Select a 'backtest_id' to view trade history:",
+                        backtests_df['backtest_id']
+                    )
+                    if selected_backtest_id:
+                        st.write(f"**Trade History for Backtest ID {selected_backtest_id}**")
+                        trades_df = get_trade_history(conn, int(selected_backtest_id))
+                        st.dataframe(trades_df, width='stretch')
+
+    # --- TAB 2: NEW CROSS-RUN COMPARISON VIEW ---
+    with tab2:
+        st.header("Compare Multiple Optimization Runs")
+        selected_run_displays = st.multiselect(
+            "Select 2 or more runs to compare:", 
+            runs_df['display'],
+            max_selections=5
+        )
+
+        if len(selected_run_displays) < 2:
+            st.info("Please select at least two runs to generate a comparison.")
+        else:
+            run_ids_to_compare = runs_df[runs_df['display'].isin(selected_run_displays)]['run_id'].tolist()
+            
+            all_solutions_list = []
+            best_solutions_data = [] 
+            with st.spinner("Fetching and aggregating data for comparison..."):
+                for run_id, display_name in zip(run_ids_to_compare, selected_run_displays):
+                    run_solutions_df = get_ranked_solutions(conn, run_id)
+                    if not run_solutions_df.empty:
+                        run_solutions_df['run_display_name'] = display_name
+                        all_solutions_list.append(run_solutions_df)
+                        best_solution = run_solutions_df.iloc[0].to_dict()
+                        best_solution['run_display_name'] = display_name
+                        best_solutions_data.append(best_solution)
+
+            if not all_solutions_list:
+                st.warning("Could not fetch valid data for the selected runs.")
+            else:
+                st.subheader("Performance Distribution")
+                st.markdown("This plot shows the distribution of the final portfolio value for all solutions in each run. It helps identify which run was consistently better, not just lucky with one outlier.")
+                
+                combined_df = pd.concat(all_solutions_list, ignore_index=True)
+                fig_box = px.box(
+                    combined_df, 
+                    x='run_display_name', y='avg_portfolio', color='run_display_name',
+                    points="all", title="Distribution of Average Portfolio Value Across Runs",
+                    labels={"run_display_name": "Optimization Run", "avg_portfolio": "Average Final Portfolio (SOL)"}
+                )
+                st.plotly_chart(fig_box, use_container_width=True)
+
+                st.subheader("Best Solution Parameter Comparison")
+                st.markdown("This chart compares the best strategies found in each run. Each line represents a run, colored by its final portfolio value. This helps you visually identify the parameter combinations that lead to the best performance.")
+                
+                best_solutions_df = pd.DataFrame(best_solutions_data)
+                params_unpacked = best_solutions_df['parameters'].apply(pd.Series)
+                plot_df = pd.concat([best_solutions_df[['run_display_name', 'avg_portfolio']], params_unpacked], axis=1)
+
+                # --- NEW: Dynamic Parameter Selection ---
+                all_possible_params = sorted([col for col in params_unpacked.columns if plot_df[col].nunique() > 1])
+                default_params = [
+                    'INITIAL_STOP_LOSS_PERCENT', 'FIRST_SELL_PERCENT', 'FIRST_SELL_PROFIT_MARGIN',
+                    'TRAILING_STOP_LOSS_PERCENT', 'SECOND_TAKE_PROFIT_PERCENT', 'USE_DYNAMIC_SECOND_TP',
+                    'MIN_VOLATILITY', 'DEFAULT_RUGCHECK_SCORE_THRESHOLD'
+                ]
+                # Ensure defaults exist in the current dataset
+                default_selection = [p for p in default_params if p in all_possible_params]
+
+                params_to_display = st.multiselect(
+                    "Select parameters to display on the chart:",
+                    options=all_possible_params,
+                    default=default_selection
+                )
+
+                if params_to_display:
+                    dimensions = [{'label': param, 'values': plot_df[param]} for param in params_to_display]
+                    
+                    fig_parallel = go.Figure(data=
+                        go.Parcoords(
+                            line = dict(
+                                color = plot_df['avg_portfolio'],
+                                colorscale = 'Electric',
+                                showscale = True,
+                                colorbar = {'title': 'Avg Portfolio'},
+                                cmin = plot_df['avg_portfolio'].min(),
+                                cmax = plot_df['avg_portfolio'].max()
+                            ),
+                            dimensions = list(dimensions)
+                        )
+                    )
+                    
+                    # --- NEW: Improved Layout for Dark Mode and to Prevent Cut-off ---
+                    fig_parallel.update_layout(
+                        title='Comparison of Best Parameters by Performance',
+                        plot_bgcolor='rgba(0,0,0,0)',
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        font=dict(color='white'),
+                        margin=dict(l=60, r=60, t=80, b=40) # Added margins
+                    )
+
+                    st.plotly_chart(fig_parallel, use_container_width=True)
+                else:
+                    st.warning("Please select at least one parameter to display.")
 
 if __name__ == "__main__":
     main()
+

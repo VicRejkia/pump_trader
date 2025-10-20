@@ -24,7 +24,7 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
     },
     {
         "name": "INITIAL_STOP_LOSS_PERCENT",
-        "values": list(range(5, 51, 5)),    # Range: 10, 12, ..., 40
+        "values": list(range(15, 51, 5)),    # Range: 10, 12, ..., 40
         "type": float
     },
     {
@@ -34,7 +34,7 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
     },
     {
         "name": "FIRST_SELL_PROFIT_MARGIN",
-        "values": list(range(20, 151, 10)), # Range: 10, 60, 110, 160
+        "values": [50.0, 100.0, 150.0], #list(range(20, 151, 10)), # Range: 10, 60, 110, 160
         "type": float
     },
     {
@@ -44,44 +44,44 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
     },
     {
         "name": "SECOND_TAKE_PROFIT_PERCENT", # Note: This is now a fallback if dynamic TP is disabled.
-        "values": list(range(150, 801, 50)), # Range: 200, 250, ..., 600
+        "values": list(range(350, 801, 50)), # Range: 200, 250, ..., 600
         "type": float
     },
 
     # +++ [NEW] DYNAMIC SECOND TAKE-PROFIT PARAMETERS +++
     {
         "name": "USE_DYNAMIC_SECOND_TP",
-        "values": [0, 1], # 0 for False (use fixed/trailing SL), 1 for True (use Chandelier Exit)
+        "values": [0], # 0 for False (use fixed/trailing SL), 1 for True (use Chandelier Exit)
         "type": int # Booleans are treated as integers (0 or 1) by the GA
     },
     {
         "name": "ADAPTIVE_ATR_PERIOD",
-        "values": list(range(10, 21, 2)), # e.g., 10, 12, ..., 20
+        "values": [14], #list(range(10, 21, 2)), # e.g., 10, 12, ..., 20
         "type": int
     },
     {
         "name": "ADAPTIVE_ATR_BASE_MULTIPLIER",
-        "values": list(np.arange(1.5, 3.1, 0.25)), # 1.5, 1.75, ..., 3.0
+        "values": [1.5], #list(np.arange(1.5, 3.1, 0.25)), # 1.5, 1.75, ..., 3.0
         "type": float
     },
     {
         "name": "ADAPTIVE_ATR_STRONG_MULTIPLIER",
-        "values": list(np.arange(2.5, 4.1, 0.25)), # 2.5, 2.75, ..., 4.0
+        "values": [2.5], #list(np.arange(2.5, 4.1, 0.25)), # 2.5, 2.75, ..., 4.0
         "type": float
     },
     {
         "name": "ADAPTIVE_ATR_EXTREME_MULTIPLIER",
-        "values": list(np.arange(3.5, 5.1, 0.25)), # 3.5, 3.75, ..., 5.0
+        "values": [5.0], #list(np.arange(3.5, 5.1, 0.25)), # 3.5, 3.75, ..., 5.0
         "type": float
     },
     {
         "name": "ADAPTIVE_RSI_STRONG_LEVEL",
-        "values": list(range(65, 76, 1)), # 65, 66, ..., 75
+        "values": [70], #list(range(65, 76, 1)), # 65, 66, ..., 75
         "type": int
     },
     {
         "name": "ADAPTIVE_RSI_EXTREME_LEVEL",
-        "values": list(range(80, 91, 1)), # 80, 81, ..., 90
+        "values": [85], # list(range(80, 91, 1)), # 80, 81, ..., 90
         "type": int
     },
     # +++ [END NEW] +++
@@ -89,111 +89,121 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
     # --- Buy Condition Thresholds ---
     {
         "name": "DEFAULT_VOLUME_THRESHOLD",
-        "values": list(range(1000, 10001, 1000)), # Range: 1000, 2000, ..., 10000
+        "values": [1000, 5000, 10000], #list(range(1000, 10001, 1000)), # Range: 1000, 2000, ..., 10000
         "type": int
     },
     {
         "name": "DEFAULT_MARKETCAP_THRESHOLD",
-        "values": list(range(5000, 30001, 1000)), # Range: 5000, 6000, ..., 30000
+        "values": [5000, 15000, 25000], #list(range(5000, 30001, 1000)), # Range: 5000, 6000, ..., 30000
         "type": int
     },
     {
         "name": "MIN_VOLATILITY",
-        "values": [round(x * 0.01, 2) for x in range(5, 41)], # Range: 0.10, 0.11, ..., 0.30
+        "values": [0.05, 0.15, 0.25], #[round(x * 0.01, 2) for x in range(5, 41)], # Range: 0.10, 0.11, ..., 0.30
         "type": float
     },
     {
         "name": "DEFAULT_RUGCHECK_SCORE_THRESHOLD",
-        "values": list(range(1, 1001, 100)),   # Range: 1, 101, ..., 901
+        "values": [2, 202, 502], #list(range(1, 1001, 100)),   # Range: 1, 101, ..., 901
         "type": int
     },
     {
         "name": "DEFAULT_SOCIAL_SCORE_THRESHOLD",
-        "values": list(range(0, 101, 10)),     # Range: 0, 10, ..., 100
+        "values": [20, 50, 100], #list(range(0, 101, 10)),     # Range: 0, 10, ..., 100
         "type": int
     },
 
     # --- PUMP.FUN Trend Reversal Parameters ---
     {
         "name": "USE_TREND_REVERSAL_CONFIRMATION",
-        "values": [0, 1], # 0 (False) or 1 (True)
+        "values": [0], # 0 (False) or 1 (True)
         "type": int
     },
     {
         "name": "STOP_LOSS_COOLDOWN_MINUTES",
-        "values": list(range(5, 46, 5)),      # Range: 1, 3, ..., 19
+        "values": [20], #list(range(5, 46, 5)),      # Range: 1, 3, ..., 19
         "type": int
     },
     {
         "name": "TREND_REVERSAL_RECENCY_HOURS",
-        "values": list(np.arange(0.1, 2.0, 0.2)), # Range: 0.1, 0.3, ..., 1.9
+        "values": [1.0], # list(np.arange(0.1, 2.0, 0.2)), # Range: 0.1, 0.3, ..., 1.9
         "type": float
     },
     {
         "name": "TREND_REVERSAL_RSI_NEUTRAL_LEVEL",
-        "values": list(range(5, 55, 5)),      # Range: 5, 10, ..., 50
+        "values": [30.0], #list(range(5, 55, 5)),      # Range: 5, 10, ..., 50
         "type": float
     },
     {
         "name": "INDICATOR_LOOKBACK_HOURS",
-        "values": list(np.arange(0.1, 1.0, 0.1)), # Range: 0.1, 0.2, ..., 1.9
+        "values": [0.3], #list(np.arange(0.1, 1.0, 0.1)), # Range: 0.1, 0.2, ..., 1.9
         "type": float
     },
     {
         "name": "RSI_PERIOD",
-        "values": list(range(4, 21, 2)),      # Range: 4, 5, ..., 14
+        "values": [14], #list(range(4, 21, 2)),      # Range: 4, 5, ..., 14
         "type": int
     },
     {
         "name": "BBANDS_PERIOD",
-        "values": list(range(15, 23, 1)),     # Range: 15, 16, ..., 22
+        "values": [20], #list(range(15, 23, 1)),     # Range: 15, 16, ..., 22
         "type": int
     },
     {
         "name": "BBANDS_STD_DEV",
-        "values": [round(x * 0.1 + 1.5, 1) for x in range(0, 8)], # Range: 1.5, 1.6, ..., 2.2
+        "values": [1.5], # [round(x * 0.1 + 1.5, 1) for x in range(0, 8)], # Range: 1.5, 1.6, ..., 2.2
         "type": float
     },
     {
         "name": "FAST_EMA_PERIOD",
-        "values": list(range(7, 14, 1)),      # Range: 7, 8, ..., 13
+        "values": [12], # list(range(7, 14, 1)),      # Range: 7, 8, ..., 13
         "type": int
     },
     {
         "name": "SLOW_EMA_PERIOD",
-        "values": list(range(18, 26, 1)),     # Range: 18, 19, ..., 25
+        "values": [21], #list(range(18, 26, 1)),     # Range: 18, 19, ..., 25
         "type": int
     },
 
     # --- DEXSCREENER Trend Reversal Parameters ---
     {
         "name": "DEX_REVERSAL_LOOKBACK_MINUTES",
-        "values": list(range(15, 31, 5)), # 15, 20, 25, 30
+        "values": [15], # list(range(15, 31, 5)), # 15, 20, 25, 30
         "type": int
     },
     {
         "name": "DEX_REVERSAL_MIN_SNAPSHOTS",
-        "values": list(range(4, 8, 1)), # 4, 5, 6, 7
+        "values": [5], # list(range(4, 8, 1)), # 4, 5, 6, 7
         "type": int
     },
     {
         "name": "DEX_REVERSAL_MIN_LIQUIDITY_USD",
-        "values": list(range(500, 4001, 500)), # 500, 1000, ..., 4000
+        "values": [2000], #list(range(500, 4001, 500)), # 500, 1000, ..., 4000
         "type": int
     },
     {
         "name": "DEX_REVERSAL_MIN_BUY_SELL_RATIO",
-        "values": [round(x * 0.2 + 1.2, 1) for x in range(0, 10)], # 1.2, 1.4, ..., 3.0
+        "values": [2.0], #[round(x * 0.2 + 1.2, 1) for x in range(0, 10)], # 1.2, 1.4, ..., 3.0
         "type": float
     },
     {
         "name": "DEX_REVERSAL_MIN_CONFIRMATIONS",
-        "values": list(range(1, 4, 1)), # 1, 2, 3
+        "values": [2], #list(range(1, 4, 1)), # 1, 2, 3
         "type": int
     },
 ]
 
 # --- GA Settings ---
+# STOP_CRITERIA
+# Explanation: Defines the condition to stop the GA run early if it's no longer improving.
+# This prevents wasting time on a run that has plateaued.
+# Analogy: A "mercy rule" in a sports game. If one team is ahead by too much for too long, the game ends.
+# Example & Effect:
+#   - "saturate_15": Stops if the best fitness score doesn't improve for 15 consecutive generations. (Good default)
+#   - "saturate_25": More lenient; gives the GA more time to try and find a better solution.
+#   - None: Disables the stop criteria, forcing the GA to run for all NUM_GENERATIONS.
+STOP_CRITERIA: str | None = "saturate_50"
+
 
 # POPULATION_SIZE
 # Explanation: The number of unique strategies (individuals) tested in each generation.
@@ -229,7 +239,7 @@ CROSSOVER_PROBABILITY: float = 0.8
 # Example & Effect:
 #   - 0.1 (Lower): A more focused search that refines existing strategies. Risks getting stuck.
 #   - 0.7 (Higher): A more chaotic and exploratory search. Good for finding unique solutions but can slow down refinement.
-MUTATION_PROBABILITY: float = 0.5
+MUTATION_PROBABILITY: float = 0.8
 
 # KEEP_ELITISM
 # Explanation: The number of the absolute best strategies from a generation that are
@@ -238,7 +248,7 @@ MUTATION_PROBABILITY: float = 0.5
 # Example & Effect:
 #   - 1: Guarantees the single best solution is never lost.
 #   - 5: Preserves the top 5. Can speed up convergence but might reduce diversity if they dominate the gene pool.
-KEEP_ELITISM: int = 3
+KEEP_ELITISM: int = 5
 
 # The following parameters control the specific algorithms for selection, crossover, and mutation.
 # The defaults ('sss', 'single_point', 'random') are robust and well-suited for this problem.
@@ -269,7 +279,7 @@ FITNESS_GOAL: str = "max" # Maximize the metric
 # Example & Effect:
 #  - 0: Disables sampling, uses all available training tokens. Most accurate but slowest.
 #  - 30: Evaluates each strategy against 30 random tokens from the training set. A good balance of speed and accuracy.
-GA_FITNESS_SAMPLE_SIZE: Union[int, None] = 0
+GA_FITNESS_SAMPLE_SIZE: Union[int, None] = 50
 
 # --- Data Settings ---
 DATA_SPLIT: Dict[str, float] = {
