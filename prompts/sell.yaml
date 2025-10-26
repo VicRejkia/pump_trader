@@ -1,0 +1,39 @@
+# Prompts - SELL/HOLD Context Configuration
+
+# Decision options relevant to this context
+decision_options: "SELL or HOLD" # HOLD means 'continue holding'
+
+# Specific guidance text to insert into the main prompt
+context_specific_guidance: |
+  - You currently HOLD tokens (check trade history - likely after a BUY or 'First TP' SELL).
+  - Focus on EXIT signals, changes in risk (worsening scores, MC drops), profit-taking opportunities, signs of stagnation, or negative momentum.
+  - Has a profit target been met? Has a stop-loss level been breached?
+  - Is it time to exit completely, take partial profit, or continue holding based on current data and trends?
+
+# Explanation of data sources
+source_explanation: "PUMP = High-frequency individual trades, DEXSCREENER = Periodic aggregate snapshots"
+
+# Guidance regarding market cap for sells/holds
+market_cap_guidance: "Consider selling if Market Cap drops significantly, especially below ${min_marketcap_threshold:,.0f} (emergency threshold). Stagnant or decreasing MC over time is negative for holds."
+
+# Specific rules for the SELL/HOLD context
+context_specific_rules: |
+  - Look for negative momentum (Price Change, Volume Velocity/Trend), worsening risk scores (increasing Rugcheck/Social), prolonged low volume/volatility (stagnation), or hitting pre-defined profit/loss targets.
+  - Excessive Token Age without significant growth or sustained high MC can indicate a need to exit.
+  - Creator/URI Status: Deterioration in these (e.g., URI becomes Error) increases risk for holding.
+  - DexScreener Specific: Very low `Volume (5min snap)` or a 'Decreasing' `Liquidity Trend (30min)` are strong negative signals.
+
+# Template for formatting PUMP market dynamics data
+market_dynamics_template_pump: |
+  - Price Change (1min): {pump_price_change_1m}
+  - Volume Velocity (1min): {pump_volume_velocity_1m}
+  - Tick Frequency (1min): {pump_tick_frequency_1m} trades/min
+
+# Template for formatting DEXSCREENER market dynamics data
+market_dynamics_template_dex: |
+  - Price Change (5min snap): {dex_price_change_m5:.2f}%
+  - Volume (5min snap): ${dex_volume_m5:,.0f}
+  - Buys/Sells (5min snap): {dex_buys_m5} / {dex_sells_m5} (Sustained low Buy ratio or high Sell ratio is negative)
+  - Price Trend (15min): {dex_price_trend_15m} (Decreasing momentum is negative)
+  - Volume Trend (15min): {dex_volume_trend_15m} (Decreasing volume suggests loss of interest)
+  - Liquidity Trend (30min): {dex_liquidity_trend_30m} (Decreasing liquidity is a major risk flag - potential rug pull or abandonment)
