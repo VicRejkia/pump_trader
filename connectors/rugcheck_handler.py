@@ -18,7 +18,8 @@ from solders.keypair import Keypair # type: ignore
 from config.config import (
     _RUGCHECK_AUTH_API, _RUGCHECK_RATE_LIMIT, _RUGCHECK_API, _RUGCHECK_INTERVAL,
     RUGCHECK_SCORE_THRESHOLD, RUGCHECK_REQUEUE_PRIORITY_BOOST_PURCHASED,
-    RUGCHECK_REQUEUE_INTERVAL_MINUTES
+    RUGCHECK_REQUEUE_INTERVAL_MINUTES, RUGCHECK_MAX_INITIAL_ATTEMPTS,
+    RUGCHECK_MAX_DEPRIORITIZED_ATTEMPTS
 )
 from database_handler import DatabaseClient
 from bot_logger import logger
@@ -27,10 +28,8 @@ from connectors.websocket_handler import WebSocketHandler
 from socials_processor import SocialsProcessor
 
 # --- Configuration for Retries & Maintenance ---
-MAX_FETCH_ATTEMPTS = 2  # Initial attempt + 1 retry
 DEPRIORITIZED_PRIORITY = float('inf')
 DEPRIORITIZED_TOKEN_MAX_AGE_SECONDS = 3600 # e.g., 1 hour: Time after which a deprioritized token might be culled
-DEPRIORITIZED_TOKEN_MAX_REPROCESS_ATTEMPTS = 3 # Max times a deprioritized token can be picked from queue and re-attempted before culling
 RUGCHECK_REQUEST_TIMEOUT = 20.0
 RUGCHECK_MAINTENANCE_URL = "https://api.rugcheck.xyz/v1/maintenance"
 MAINTENANCE_CHECK_TIMEOUT = 10.0
@@ -201,7 +200,7 @@ class Rugcheck:
                         priority_score = row["priority_score"] or Decimal(0)
                         priority = -float(priority_score)
                         current_attempts = self.fetch_attempts.get(mint, 0)
-                        if current_attempts < MAX_FETCH_ATTEMPTS:
+                        if current_attempts < self.config.get('RUGCHECK_MAX_INITIAL_ATTEMPTS', 3):
                             await self.queue.put((priority, mint))
 
                     logger.debug(f"🔄 Refreshed RugCheck queue with {len(rows)} new tokens (current size: {self.queue.qsize()}).")
@@ -247,6 +246,8 @@ class Rugcheck:
                 requeued_count = 0
                 for candidate in requeue_candidates:
                     mint = candidate['mint']
+                    if mint in [item[1] for item in self.queue._queue]:
+                        continue
                     base_priority = 0
                     if candidate['is_purchased']:
                         base_priority += self.config.get('RUGCHECK_REQUEUE_PRIORITY_BOOST_PURCHASED', 1000.0)
@@ -467,26 +468,21 @@ class Rugcheck:
                     age_seconds = (datetime.now(timezone.utc) - tracker_entry['first_deprio_timestamp']).total_seconds()
 
                     cull_reason = None
+                    max_deprio_attempts = self.config.get('RUGCHECK_MAX_DEPRIORITIZED_ATTEMPTS', 5)
                     if age_seconds > DEPRIORITIZED_TOKEN_MAX_AGE_SECONDS:
                         cull_reason = f"exceeded max age ({DEPRIORITIZED_TOKEN_MAX_AGE_SECONDS}s)"
-                    elif tracker_entry['reprocess_count'] > DEPRIORITIZED_TOKEN_MAX_REPROCESS_ATTEMPTS:
-                        cull_reason = f"exceeded max reprocess attempts ({DEPRIORITIZED_TOKEN_MAX_REPROCESS_ATTEMPTS})"
+                    elif tracker_entry['reprocess_count'] > max_deprio_attempts:
+                        cull_reason = f"exceeded max reprocess attempts ({max_deprio_attempts})"
 
                     if cull_reason:
                         logger.warning(f"🧹 Culling deprioritized token {mint} due to {cull_reason} for RugCheck.")
                         try:
                             if self.websocket_handler and self.websocket_handler.get_status().get('is_connected'):
-                                async with self.state.lock:
-                                    if mint in self.state.active_token_subscriptions:
-                                        self.state.active_token_subscriptions.discard(mint)
-                                        self.state._save_subscriptions_to_file()
                                 try:
-                                    await asyncio.wait_for(self.websocket_handler.safe_send(json.dumps({
-                                        "method": "unsubscribeTokenTrade", "keys": [mint]
-                                    })), timeout=5.0)
+                                    await self.websocket_handler.unsubscribe_from_trades([mint], "rugcheck_error_culled")
                                     logger.info(f"🧹 Culled {mint}: Unsubscribed from WebSocket due to persistent RugCheck issues.")
                                 except Exception as ws_err:
-                                    logger.error(f":police_car_light: Error unsubscribing culled token {mint} from WebSocket: {ws_err}")
+                                    logger.error(f":police_car_light: Error unsubscribing culled token {mint} from WebSocket: {ws_err}", exc_info=True)
 
                             await self.db_client.backup_and_delete_token(mint=mint, archived_at=datetime.now(timezone.utc), reason="rugcheck_error_culled")
                             logger.info(f"🧹 Culled {mint}: Backed up and deleted from DB with reason 'rugcheck_error_culled'.")
@@ -513,6 +509,7 @@ class Rugcheck:
                     task_completed_in_loop = True
 
                     retryable_api_error_statuses = ['TIMEOUT', 'GENERATION_ERROR', 'HTTP_ERROR', 'REQUEST_ERROR']
+                    max_initial_attempts = self.config.get('RUGCHECK_MAX_INITIAL_ATTEMPTS', 3)
 
                     if process_status is True:
                         self.fetch_attempts.pop(mint, None)
@@ -526,19 +523,19 @@ class Rugcheck:
 
                         current_attempts = self.fetch_attempts.get(mint, 0) + 1
                         self.fetch_attempts[mint] = current_attempts
-                        logger.warning(f"🔄 RugCheck API failed for {mint} ({process_status}). Attempt {current_attempts}/{MAX_FETCH_ATTEMPTS}.")
-                        if current_attempts < MAX_FETCH_ATTEMPTS:
+                        logger.warning(f"🔄 RugCheck API failed for {mint} ({process_status}). Attempt {current_attempts}/{max_initial_attempts}.")
+                        if current_attempts < max_initial_attempts:
                             await self.queue.put((priority, mint))
                         else:
                             await self.queue.put((DEPRIORITIZED_PRIORITY, mint))
-                            logger.warning(f"Max fetch attempts ({MAX_FETCH_ATTEMPTS}) reached for {mint} due to {process_status}. Deprioritizing.")
+                            logger.warning(f"Max fetch attempts ({max_initial_attempts}) reached for {mint} due to {process_status}. Deprioritizing.")
                             if mint not in self.deprioritized_tokens_tracker:
                                 self.deprioritized_tokens_tracker[mint] = {'first_deprio_timestamp': datetime.now(timezone.utc), 'reprocess_count': 0}
                     elif process_status == 'NOT_FOUND':
                         current_attempts = self.fetch_attempts.get(mint, 0) + 1
                         self.fetch_attempts[mint] = current_attempts
-                        logger.warning(f"❓ RugCheck API 404 for {mint}. Attempt {current_attempts}/{MAX_FETCH_ATTEMPTS}.")
-                        if current_attempts < MAX_FETCH_ATTEMPTS:
+                        logger.warning(f"❓ RugCheck API 404 for {mint}. Attempt {current_attempts}/{max_initial_attempts}.")
+                        if current_attempts < max_initial_attempts:
                             await self.queue.put((priority, mint))
                         else:
                             await self.queue.put((DEPRIORITIZED_PRIORITY, mint))
@@ -549,7 +546,7 @@ class Rugcheck:
                     elif process_status == 'AUTH_ERROR':
                         logger.error(f"🔑 Persistent RugCheck Auth Error for {mint}. Deprioritizing and marking max attempts.")
                         await self.queue.put((DEPRIORITIZED_PRIORITY, mint))
-                        self.fetch_attempts[mint] = MAX_FETCH_ATTEMPTS
+                        self.fetch_attempts[mint] = max_initial_attempts
                         if mint not in self.deprioritized_tokens_tracker:
                             self.deprioritized_tokens_tracker[mint] = {'first_deprio_timestamp': datetime.now(timezone.utc), 'reprocess_count': 0}
                         self.consecutive_api_errors = 0

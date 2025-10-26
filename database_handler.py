@@ -84,6 +84,48 @@ class DatabaseClient:
              logger.error(f"DatabaseClient self.config is not a dict! Type: {type(self.config)}. Falling back to default.")
              self.config = self._DEFAULT_CONFIG.copy() # Fallback just in case
 
+    def get_sync_connection_pool(self):
+        """
+        Creates and returns a synchronous connection pool for psycopg2.
+        This version correctly parses the host and port.
+        """
+        from psycopg2.pool import SimpleConnectionPool
+        import os
+
+        if hasattr(self, '_sync_pool') and self._sync_pool:
+            return self._sync_pool
+
+        # --- START FIX ---
+        db_user = os.getenv("DB_USER")
+        db_password = os.getenv("DB_PASSWORD")
+        db_database = os.getenv("DB_DATABASE")
+        db_host_raw = os.getenv("DB_HOST")
+
+        db_host = db_host_raw
+        db_port = None
+
+        # Check if the host string contains a port and split it if it does
+        if db_host_raw and ':' in db_host_raw:
+            parts = db_host_raw.split(':')
+            db_host = parts[0]
+            db_port = parts[1]
+
+        # Build the DSN string component by component
+        dsn_parts = [
+            f"dbname={db_database}",
+            f"user={db_user}",
+            f"password={db_password}",
+            f"host={db_host}"
+        ]
+        if db_port:
+            dsn_parts.append(f"port={db_port}")
+
+        dsn = " ".join(dsn_parts)
+        # --- END FIX ---
+        
+        self._sync_pool = SimpleConnectionPool(minconn=1, maxconn=5, dsn=dsn)
+        return self._sync_pool
+
     async def connect(self):
         """Establish a connection pool to the PostgreSQL database."""
         try:
@@ -296,6 +338,17 @@ class DatabaseClient:
         """
         async with self.pool.acquire() as conn:
             return await conn.fetch(query, mc_drop_threshold, inactivity_period, min_token_age)
+        
+    async def get_social_check_count(self, mint: str, conn=None) -> int:
+        """Counts how many times a social check has been performed for a token."""
+        query = "SELECT COUNT(*) FROM social_scores WHERE mint = $1"
+        connection = conn or await self.pool.acquire()
+        try:
+            count = await connection.fetchval(query, mint)
+            return count if count is not None else 0
+        finally:
+            if not conn and connection:
+                await self.pool.release(connection)
 
     async def get_active_tokens(self, limit: int = 20000):
         """Fetch active tokens from the database."""
@@ -1321,7 +1374,7 @@ class DatabaseClient:
         with a grace period for newly migrated tokens to allow for data aggregation.
         """
         query = """
-            SELECT price_usd, market_cap, sol_price_usd, volume_m5
+            SELECT price_usd, market_cap, sol_price_usd, volume_m5, price_native
             FROM dexscreener_data
             WHERE mint_address = $1
             ORDER BY timestamp DESC
@@ -1357,8 +1410,9 @@ class DatabaseClient:
             market_cap_usd = float(record['market_cap'])
             sol_price_usd = float(record['sol_price_usd'])
             market_cap_sol = market_cap_usd / sol_price_usd
+            price = float(record['price_native'])
             # Return a valid market cap but an invalid price
-            return {'price': None, 'market_cap': market_cap_sol}
+            return {'price': price, 'market_cap': market_cap_sol}
 
         price_usd = float(record['price_usd'])
         market_cap_usd = float(record['market_cap'])

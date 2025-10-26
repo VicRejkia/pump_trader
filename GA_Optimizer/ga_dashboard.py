@@ -1,6 +1,6 @@
 # FILE: GA_Optimizer/ga_dashboard.py
-# **MODIFIED:** This version makes the parameter plot dynamic, improves
-# the chart layout for dark mode, and uses the latest Streamlit APIs.
+# **MODIFIED:** This version adds a 'Run' axis to the parameter plot for easy
+# identification, improves the layout, and uses the latest Streamlit APIs.
 
 import os
 from pathlib import Path
@@ -212,20 +212,18 @@ def main():
                 st.plotly_chart(fig_box, use_container_width=True)
 
                 st.subheader("Best Solution Parameter Comparison")
-                st.markdown("This chart compares the best strategies found in each run. Each line represents a run, colored by its final portfolio value. This helps you visually identify the parameter combinations that lead to the best performance.")
+                st.markdown("This chart compares the best strategies found in each run. Each line represents a run, colored by its final portfolio value. Use the 'Run' axis on the left to identify which line corresponds to which run.")
                 
                 best_solutions_df = pd.DataFrame(best_solutions_data)
                 params_unpacked = best_solutions_df['parameters'].apply(pd.Series)
                 plot_df = pd.concat([best_solutions_df[['run_display_name', 'avg_portfolio']], params_unpacked], axis=1)
 
-                # --- NEW: Dynamic Parameter Selection ---
                 all_possible_params = sorted([col for col in params_unpacked.columns if plot_df[col].nunique() > 1])
                 default_params = [
                     'INITIAL_STOP_LOSS_PERCENT', 'FIRST_SELL_PERCENT', 'FIRST_SELL_PROFIT_MARGIN',
                     'TRAILING_STOP_LOSS_PERCENT', 'SECOND_TAKE_PROFIT_PERCENT', 'USE_DYNAMIC_SECOND_TP',
                     'MIN_VOLATILITY', 'DEFAULT_RUGCHECK_SCORE_THRESHOLD'
                 ]
-                # Ensure defaults exist in the current dataset
                 default_selection = [p for p in default_params if p in all_possible_params]
 
                 params_to_display = st.multiselect(
@@ -235,7 +233,21 @@ def main():
                 )
 
                 if params_to_display:
-                    dimensions = [{'label': param, 'values': plot_df[param]} for param in params_to_display]
+                    # --- NEW: Create a categorical axis for the Run Name ---
+                    run_names = plot_df['run_display_name'].unique()
+                    run_name_map = {name: i for i, name in enumerate(run_names)}
+                    plot_df['run_idx'] = plot_df['run_display_name'].map(run_name_map)
+                    
+                    dimensions = [
+                        {
+                            'label': 'Run',
+                            'tickvals': list(run_name_map.values()),
+                            'ticktext': list(run_name_map.keys()),
+                            'values': plot_df['run_idx']
+                        }
+                    ]
+                    # Add the numeric parameter dimensions after the run name
+                    dimensions.extend([{'label': param, 'values': plot_df[param]} for param in params_to_display])
                     
                     fig_parallel = go.Figure(data=
                         go.Parcoords(
@@ -251,13 +263,12 @@ def main():
                         )
                     )
                     
-                    # --- NEW: Improved Layout for Dark Mode and to Prevent Cut-off ---
                     fig_parallel.update_layout(
                         title='Comparison of Best Parameters by Performance',
                         plot_bgcolor='rgba(0,0,0,0)',
                         paper_bgcolor='rgba(0,0,0,0)',
                         font=dict(color='white'),
-                        margin=dict(l=60, r=60, t=80, b=40) # Added margins
+                        margin=dict(l=80, r=80, t=100, b=40) # Increased margins
                     )
 
                     st.plotly_chart(fig_parallel, use_container_width=True)

@@ -24,8 +24,8 @@ DEFAULT_SELL_POOL = "auto"
 # --- New Multi-Stage Sell Logic Configuration ---
 FIRST_SELL_PROFIT_MARGIN = 110.0             # Desired profit margin % on the *total initial investment* for the first TP sell
 FIRST_SELL_PERCENT = 45.0                   # % of *initial* tokens to sell at First TP (e.g., 50.0 for 50%)
-INITIAL_STOP_LOSS_PERCENT = 29.0            # Initial SL as % below buy price (e.g., 25.0 for -25%)
-TRAILING_STOP_LOSS_PERCENT = 5.0           # Trailing SL % drop from highest price *after* First TP (e.g., 15.0 for -15%)
+INITIAL_STOP_LOSS_PERCENT = 25.0            # Initial SL as % below buy price (e.g., 25.0 for -25%)
+TRAILING_STOP_LOSS_PERCENT = 20.0           # Trailing SL % drop from highest price *after* First TP (e.g., 15.0 for -15%)
 SECOND_TAKE_PROFIT_PERCENT = 600.0          # Second TP as % above buy price (e.g., 200.0 for +200%)
 
 # --- NEW: Dynamic Second Take-Profit Configuration ---
@@ -77,7 +77,7 @@ MAX_TOKEN_COUNT_PER_CREATOR = 50            # Maximum number of tokens per creat
 USE_TREND_REVERSAL_CONFIRMATION = True      # Master switch to enable/disable this feature
 STOP_LOSS_COOLDOWN_MINUTES = 17              # How long a token is ignored after a Stop Loss
 MIN_CANDLE_DATA_FOR_INDICATORS = 30         # Min 5-second data points required to calculate indicators
-TREND_REVERSAL_RECENCY_HOURS = 0.1 
+TREND_REVERSAL_RECENCY_HOURS = 24 
 TREND_REVERSAL_RSI_NEUTRAL_LEVEL = 20.0     # RSI level considered neutral for trend reversal
 INDICATOR_LOOKBACK_HOURS = 1.7                # Lookback period for indicators in hours
 
@@ -87,8 +87,8 @@ APPLY_TREND_REVERSAL_ON_SELL_REASONS = ["Stop Loss", "Emergency SL (MCap)", "Eme
 RSI_PERIOD = 9 
 BBANDS_PERIOD = 19
 BBANDS_STD_DEV = 1.5
-FAST_EMA_PERIOD = 11
-SLOW_EMA_PERIOD = 19
+FAST_EMA_PERIOD = 9
+SLOW_EMA_PERIOD = 150
 
 # --- DexScreener Trend Reversal Configuration ---
 DEX_REVERSAL_LOOKBACK_MINUTES = 20          # How many minutes of snapshot data to analyze.
@@ -131,6 +131,8 @@ _RUGCHECK_INTERVAL = 60                      # 60 seconds interval for RugCheck 
 RUGCHECK_SCORE_THRESHOLD = 10000             # Score above which a token is considered high risk and deactivated
 RUGCHECK_REQUEUE_PRIORITY_BOOST_PURCHASED = 1000.0 # High priority boost for purchased tokens
 RUGCHECK_REQUEUE_INTERVAL_MINUTES = 5 # How often to check for requeue opportunities
+RUGCHECK_MAX_INITIAL_ATTEMPTS = 3      # Number of high-priority attempts before deprioritizing.
+RUGCHECK_MAX_DEPRIORITIZED_ATTEMPTS = 5 # Number of low-priority re-attempts before culling a token.
 
 # SOL price configuration
 _SOL_PRICE_API_URL = "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd"
@@ -187,6 +189,7 @@ SOCIALS_ALLOWED_NEWS_DOMAINS = {
 
 # --- DYNAMIC SOCIALS SCORING ---
 SOCIALS_SCORE_TYPE_INITIAL = 'INITIAL_METADATA'
+SOCIALS_SCORE_TYPE_FOLLOWUP = 'FOLLOWUP_METADATA'
 SOCIALS_SCORE_TYPE_TELEGRAM = 'TELEGRAM_UPDATE'
 SOCIALS_SCORE_TYPE_WEBSITE = 'WEBSITE_UPDATE'
 SOCIALS_TELEGRAM_UPDATE_INTERVAL_MINUTES = 15 # How often to re-check telegram stats for active tokens

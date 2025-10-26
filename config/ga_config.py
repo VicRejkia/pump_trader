@@ -34,12 +34,12 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
     },
     {
         "name": "FIRST_SELL_PROFIT_MARGIN",
-        "values": [50.0, 100.0, 150.0], #list(range(20, 151, 10)), # Range: 10, 60, 110, 160
+        "values": list(range(10, 151, 10)), # Range: 10, 60, 110, 160
         "type": float
     },
     {
         "name": "TRAILING_STOP_LOSS_PERCENT",
-        "values": list(range(5, 31, 2)),    # Range: 5, 10, ..., 60
+        "values": list(range(5, 66, 5)),    # Range: 5, 10, ..., 60
         "type": float
     },
     {
@@ -51,12 +51,12 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
     # +++ [NEW] DYNAMIC SECOND TAKE-PROFIT PARAMETERS +++
     {
         "name": "USE_DYNAMIC_SECOND_TP",
-        "values": [0], # 0 for False (use fixed/trailing SL), 1 for True (use Chandelier Exit)
+        "values": [1], # 0 for False (use fixed/trailing SL), 1 for True (use Chandelier Exit)
         "type": int # Booleans are treated as integers (0 or 1) by the GA
     },
     {
         "name": "ADAPTIVE_ATR_PERIOD",
-        "values": [14], #list(range(10, 21, 2)), # e.g., 10, 12, ..., 20
+        "values": list(range(10, 21, 2)), # e.g., 10, 12, ..., 20
         "type": int
     },
     {
@@ -76,12 +76,12 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
     },
     {
         "name": "ADAPTIVE_RSI_STRONG_LEVEL",
-        "values": [70], #list(range(65, 76, 1)), # 65, 66, ..., 75
+        "values": list(range(20, 81, 10)), # 65, 66, ..., 75
         "type": int
     },
     {
         "name": "ADAPTIVE_RSI_EXTREME_LEVEL",
-        "values": [85], # list(range(80, 91, 1)), # 80, 81, ..., 90
+        "values":  list(range(40, 101, 10)), # 80, 81, ..., 90
         "type": int
     },
     # +++ [END NEW] +++
@@ -104,7 +104,7 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
     },
     {
         "name": "DEFAULT_RUGCHECK_SCORE_THRESHOLD",
-        "values": [2, 202, 502], #list(range(1, 1001, 100)),   # Range: 1, 101, ..., 901
+        "values": list(range(1, 1001, 100)),   # Range: 1, 101, ..., 901
         "type": int
     },
     {
@@ -116,7 +116,7 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
     # --- PUMP.FUN Trend Reversal Parameters ---
     {
         "name": "USE_TREND_REVERSAL_CONFIRMATION",
-        "values": [0], # 0 (False) or 1 (True)
+        "values": [1], # 0 (False) or 1 (True)
         "type": int
     },
     {
@@ -131,17 +131,17 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
     },
     {
         "name": "TREND_REVERSAL_RSI_NEUTRAL_LEVEL",
-        "values": [30.0], #list(range(5, 55, 5)),      # Range: 5, 10, ..., 50
+        "values": list(range(5, 55, 5)),      # Range: 5, 10, ..., 50
         "type": float
     },
     {
         "name": "INDICATOR_LOOKBACK_HOURS",
-        "values": [0.3], #list(np.arange(0.1, 1.0, 0.1)), # Range: 0.1, 0.2, ..., 1.9
+        "values": list(np.arange(0.1, 1.2, 0.2)), # Range: 0.1, 0.2, ..., 1.9
         "type": float
     },
     {
         "name": "RSI_PERIOD",
-        "values": [14], #list(range(4, 21, 2)),      # Range: 4, 5, ..., 14
+        "values": list(range(4, 20, 5)),      # Range: 4, 5, ..., 14
         "type": int
     },
     {
@@ -156,12 +156,12 @@ OPTIMIZABLE_PARAMETERS: List[Dict[str, Any]] = [
     },
     {
         "name": "FAST_EMA_PERIOD",
-        "values": [12], # list(range(7, 14, 1)),      # Range: 7, 8, ..., 13
+        "values": list(range(7, 16, 2)),      # Range: 7, 8, ..., 13
         "type": int
     },
     {
         "name": "SLOW_EMA_PERIOD",
-        "values": [21], #list(range(18, 26, 1)),     # Range: 18, 19, ..., 25
+        "values": list(range(15, 56, 5)),     # Range: 18, 19, ..., 25
         "type": int
     },
 
@@ -212,7 +212,7 @@ STOP_CRITERIA: str | None = "saturate_50"
 # Example & Effect:
 #   - 50 (Smaller): Faster, narrower search. Good for quick tests but might miss optimal strategies.
 #   - 200 (Larger): Slower, more comprehensive search. Less likely to get stuck on a suboptimal solution.
-POPULATION_SIZE: int = 50
+POPULATION_SIZE: int = 200
 
 # NUM_GENERATIONS
 # Explanation: The number of evolutionary cycles the algorithm will run. More generations
@@ -239,7 +239,7 @@ CROSSOVER_PROBABILITY: float = 0.8
 # Example & Effect:
 #   - 0.1 (Lower): A more focused search that refines existing strategies. Risks getting stuck.
 #   - 0.7 (Higher): A more chaotic and exploratory search. Good for finding unique solutions but can slow down refinement.
-MUTATION_PROBABILITY: float = 0.8
+MUTATION_PROBABILITY: float = 0.7
 
 # KEEP_ELITISM
 # Explanation: The number of the absolute best strategies from a generation that are
@@ -279,7 +279,7 @@ FITNESS_GOAL: str = "max" # Maximize the metric
 # Example & Effect:
 #  - 0: Disables sampling, uses all available training tokens. Most accurate but slowest.
 #  - 30: Evaluates each strategy against 30 random tokens from the training set. A good balance of speed and accuracy.
-GA_FITNESS_SAMPLE_SIZE: Union[int, None] = 50
+GA_FITNESS_SAMPLE_SIZE: Union[int, None] = 300
 
 # --- Data Settings ---
 DATA_SPLIT: Dict[str, float] = {

@@ -492,6 +492,10 @@ def calculate_trend_indicators(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     try:
         df_ta = df.copy()
 
+        # --- BUG FIX: Set the timestamp as the index before calculating indicators ---
+        if 'timestamp' in df_ta.columns:
+            df_ta.set_index('timestamp', inplace=True)
+
         # --- BUG FIX START ---
         # Explicitly use the 'Close' column for indicators that operate on a single price series.
         # This prevents pandas-ta from returning a multi-column DataFrame when a single Series is expected.
