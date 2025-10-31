@@ -3,11 +3,6 @@ import ollama
 import chromadb
 from sentence_transformers import SentenceTransformer
 from bot_logger import logger
-# Assuming config values like thresholds are imported correctly
-from config.config import (
-    DEFAULT_SOCIAL_SCORE_THRESHOLD, DEFAULT_MARKETCAP_THRESHOLD,
-    MIN_MARKETCAP_THRESHOLD, MIN_VOLATILITY
-)
 import json
 import re
 import yaml # For loading YAML prompts
@@ -27,7 +22,8 @@ class AIDecisionMaker:
     and context retrieved from a vector database (ChromaDB) using RAG.
     """
 
-    def __init__(self, model_name: str = 'llama3:latest', embedding_model: str = 'all-MiniLM-L6-v2', prompts_dir: str = PROMPTS_DIR):
+    #def __init__(self, model_name: str = 'llama3:latest', embedding_model: str = 'all-MiniLM-L6-v2', prompts_dir: str = PROMPTS_DIR):
+    def __init__(self,config: Dict[str, Any]):
         """
         Initializes the AIDecisionMaker.
 
@@ -36,22 +32,25 @@ class AIDecisionMaker:
             embedding_model (str): The name of the Sentence Transformer model for embeddings.
             prompts_dir (str): The directory containing the YAML prompt configuration files.
         """
-        self.model = model_name
-        self.prompts_dir = prompts_dir
+        self.config = config
+        self.model = self.config.get('AI_MODEL_NAME', 'llama3:latest')
+        self.prompts_dir = self.config.get('_AI_PROMPTS_DIR', 'ai_decision_module/prompts') # Use config path
+        self.chroma_db_path = self.config.get('_AI_CHROMA_DB_PATH', './ai_decision_module/chroma_db_aidm') # Use config path
         self.prompts = self._load_prompts() # Load prompts from YAML files
+        embedding_model_name = self.config.get('_AI_EMBEDDING_MODEL', 'all-MiniLM-L6-v2')
 
         try:
             # Initialize Sentence Transformer model for creating embeddings
-            self.embedder = SentenceTransformer(embedding_model)
-            logger.info(f"Sentence Transformer embedding model '{embedding_model}' loaded.")
+            self.embedder = SentenceTransformer(embedding_model_name)
+            logger.info(f"Sentence Transformer embedding model '{embedding_model_name}' loaded.")
         except Exception as e:
-            logger.critical(f"Failed to load Sentence Transformer model '{embedding_model}': {e}", exc_info=True)
+            logger.critical(f"Failed to load Sentence Transformer model '{embedding_model_name}': {e}", exc_info=True)
             raise
 
         try:
             # Initialize ChromaDB client for RAG context memory
             # Uses a persistent client, storing data in "./chroma_db_aidm"
-            self.chroma_client = chromadb.PersistentClient(path="./chroma_db_aidm")
+            self.chroma_client = chromadb.PersistentClient(path=self.chroma_db_path)
             # Get or create the collection (vector database table)
             # Increment version number if schema/data meaning changes significantly
             self.collection = self.chroma_client.get_or_create_collection(name="trading_decision_memory_v3")
@@ -63,25 +62,26 @@ class AIDecisionMaker:
         logger.info(f"AI Decision Maker initialized with Ollama model: {self.model}")
 
     def _load_prompts(self) -> Dict[str, Any]:
-        """Loads prompt templates and configurations from YAML files."""
+        """Loads prompt templates and configurations from YAML files using self.prompts_dir."""
         loaded_prompts = {}
         try:
             # Load the base template
-            with open(os.path.join(self.prompts_dir, 'base.yaml'), 'r', encoding='utf-8') as f:
+            base_path = os.path.join(self.prompts_dir, 'base.yaml')
+            with open(base_path, 'r', encoding='utf-8') as f:
                 base_config = yaml.safe_load(f)
-                if not base_config: raise ValueError("base.yaml is empty or invalid")
+                if not base_config: raise ValueError(f"{base_path} is empty or invalid")
                 loaded_prompts['base'] = base_config
 
             # Load context-specific configurations (BUY and SELL)
             for context_type in ['buy', 'sell']:
-                with open(os.path.join(self.prompts_dir, f'{context_type}.yaml'), 'r', encoding='utf-8') as f:
+                specific_path = os.path.join(self.prompts_dir, f'{context_type}.yaml')
+                with open(specific_path, 'r', encoding='utf-8') as f:
                     specific_config = yaml.safe_load(f)
-                    if not specific_config: raise ValueError(f"{context_type}.yaml is empty or invalid")
-                    # Merge base config elements with specific config for convenient access
-                    # Specific config keys will override base keys if they exist in both
+                    if not specific_config: raise ValueError(f"{specific_path} is empty or invalid")
+                    # Merge base config elements with specific config
                     loaded_prompts[context_type] = {**base_config, **specific_config}
 
-            logger.info("Successfully loaded prompt configurations from YAML files.")
+            logger.info(f"Successfully loaded prompt configurations from '{self.prompts_dir}'.")
             return loaded_prompts
 
         except FileNotFoundError as e:
@@ -286,8 +286,9 @@ class AIDecisionMaker:
             str: The raw response string from the LLM, or a structured error message on failure.
         """
         # Log a snippet of the potentially very long prompt
-        log_prompt_snippet = prompt[:11000] + ('...' if len(prompt) > 11000 else '')
-        logger.debug(f"Sending prompt to LLM '{self.model}' (approx {len(prompt)} chars):\n{log_prompt_snippet}")
+        #log_prompt_snippet = prompt[:11000] + ('...' if len(prompt) > 11000 else '')
+        #logger.debug(f"Sending prompt to LLM '{self.model}' (approx {len(prompt)} chars):\n{log_prompt_snippet}")
+        logger.debug(f"Sending prompt to LLM '{self.model}' (approx {len(prompt)} chars)")
 
         try:
             # Use Ollama client library to interact with the LLM
@@ -300,7 +301,7 @@ class AIDecisionMaker:
             result = response['message']['content'].strip()
 
             # Log a snippet of the response
-            log_result_snippet = result[:11000] + ('...' if len(result) > 11000 else '')
+            log_result_snippet = result[:11] + ('...' if len(result) > 11 else '')
             logger.debug(f"LLM Response received:\n{log_result_snippet}")
             return result
 
@@ -312,6 +313,7 @@ class AIDecisionMaker:
     def get_trade_advice(self, current_data: dict, include_explanation: bool = True) -> dict:
         """
         Orchestrates the process of getting trade advice from the LLM.
+        Injects configuration thresholds directly into the prompt data.
 
         1. Validates input data.
         2. Selects the appropriate prompt configuration (BUY/SELL).
@@ -418,14 +420,21 @@ class AIDecisionMaker:
             logger.error(f"Unexpected error formatting market dynamics for {source}: {e}", exc_info=True)
             market_dynamics_formatted = f"Error formatting market dynamics for {source}."
 
+        # --- Get necessary thresholds from self.config ---
+        social_threshold = self.config.get('DEFAULT_SOCIAL_SCORE_THRESHOLD', 100)
+        min_volatility_threshold = self.config.get('MIN_VOLATILITY', 0.1)
+        default_mcap_threshold = self.config.get('DEFAULT_MARKETCAP_THRESHOLD', 14000)
+        min_mcap_threshold = self.config.get('MIN_MARKETCAP_THRESHOLD', 4000)
+        # --- End Threshold fetching ---
+
         # 6. Assemble final prompt data dictionary
         # Map data from current_data to the placeholders defined in the YAML files
         prompt_data = {
             # --- Placeholders from base.yaml ---
             'decision_context': decision_context,
             'trade_history_summary': current_data.get('trade_history_summary', 'N/A'),
-            'social_threshold': DEFAULT_SOCIAL_SCORE_THRESHOLD, # From config.py
-            'min_volatility': MIN_VOLATILITY, # From config.py
+            'social_threshold': social_threshold, # From config.py
+            'min_volatility': min_volatility_threshold, # From config.py
             'rag_context': rag_context,
             'name': current_data.get('name', 'Unknown'),
             'mint': current_data.get('mint', 'N/A'),
@@ -451,13 +460,13 @@ class AIDecisionMaker:
             'context_specific_guidance': prompt_config.get('context_specific_guidance', ''),
             'source_explanation': prompt_config.get('source_explanation', ''),
             'market_cap_guidance': prompt_config.get('market_cap_guidance', '').format(
-                default_marketcap_threshold=DEFAULT_MARKETCAP_THRESHOLD,
-                min_marketcap_threshold=MIN_MARKETCAP_THRESHOLD
+                default_marketcap_threshold=default_mcap_threshold,
+                min_marketcap_threshold=min_mcap_threshold
             ), # Format thresholds into guidance string
             'context_specific_rules': prompt_config.get('context_specific_rules', ''),
             # --- Thresholds needed within guidance text ---
-            'default_marketcap_threshold': DEFAULT_MARKETCAP_THRESHOLD,
-            'min_marketcap_threshold': MIN_MARKETCAP_THRESHOLD,
+            'default_marketcap_threshold': default_mcap_threshold,
+            'min_marketcap_threshold': min_mcap_threshold,
         }
 
         # Construct the final prompt string using the base template structure

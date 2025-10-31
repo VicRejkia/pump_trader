@@ -1,5 +1,6 @@
-# test_ai_decision_maker.py
+# ai_data_assembler.py (formerly test_ai_decision_maker.py)
 import sys
+import os
 import asyncio
 import datetime as dt
 import pandas as pd
@@ -8,17 +9,38 @@ import json
 import statistics
 import httpx # For URI check
 from decimal import Decimal # For precise calculations, especially price
+import inspect # To help load config module
 
+# --- Conditional Path Setup for Standalone Execution ---
+# When running this script directly, we need to ensure the project root
+# is in the Python path so imports like 'from config import ...' work.
+if __name__ == "__main__":
+    # Get the directory containing this script (ai_decision_module)
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    # Get the parent directory (project root)
+    project_root = os.path.dirname(current_dir)
+    # Add project root to the start of the sys.path if it's not already there
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+        print(f"[Standalone Mode] Added project root to sys.path: {project_root}")
+
+# --- Now imports should work in both standalone and imported modes ---
 from bot_logger import logger, setup_logging
-# Import base config values needed for fetching data logic
-from config.config import MAX_TOKEN_COUNT_PER_CREATOR, DEXSCREENER_MIGRATION_GRACE_PERIOD_MINUTES
-# Assuming DatabaseClient, GlobalState, calculate_volatility, ensure_datetime exist and work
 from database_handler import DatabaseClient
 from state_manager import GlobalState
 from utils import calculate_volatility, ensure_datetime
-from ai_decision_maker import AIDecisionMaker # Import the refactored class
+# Import AIDecisionMaker directly as it's in the same directory (module)
+from ai_decision_maker import AIDecisionMaker
+# Import the config *module* itself
+from config import config as config_module
+# Import specific values needed directly in this script's global scope (if any)
+# Note: It's often cleaner to pass config values down through functions.
+from config.config import MAX_TOKEN_COUNT_PER_CREATOR
 
 # --- Calculation Helper Functions ---
+# These functions remain unchanged from your provided script.
+# (safe_pct_change, check_uri_status, summarize_score_history,
+#  summarize_market_dynamics, summarize_trade_history)
 
 def safe_pct_change(old, new) -> float:
     """
@@ -113,7 +135,7 @@ def summarize_score_history(history_records: list, score_field: str, time_field:
     }
 
     if not history_records:
-        logger.debug(f"No history records provided for score field '{score_field}'.")
+        #logger.debug(f"No history records provided for score field '{score_field}'.")
         return default_result
 
     try:
@@ -125,7 +147,7 @@ def summarize_score_history(history_records: list, score_field: str, time_field:
         df = df.dropna(subset=[time_field]).sort_values(by=time_field)
 
         if df.empty:
-            logger.debug(f"DataFrame empty after cleaning timestamps for '{score_field}'.")
+            #logger.debug(f"DataFrame empty after cleaning timestamps for '{score_field}'.")
             return default_result
         if score_field not in df.columns:
             logger.warning(f"Score field '{score_field}' not found in history records.")
@@ -136,7 +158,7 @@ def summarize_score_history(history_records: list, score_field: str, time_field:
         # Drop rows with invalid scores
         df = df.dropna(subset=[score_field])
         if df.empty:
-            logger.debug(f"DataFrame empty after dropping NaN scores for '{score_field}'.")
+            #logger.debug(f"DataFrame empty after dropping NaN scores for '{score_field}'.")
             return default_result
 
         # --- Calculate Initial and Latest Scores ---
@@ -255,7 +277,7 @@ def summarize_market_dynamics(history_records: list, source: str, lookback_mins:
     default_summary = {'market_dynamics_summary': "N/A - Insufficient recent market data"}
 
     if not history_records:
-        logger.debug(f"Market Dynamics: No history records provided for source '{source}'.")
+        #logger.debug(f"Market Dynamics: No history records provided for source '{source}'.")
         return default_summary
 
     try:
@@ -324,7 +346,7 @@ def summarize_market_dynamics(history_records: list, source: str, lookback_mins:
             # Calculate trends over the specified lookback period (e.g., 15 mins)
             full_lookback_ago = now_utc - dt.timedelta(minutes=lookback_mins)
             recent_df_lookback = df[df.index >= full_lookback_ago].copy()
-            logger.debug(f"Dex Dynamics: Analyzing {len(recent_df_lookback)} snapshots over {lookback_mins} mins.")
+            #logger.debug(f"Dex Dynamics: Analyzing {len(recent_df_lookback)} snapshots over {lookback_mins} mins.")
 
             if len(recent_df_lookback) >= 2:
                 # --- Price Trend (15 min) ---
@@ -375,7 +397,7 @@ def summarize_market_dynamics(history_records: list, source: str, lookback_mins:
 
             else:
                  # Not enough snapshots for trend analysis
-                 logger.debug(f"Not enough Dex snapshots ({len(recent_df_lookback)}) within {lookback_mins} mins for trend calculation.")
+                 #logger.debug(f"Not enough Dex snapshots ({len(recent_df_lookback)}) within {lookback_mins} mins for trend calculation.")
                  summary['dex_price_trend_15m'] = "N/A (Few Snaps)"
                  summary['dex_volume_trend_15m'] = "N/A (Few Snaps)"
                  summary['dex_liquidity_trend_30m'] = "N/A (Few Snaps)"
@@ -503,8 +525,17 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
             mint
         )
         if not token_info:
-            logger.error(f"Token {mint} not found in 'tokens' table.")
-            raise ValueError(f"Token {mint} not found in 'tokens' table.")
+            # TRY fetching from backup table if not found in active tokens
+            token_info = await conn.fetchrow(
+                 "SELECT name, symbol, 'PUMP' as data_source, traderpublickey, timestamp, uri FROM tokens_backup WHERE mint = $1", # Assume backup is PUMP
+                mint
+            )
+            if not token_info:
+                logger.error(f"Token {mint} not found in 'tokens' or 'tokens_backup' table.")
+                raise ValueError(f"Token {mint} not found in 'tokens' or 'tokens_backup' table.")
+            else:
+                 logger.warning(f"Token {mint} found in backup table. Proceeding with backup data.")
+
 
         source = token_info['data_source']
         name = token_info['name']
@@ -520,7 +551,8 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
         # Check creator status (prolific/suspicious based on token count)
         creator_token_count = await conn.fetchval("SELECT token_count FROM creator_wallets WHERE wallet_address = $1", creator_wallet) or 0
         # Use MAX_TOKEN_COUNT_PER_CREATOR from config
-        is_prolific_creator = creator_token_count > db.config.get('MAX_TOKEN_COUNT_PER_CREATOR', 50)
+        max_creator_tokens = db.config.get('MAX_TOKEN_COUNT_PER_CREATOR', 50)
+        is_prolific_creator = creator_token_count > max_creator_tokens
 
         # Check metadata URI status
         uri_status = await check_uri_status(uri)
@@ -539,7 +571,7 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
             decision_context = "REBUY" # Held in the past, but not currently
         # Else: Stays "INITIAL BUY"
 
-        logger.debug(f"Decision context for {mint}: {decision_context}")
+        #logger.debug(f"Decision context for {mint}: {decision_context}")
 
         # --- 3. Get Current Price & Market Cap ---
         # Use the robust price calculation method from DatabaseClient
@@ -574,45 +606,54 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
         market_hist_lookback_mins = 15 # Consistent lookback for dynamics and volatility
         # Fetch unified history (from v_unified_market_ticks_live) for volatility calculation
         # This view includes both PUMP trades and DEXSCREENER snapshots
+        # IMPORTANT: Use HISTORICAL view if fetching for a potentially inactive/backed-up token
+        view_to_use = "v_unified_market_ticks_live" if await conn.fetchval("SELECT 1 FROM tokens WHERE mint = $1", mint) else "v_unified_market_ticks_historical"
         market_hist_raw_unified = await conn.fetch(
             f"""SELECT timestamp, price_sol, market_cap_sol, volume_usd
-                FROM v_unified_market_ticks_live
+                FROM {view_to_use}
                 WHERE mint = $1 AND timestamp >= NOW() - INTERVAL '{market_hist_lookback_mins} minutes' AND price_sol > 0
                 ORDER BY timestamp ASC;""",
             mint
         )
+
         # Fetch source-specific history for detailed dynamics calculation
         market_hist_raw_source_specific = []
         if source == 'PUMP':
-             # Fetch raw trades if source is PUMP
-             market_hist_raw_source_specific = await conn.fetch(
-                 f"""SELECT timestamp, price AS price_sol, sol_amount, token_amount, (sol_amount * sol_price_usd) AS volume_usd
-                     FROM trades WHERE mint = $1 AND timestamp >= NOW() - INTERVAL '{market_hist_lookback_mins} minutes' AND price > 0
-                     ORDER BY timestamp ASC;""",
-                 mint
-             )
+            # Fetch raw trades if source is PUMP (use v_trades to include backups if necessary)
+            table_to_use_pump = "trades" if await conn.fetchval("SELECT 1 FROM tokens WHERE mint = $1", mint) else "trades_backup"
+            market_hist_raw_source_specific = await conn.fetch(
+                f"""SELECT timestamp, price AS price_sol, sol_amount, token_amount, (sol_amount * sol_price_usd) AS volume_usd
+                    FROM {table_to_use_pump} WHERE mint = $1 AND timestamp >= NOW() - INTERVAL '{market_hist_lookback_mins} minutes' AND price > 0
+                    ORDER BY timestamp ASC;""",
+                mint
+            )
         elif source == 'DEXSCREENER':
-             # Fetch Dexscreener snapshots if source is DEXSCREENER
-             market_hist_raw_source_specific = await conn.fetch(
-                 f"""SELECT timestamp, price_change_m5, volume_m5, liquidity_usd, buys_m5, sells_m5
-                     FROM dexscreener_data WHERE mint_address = $1 AND timestamp >= NOW() - INTERVAL '{market_hist_lookback_mins} minutes'
-                     ORDER BY timestamp ASC;""",
-                 mint
-             )
-        logger.debug(f"Fetched {len(market_hist_raw_unified)} unified and {len(market_hist_raw_source_specific)} source-specific market records for {mint}.")
+            # Fetch Dexscreener snapshots if source is DEXSCREENER (use v_dexscreener_data)
+            market_hist_raw_source_specific = await conn.fetch(
+                f"""SELECT timestamp, price_change_m5, volume_m5, liquidity_usd, buys_m5, sells_m5
+                    FROM v_dexscreener_data WHERE mint_address = $1 AND timestamp >= NOW() - INTERVAL '{market_hist_lookback_mins} minutes'
+                    ORDER BY timestamp ASC;""",
+                mint
+            )
+        #logger.debug(f"Fetched {len(market_hist_raw_unified)} unified and {len(market_hist_raw_source_specific)} source-specific market records for {mint}.")
         # Log samples if data exists
-        if market_hist_raw_unified: logger.debug(f"Unified market sample (last 5): {[dict(r) for r in market_hist_raw_unified[-5:]]}")
-        if market_hist_raw_source_specific: logger.debug(f"Source-specific market sample (last 5): {[dict(r) for r in market_hist_raw_source_specific[-5:]]}")
+        #if market_hist_raw_unified: logger.debug(f"Unified market sample (last 5): {[dict(r) for r in market_hist_raw_unified[-5:]]}")
+        #if market_hist_raw_source_specific: logger.debug(f"Source-specific market sample (last 5): {[dict(r) for r in market_hist_raw_source_specific[-5:]]}")
+
 
         # --- 6. Fetch Portfolio (Trade) History ---
         # Get all buy/sell records for this mint from the portfolio table
+        # IMPORTANT: Fetch from portfolio AND portfolio_backup if token might be inactive
         portfolio_hist_raw = await conn.fetch(
-            "SELECT timestamp, tx_type, price, reason, profit FROM portfolio WHERE mint = $1 ORDER BY timestamp ASC;",
+            """SELECT timestamp, tx_type, price, reason, profit FROM portfolio WHERE mint = $1
+               UNION ALL
+               SELECT timestamp, tx_type, price, reason, profit FROM portfolio_backup WHERE mint = $1
+               ORDER BY timestamp ASC;""",
             mint
         )
         # Summarize the history into a string format for the LLM prompt
         trade_history_summary = summarize_trade_history([dict(r) for r in portfolio_hist_raw])
-        logger.debug(f"Trade History Summary for {mint}:\n{trade_history_summary}")
+        #logger.debug(f"Trade History Summary for {mint}:\n{trade_history_summary}")
 
         # --- 7. Calculate Summaries & Volatility ---
         # Summarize Rugcheck score history (initial, latest, trend, stability)
@@ -646,7 +687,7 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
                               volatility_series = calculate_volatility(price_series, window=vol_window)
                               # Take the latest calculated volatility value
                               if not volatility_series.empty: volatility = volatility_series.iloc[-1]
-            logger.debug(f"Calculated Volatility for {mint} ({source}): {volatility:.4f}")
+            #logger.debug(f"Calculated Volatility for {mint} ({source}): {volatility:.4f}")
         else:
             logger.warning(f"No unified market history available for {mint} to calculate volatility.")
 
@@ -693,10 +734,10 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
                 # Use the last record from the fetched history if available
                 latest_dex_data = dict(market_hist_raw_source_specific[-1])
             else:
-                # If no recent history, fetch the single latest record from DB
+                # If no recent history, fetch the single latest record from DB (use v_dexscreener_data)
                  latest_dex_row = await conn.fetchrow(
                      """SELECT price_change_m5, buys_m5, sells_m5, volume_m5
-                        FROM dexscreener_data WHERE mint_address = $1
+                        FROM v_dexscreener_data WHERE mint_address = $1
                         ORDER BY timestamp DESC LIMIT 1""",
                      mint
                  )
@@ -715,11 +756,27 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
         logger.info(f"Successfully assembled comprehensive data package for {mint}.")
         return current_data
 
+# --- Helper Function to Load Config Module to Dict ---
+# (Needed for standalone execution to initialize DatabaseClient correctly)
+def _config_module_to_dict(module) -> dict:
+    """Converts public, uppercase attributes of a module into a dictionary."""
+    config_dict = {}
+    for key in dir(module):
+        # Load only uppercase variables that are not modules/classes/functions/private
+        if key.isupper() and not key.startswith('_'):
+            value = getattr(module, key)
+            # Check type to exclude modules etc.
+            if not inspect.ismodule(value) and \
+               not inspect.isclass(value) and \
+               not inspect.isfunction(value):
+                config_dict[key] = value
+    #logger.debug(f"Converted config module to dict: {list(config_dict.keys())}")
+    return config_dict
+
 # --- Main Test Execution ---
 async def main(mint: str, include_explanation_in_output: bool = True):
     """
-    Main function to run the test script.
-    Initializes logging, database, state, AI, fetches data, gets advice, and logs results.
+    Main async function to run the data assembly and AI decision test.
 
     Args:
         mint (str): The token mint address to analyze.
@@ -727,15 +784,30 @@ async def main(mint: str, include_explanation_in_output: bool = True):
     """
     # Initialize logging
     setup_logging()
+    logger.info(f"--- Starting AI Data Assembler Test for Mint: {mint} ---")
+
     # Get global state instance
     state = GlobalState.get_instance()
-    # Initialize database client (using default config from DatabaseClient class)
-    db = DatabaseClient()
+
+    # --- Load Configuration Explicitly (needed for standalone DatabaseClient init) ---
+    loaded_config = {}
+    try:
+        # We imported 'from config import config as config_module' earlier
+        loaded_config = _config_module_to_dict(config_module)
+        if not loaded_config:
+            raise ValueError("Config module loaded as empty dictionary.")
+        logger.info(f"Successfully loaded {len(loaded_config)} config items for standalone run.")
+    except Exception as e:
+        logger.critical(f"CRITICAL: Failed to load config module: {e}", exc_info=True)
+        return # Cannot proceed without config
+
+    # Initialize database client *with the loaded config*
+    db = DatabaseClient(config_dict=loaded_config)
 
     try:
         # Connect to the database
         await db.connect()
-        # Set the DB client in the global state for other components
+        # Set the DB client in the global state
         await state.set_db_client(db)
 
         # Pre-fetch the current SOL price for efficiency
@@ -755,45 +827,51 @@ async def main(mint: str, include_explanation_in_output: bool = True):
         # Fetch the comprehensive data package for the specified mint
         current_data = await fetch_comprehensive_token_data(db, mint)
 
-        # Log the fetched data for debugging purposes
-        logger.info(f"--- Comprehensive Data Prepared for AI Prompt ({mint}) ---")
-        # Use default=str to handle potential Decimals or datetime objects during JSON dump
-        logger.info("\n" + json.dumps(current_data, indent=2, default=str))
-        logger.info(f"--- End Comprehensive Data ---")
+        # Log the fetched data (optional, can be verbose)
+        #logger.info(f"--- Comprehensive Data Prepared for AI Prompt ({mint}) ---")
+        #logger.info("\n" + json.dumps(current_data, indent=2, default=str)) # default=str handles Decimal/datetime
+        #logger.info(f"--- End Comprehensive Data ---")
 
         # Get trade advice from the AI
         advice = ai.get_trade_advice(current_data, include_explanation=include_explanation_in_output)
 
-        # Log the received advice
+        # Log the received advice clearly
         logger.info(f"--- AI Advice Received for {mint} ---")
         logger.info(f"Decision:   {advice['decision']}")
         logger.info(f"Confidence: {advice['confidence']}")
         if include_explanation_in_output:
-            logger.info(f"Explanation:\n{advice['explanation']}")
+            # Add indentation to make explanation block easier to read in logs
+            explanation_lines = advice['explanation'].split('\n')
+            indented_explanation = "\n".join(["  " + line for line in explanation_lines])
+            logger.info(f"Explanation:\n{indented_explanation}")
         else:
             logger.info("Explanation: (Processing Skipped by flag)")
         logger.info(f"--- End AI Advice ---")
 
     except ValueError as ve:
-        # Handle specific errors like token not found
-        logger.error(f"Data fetching error for {mint}: {ve}", exc_info=True)
+        # Handle specific errors like token not found during data fetching
+        logger.error(f"Data fetching or processing error for {mint}: {ve}", exc_info=True)
     except Exception as e:
         # Catch any other unexpected errors during execution
-        logger.error(f"An unexpected error occurred in the test script main function: {e}", exc_info=True)
+        logger.error(f"An unexpected error occurred in the main test function: {e}", exc_info=True)
     finally:
         # Ensure database connection pool is closed gracefully
         if db and db.pool:
             await db.close()
             logger.info("Database connection closed.")
+        logger.info(f"--- Finished AI Data Assembler Test for Mint: {mint} ---")
+
 
 if __name__ == "__main__":
+    # This block executes only when the script is run directly
+
     # --- Command Line Argument Parsing ---
     include_expl = True # Default to include explanation
     mint_arg = None
 
     # Basic argument parsing: script_name <token_mint> [--no-explanation]
     if len(sys.argv) < 2:
-        print("Usage: python test_ai_decision_maker.py <token_mint> [--no-explanation]")
+        print("Usage: python ai_decision_module/ai_data_assembler.py <token_mint> [--no-explanation]")
         sys.exit(1)
 
     mint_arg = sys.argv[1] # First argument is the mint address
@@ -801,7 +879,7 @@ if __name__ == "__main__":
     # Check for optional flag to disable explanation processing/logging
     if len(sys.argv) > 2 and sys.argv[2] == '--no-explanation':
         include_expl = False
-        print("Running test without processing/logging the explanation.")
+        print("[Standalone Mode] Running test without processing/logging the explanation.")
 
     # Set asyncio policy for Windows compatibility if needed
     if sys.platform == "win32":

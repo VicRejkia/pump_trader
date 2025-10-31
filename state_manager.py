@@ -47,6 +47,7 @@ class GlobalState:
         self.rugcheck_queue = asyncio.PriorityQueue()  # RugCheck processing queue
         self.socialscheck_queue = asyncio.PriorityQueue()  # SocialsCheck processing queue
         self.enrichment_queue = asyncio.Queue() # Transaction enrichment queue
+        self.ai_evaluation_queue = asyncio.PriorityQueue(maxsize=config.AI_QUEUE_MAX_SIZE) # AI eval queue with max size
 
         self.ws_refresh_next_run_ts: Optional[datetime] = None
 
@@ -233,6 +234,10 @@ class GlobalState:
     
     def get_enrichment_queue(self) -> asyncio.Queue: # <<< ADD THIS
         return self.enrichment_queue
+    
+    def get_ai_evaluation_queue(self) -> asyncio.PriorityQueue:
+        """Returns the priority queue for AI evaluations."""
+        return self.ai_evaluation_queue
 
     def get_db_write_lock(self):
         return self.db_write_lock

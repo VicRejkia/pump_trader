@@ -146,6 +146,37 @@ _DRPC_ENDPOINT = "https://lb.drpc.org/ogrpc?network=solana"
 # "https://solana-mainnet.g.alchemy.com/v2/YOUR_API_KEY" (requires free sign-up)
 # "https://mainnet.helius-rpc.com/?api-key=YOUR_API_KEY" (requires free sign-up)
 
+# --- AI Decision Maker Configuration ---
+AI_DECISION_MAKING_ENABLED = True           # Master switch to enable/disable AI evaluation
+AI_MODEL_NAME = 'llama3:latest'             # Ollama model to use (e.g., 'llama3', 'mistral')
+_AI_EMBEDDNG_MODEL = 'all-MiniLM-L6-v2'     # Sentence Transformer model for RAG embeddings
+_AI_PROMPTS_DIR = 'ai_decision_module/prompts' # Path to the YAML prompt files
+_AI_CHROMA_DB_PATH = './ai_decision_module/chroma_db_aidm' # Path for ChromaDB persistence
+
+# AI Queue & Worker Settings
+AI_QUEUE_MAX_SIZE = 1000                     # Max items in the AI evaluation queue
+AI_WORKER_SLEEP_SECONDS = 0.5               # Sleep time for AI worker if queue is empty
+AI_MAX_CONCURRENT_EVALUATIONS = 1           # How many AI evaluations to run in parallel (adjust based on resources)
+
+# AI Advice Staleness & Refresh Intervals (in minutes)
+AI_ADVICE_MAX_STALENESS_MINUTES = 20        # How old AI advice can be before being ignored
+AI_REFRESH_INTERVAL_PORTFOLIO_MIN = 5       # How often to re-evaluate held portfolio tokens
+AI_REFRESH_INTERVAL_MOMENTUM_MIN = 15       # How often to re-evaluate high-momentum tokens
+AI_REFRESH_INTERVAL_EVENT_MIN = 30          # Minimum time between re-evaluating due to events (score changes, migration)
+AI_REFRESH_INTERVAL_STALE_MIN = 60          # How often to check for the oldest evaluated tokens to refresh
+
+# AI Confidence Thresholds for Trading Logic
+AI_CONFIDENCE_THRESHOLD_STRONG = 70         # Confidence level for strong confirmation/action
+AI_CONFIDENCE_THRESHOLD_VETO = 75           # Confidence level for AI to veto a rule-based buy
+AI_BUY_HOLD_CONFIDENCE_THRESHOLD = 60       # Min confidence for AI 'HOLD' to defer a buy
+AI_SELL_TRIGGER_CONFIDENCE_THRESHOLD = 75   # Min confidence for AI 'SELL' to trigger an early sell
+AI_HOLD_OVERRIDE_CONFIDENCE_THRESHOLD = 85  # Min confidence for AI 'HOLD' to potentially override a non-critical rule-based sell
+
+# AI Queue Population Settings
+AI_MOMENTUM_TOP_N = 5                       # How many top momentum tokens (PUMP & DEX) to queue
+AI_NEW_TOKEN_SAMPLE_RATE = 0.02             # Percentage (0.0 to 1.0) of new tokens to sample for AI eval
+AI_STALE_REFRESH_BATCH_SIZE = 5             # How many oldest tokens to refresh in the general refresh cycle
+
 # Logging
 _LOGGER_NAME = "TradingBot"
 _LOG_LEVEL_CONSOLE: str = "DEBUG"

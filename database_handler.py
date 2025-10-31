@@ -606,6 +606,206 @@ class DatabaseClient:
             if not conn and connection:
                 await self.pool.release(connection)
 
+    # --- NEW METHODS for AI Integration ---
+
+    async def insert_ai_decision(self, mint: str, context: str, decision: str, confidence: int, explanation: Optional[str] = None, data_snapshot: Optional[dict] = None, prompt_hash: Optional[str] = None, conn=None):
+        """Inserts a new AI decision record."""
+        query = """
+            INSERT INTO ai_decisions
+            (mint, decision_context, decision, confidence, explanation, data_snapshot, prompt_hash)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+        """
+        connection = conn or await self.pool.acquire()
+        try:
+            # Convert data_snapshot dict to JSON string if provided
+            data_snapshot_json = json.dumps(data_snapshot, default=str) if data_snapshot else None
+            await connection.execute(query, mint, context, decision, confidence, explanation, data_snapshot_json, prompt_hash)
+            logger.debug(f"Stored AI decision for {mint}: {decision} ({confidence}%)")
+        except Exception as e:
+            logger.error(f":police_car_light: Error inserting AI decision for {mint}: {e}", exc_info=True)
+            if not conn: raise # Re-raise if we acquired the connection here
+        finally:
+            if not conn and connection:
+                await self.pool.release(connection)
+
+    async def update_token_ai_eval_timestamp(self, mint: str, timestamp: datetime, conn=None):
+        """Updates the ai_last_evaluation_ts for a token."""
+        query = "UPDATE tokens SET ai_last_evaluation_ts = $1 WHERE mint = $2"
+        connection = conn or await self.pool.acquire()
+        try:
+            await connection.execute(query, timestamp, mint)
+        except Exception as e:
+            logger.error(f":police_car_light: Error updating AI eval timestamp for {mint}: {e}", exc_info=True)
+            if not conn: raise
+        finally:
+            if not conn and connection:
+                await self.pool.release(connection)
+
+    async def get_latest_ai_decision(self, mint: str, conn=None) -> Optional[asyncpg.Record]:
+        """Fetches the most recent AI decision record for a given mint."""
+        query = """
+            SELECT decision, confidence, evaluation_timestamp
+            FROM ai_decisions
+            WHERE mint = $1
+            ORDER BY evaluation_timestamp DESC
+            LIMIT 1;
+        """
+        connection = conn or await self.pool.acquire()
+        try:
+            return await connection.fetchrow(query, mint)
+        except Exception as e:
+            logger.error(f":police_car_light: Error fetching latest AI decision for {mint}: {e}", exc_info=True)
+            return None
+        finally:
+            if not conn and connection:
+                await self.pool.release(connection)
+
+    # --- Methods for AI Queue Population ---
+
+    async def get_active_portfolio_for_ai_eval(self, staleness_minutes: int, conn=None):
+        """Fetches active portfolio mints needing AI evaluation."""
+        query = """
+            SELECT p.mint
+            FROM portfolio p JOIN tokens t ON p.mint = t.mint
+            WHERE p.status = 'active' AND p.tx_type = 'buy'
+              AND (t.ai_last_evaluation_ts IS NULL OR t.ai_last_evaluation_ts < NOW() - ($1 || ' minutes')::interval);
+        """
+        connection = conn or await self.pool.acquire()
+        try:
+            rows = await connection.fetch(query, str(staleness_minutes))
+            return [row['mint'] for row in rows]
+        finally:
+            if not conn and connection: await self.pool.release(connection)
+
+    async def get_top_pump_momentum_for_ai_eval(self, top_n: int, window_minutes: int, staleness_minutes: int, conn=None):
+        """Fetches top N PUMP tokens by recent volume needing AI eval."""
+        query = f"""
+            SELECT
+                t.mint,
+                SUM(td.sol_amount) AS recent_pump_volume
+            FROM
+                tokens t JOIN trades td ON t.mint = td.mint
+            WHERE
+                td.timestamp >= NOW() - ($2 || ' minutes')::interval
+                AND t.data_source = 'PUMP'
+                AND t.is_active = TRUE
+                AND t.mint NOT IN (SELECT mint FROM portfolio WHERE status = 'active') -- Exclude held tokens
+                AND (t.ai_last_evaluation_ts IS NULL OR t.ai_last_evaluation_ts < NOW() - ($3 || ' minutes')::interval)
+            GROUP BY t.mint
+            ORDER BY recent_pump_volume DESC
+            LIMIT $1;
+        """
+        connection = conn or await self.pool.acquire()
+        try:
+            rows = await connection.fetch(query, top_n, str(window_minutes), str(staleness_minutes))
+            return [row['mint'] for row in rows]
+        finally:
+            if not conn and connection: await self.pool.release(connection)
+
+    async def get_top_dex_momentum_for_ai_eval(self, top_n: int, window_minutes: int, staleness_minutes: int, conn=None):
+        """Fetches top N DEX tokens by latest volume needing AI eval."""
+        query = f"""
+            WITH RankedDexVolume AS (
+                SELECT
+                    dsd.mint_address,
+                    dsd.volume_m5,
+                    t.ai_last_evaluation_ts,
+                    ROW_NUMBER() OVER (PARTITION BY dsd.mint_address ORDER BY dsd.timestamp DESC) as rn
+                FROM
+                    dexscreener_data dsd JOIN tokens t ON dsd.mint_address = t.mint
+                WHERE
+                    dsd.timestamp >= NOW() - ($2 || ' minutes')::interval -- Ensure snapshot is recent
+                    AND t.data_source = 'DEXSCREENER'
+                    AND t.is_active = TRUE
+                    AND t.mint NOT IN (SELECT mint FROM portfolio WHERE status = 'active') -- Exclude held tokens
+                    AND (t.ai_last_evaluation_ts IS NULL OR t.ai_last_evaluation_ts < NOW() - ($3 || ' minutes')::interval)
+            )
+            SELECT
+                mint_address AS mint,
+                volume_m5 AS latest_dex_volume_m5
+            FROM
+                RankedDexVolume
+            WHERE
+                rn = 1
+            ORDER BY
+                latest_dex_volume_m5 DESC NULLS LAST
+            LIMIT $1;
+        """
+        connection = conn or await self.pool.acquire()
+        try:
+            rows = await connection.fetch(query, top_n, str(window_minutes), str(staleness_minutes))
+            return [row['mint'] for row in rows]
+        finally:
+             if not conn and connection: await self.pool.release(connection)
+
+    async def get_tokens_with_recent_events_for_ai_eval(self, rug_change_threshold: int, social_change_threshold: int, staleness_minutes: int, conn=None):
+        """Fetches tokens with significant score changes or migration needing AI eval."""
+        # This query is complex. It finds tokens that migrated recently OR had significant score changes.
+        query = f"""
+            WITH RecentScoreChanges AS (
+                -- Find latest and previous Rugcheck scores
+                SELECT mint, score, last_checked,
+                       LAG(score) OVER (PARTITION BY mint ORDER BY last_checked) as prev_score
+                FROM v_rugcheck
+                WHERE last_checked >= NOW() - INTERVAL '1 hour' -- Look at recent score history
+            ),
+            SignificantRugChange AS (
+                SELECT DISTINCT mint
+                FROM RecentScoreChanges
+                WHERE ABS(score - prev_score) >= $1
+            ),
+            RecentSocialChanges AS (
+                -- Find latest and previous Social scores
+                SELECT mint, score_value, timestamp,
+                       LAG(score_value) OVER (PARTITION BY mint ORDER BY timestamp) as prev_score
+                FROM v_social_scores
+                WHERE timestamp >= NOW() - INTERVAL '1 hour'
+            ),
+            SignificantSocialChange AS (
+                SELECT DISTINCT mint
+                FROM RecentSocialChanges
+                WHERE ABS(score_value - prev_score) >= $2
+            ),
+            RecentMigrations AS (
+                SELECT DISTINCT mint
+                FROM v_migrations
+                WHERE txType = 'migrate' AND timestamp >= NOW() - INTERVAL '1 hour'
+            )
+            -- Combine tokens with events and filter by staleness
+            SELECT t.mint
+            FROM tokens t
+            WHERE t.is_active = TRUE
+              AND (t.mint IN (SELECT mint FROM SignificantRugChange) OR
+                   t.mint IN (SELECT mint FROM SignificantSocialChange) OR
+                   t.mint IN (SELECT mint FROM RecentMigrations))
+              AND (t.ai_last_evaluation_ts IS NULL OR t.ai_last_evaluation_ts < NOW() - ($3 || ' minutes')::interval);
+        """
+        connection = conn or await self.pool.acquire()
+        try:
+            rows = await connection.fetch(query, rug_change_threshold, social_change_threshold, str(staleness_minutes))
+            return [row['mint'] for row in rows]
+        finally:
+             if not conn and connection: await self.pool.release(connection)
+
+    async def get_stale_tokens_for_ai_eval(self, batch_size: int, staleness_minutes: int, conn=None):
+        """Fetches the oldest evaluated active tokens needing AI refresh."""
+        query = f"""
+            SELECT mint
+            FROM tokens
+            WHERE is_active = TRUE
+              AND (ai_last_evaluation_ts IS NULL OR ai_last_evaluation_ts < NOW() - ($2 || ' minutes')::interval)
+            ORDER BY ai_last_evaluation_ts ASC NULLS FIRST -- Oldest first
+            LIMIT $1;
+        """
+        connection = conn or await self.pool.acquire()
+        try:
+            rows = await connection.fetch(query, batch_size, str(staleness_minutes))
+            return [row['mint'] for row in rows]
+        finally:
+             if not conn and connection: await self.pool.release(connection)
+
+    # --- (End of new methods) ---
+
     async def update_portfolio_highest_price(self, position_id: int, price: float, conn=None):
         """Updates the highest price for a given portfolio position."""
         query = 'UPDATE portfolio SET highest_price = $1 WHERE id = $2'
@@ -650,7 +850,7 @@ class DatabaseClient:
             if not conn and connection:
                 await self.pool.release(connection)
 
-    async def insert_portfolio_sell_record(self, mint: str, current_price: float, market_cap_sol: float, net_sol_received: float, sol_price_usd: float, tokens_sold: float, sell_fee: float, sell_tip: float, profit: float, reason: str, timestamp: datetime, settings: dict, conn=None):
+    async def insert_portfolio_sell_record(self, mint: str, current_price: float, market_cap_sol: float, net_sol_received: float, sol_price_usd: float, tokens_sold: float, sell_fee: float, sell_tip: float, profit: float, reason: str, timestamp: datetime, settings: dict, ai_context: Optional[dict] = None, conn=None):
         """Inserts a sell transaction record into the portfolio, including settings."""
         query = '''
             INSERT INTO portfolio
@@ -660,6 +860,8 @@ class DatabaseClient:
         '''
         connection = conn or await self.pool.acquire()
         try:
+            if ai_context:
+                settings['ai_advice_at_sell'] = ai_context # Add AI info
             settings_json = json.dumps(settings) # Convert dict to JSON string
             await connection.execute(query, mint, current_price, market_cap_sol, net_sol_received, sol_price_usd, tokens_sold,
                                    sell_fee, sell_tip, profit, reason, timestamp, settings_json)
@@ -677,7 +879,7 @@ class DatabaseClient:
             if not conn and connection:
                 await self.pool.release(connection)
 
-    async def insert_portfolio_buy_record(self, mint: str, current_price: float, market_cap_sol: float, sol_base_amount: float, sol_price_usd: float, total_sol_investment: float, tokens_bought: float, buy_fee: float, buy_tip: float, initial_stop_loss_price: float, initial_tp_price: float, second_tp_price: float, timestamp: datetime, settings: dict, conn=None):
+    async def insert_portfolio_buy_record(self, mint: str, current_price: float, market_cap_sol: float, sol_base_amount: float, sol_price_usd: float, total_sol_investment: float, tokens_bought: float, buy_fee: float, buy_tip: float, initial_stop_loss_price: float, initial_tp_price: float, second_tp_price: float, timestamp: datetime, settings: dict, ai_context: Optional[dict] = None, conn=None):
         """Inserts a buy transaction record into the portfolio, including settings."""
         query = """
             INSERT INTO portfolio
@@ -689,6 +891,8 @@ class DatabaseClient:
         """
         connection = conn or await self.pool.acquire()
         try:
+            if ai_context:
+                settings['ai_advice_at_buy'] = ai_context
             settings_json = json.dumps(settings) # Convert dict to JSON string
             await connection.execute(query, mint, current_price, market_cap_sol, sol_base_amount, sol_price_usd, total_sol_investment, tokens_bought,
                                    buy_fee, buy_tip, tokens_bought, # remaining_tokens = initial_tokens

@@ -282,11 +282,29 @@ class WebSocketHandler:
                     await self._send_json({"method": "subscribeTokenTrade", "keys": [mint]})
                     await self.state.add_token_subscription(mint)
 
+                    # <<< ADD TO AI QUEUE (Priority 4 Sampling) >>>
+                    if self.config.get('AI_DECISION_MAKING_ENABLED', False):
+                        sample_rate = self.config.get('AI_NEW_TOKEN_SAMPLE_RATE', 0.02)
+                        if random.random() < sample_rate:
+                            ai_q = self.state.get_ai_evaluation_queue()
+                            if not ai_q.full():
+                                await ai_q.put((0, (mint, 'INITIAL BUY'))) # Priority 0
+                                logger.debug(f"AI Queue: Added new token {mint} via sampling.")
+                            else:
+                                logger.warning(f"AI Queue is full, could not add sampled new token {mint}.")
+                    # <<< END AI QUEUE ADDITION >>>
+
             elif tx_type == "migrate":
                 mint = data.get("mint")
                 if mint and await self.db_client.is_token_active_in_db(mint):
                     await self.db_client.mark_token_as_migrated(mint)
                     await self.db_client.insert_migration(data)
+                    # <<< Optional: Trigger AI eval on migration (Priority 3) >>>
+                    # You could add logic here to put the migrated token
+                    # into the AI queue if desired, similar to the event checker.
+                    # ai_q = self.state.get_ai_evaluation_queue()
+                    # if not ai_q.full():
+                    #    await ai_q.put((-25, (mint, 'SELL/HOLD' or 'REBUY'))) # Adjust context
 
             elif tx_type in ["buy", "sell"]:
                 await self.trade_queue.put(data)

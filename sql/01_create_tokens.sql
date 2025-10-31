@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS tokens (
     last_trade TIMESTAMP WITH TIME ZONE,            -- TIMESTAMP of the last Trade event, updated when a new TRADE is fetched
     cooldown_until TIMESTAMP WITH TIME ZONE,        -- <<< ADD THIS LINE: Prevent re-buys until this time
     data_source TEXT DEFAULT 'PUMP', -- 'PUMP' for WebSocket, 'DEXSCREENER' for API
+    ai_last_evaluation_ts TIMESTAMPTZ, -- Timestamp of the last AI evaluation
     timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP    -- creation TIMESTAMP
 );
 
@@ -30,6 +31,7 @@ CREATE TABLE IF NOT EXISTS tokens_backup (
 );
 
 -- Add the `backed_up` column to the backup table
+ALTER TABLE tokens_backup ADD COLUMN IF NOT EXISTS ai_last_evaluation_ts TIMESTAMPTZ;
 ALTER TABLE tokens_backup ADD COLUMN IF NOT EXISTS backup_reason TEXT;
 ALTER TABLE tokens_backup ADD COLUMN IF NOT EXISTS backup_timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
 -- Remove the default value for the `timestamp` column in the backup table
