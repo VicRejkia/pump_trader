@@ -13,9 +13,8 @@ from datetime import datetime, timezone, timedelta
 import httpx
 from typing import Dict, Any, List, Optional
 import random
-import hashlib # For prompt hashing (optional)
+import hashlib 
 
-# Assuming these imports are correct for your project structure
 import config.config as config_module
 from database_handler import DatabaseClient
 from trading_logic import TradingManager
@@ -26,7 +25,7 @@ from trade_processor import trade_worker
 from connectors.sol_price_api import update_sol_price
 from connectors.rugcheck_handler import Rugcheck
 from socials_processor import SocialsProcessor
-from utils import calculate_volatility # Assuming this is your utility
+from utils import calculate_volatility 
 from connectors.dexscreener_api import DexscreenerFetcher
 from ai_decision_module.ai_decision_maker import AIDecisionMaker
 from ai_decision_module.ai_data_assembler import fetch_comprehensive_token_data
@@ -34,7 +33,6 @@ from telegram_interface import send_telegram_message
 
 from typing import Optional
 
-# Define paths for communication files relative to project root
 PROJECT_ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR_BOT = os.path.join(PROJECT_ROOT_DIR, 'data')
 COMMAND_FILE = os.path.join(DATA_DIR_BOT, 'bot_command.txt')
@@ -45,7 +43,6 @@ class TradingBot:
     """Main class for running the trading bot."""
 
     def __init__(self, cleanup: bool = False, backup: bool = False, params_file: str = None, no_log_rotate: bool = False):
-        """Initialize the TradingBot with optional cleanup, backup, GA params file."""
         self.loop = None
         self.state = GlobalState.get_instance()
         self.cleanup = cleanup
@@ -62,32 +59,25 @@ class TradingBot:
         self._last_dynamic_config_mtime = 0
         self.bot_start_time = datetime.now(timezone.utc)
         self.dexscreener_fetcher = None
-        self.socials_proc = None # <<< Will be initialized in main()
-        self.rugchecker = None # <<< Will be managed by supervisor
-        self.ai_decision_maker = None # <<< Initialize AI maker instance variable
-        self.ai_semaphore = None # <<< For limiting concurrent AI evaluations
+        self.socials_proc = None
+        self.rugchecker = None
+        self.ai_decision_maker = None
+        self.ai_semaphore = None 
 
         os.makedirs(DATA_DIR_BOT, exist_ok=True)
         self._write_status({"bot_process_status": "INITIALIZING", "timestamp": datetime.now(timezone.utc).isoformat()})
 
     async def _fetch_initial_sol_price(self) -> bool:
-        """
-        Fetches the SOL price once at startup and updates state and DB.
-        Returns True if successful, False otherwise.
-        """
         try:
             async with httpx.AsyncClient() as client:
                 log_debug(f"Fetching initial SOL price from {config_module._SOL_PRICE_API_URL}")
                 response = await client.get(config_module._SOL_PRICE_API_URL, timeout=10.0)
-                
                 if response.status_code == 200:
                     data = response.json()
                     new_price = data.get("solana", {}).get("usd")
-                    
                     if new_price is None or not isinstance(new_price, (int, float)):
                         log_error("Invalid or missing SOL price in initial API response.")
                         return False
-
                     await self.state.set_sol_price(new_price)
                     await self.db_client.insert_sol_price(new_price) 
                     log_info(f"✅ Initial SOL price successfully fetched and set: {new_price} USD")
@@ -95,13 +85,7 @@ class TradingBot:
                 else:
                     log_error(f":police_car_light: Error fetching initial SOL price. Status: {response.status_code}, Response: {response.text}")
                     return False
-        except httpx.TimeoutException:
-            log_error("⏳ Timeout fetching initial SOL price.")
-            return False
-        except httpx.RequestError as req_err:
-            log_error(f"❌ HTTP Request Error fetching initial SOL price: {req_err}")
-            return False
-        except Exception as e:
+        except (httpx.TimeoutException, httpx.RequestError, Exception) as e:
             log_error(f"❌ Exception fetching initial SOL price: {e}", exc_info=True)
             return False
 
@@ -115,11 +99,7 @@ class TradingBot:
             elif isinstance(value, (int, float, str, bool, list, dict)) or value is None:
                 serializable_config[key] = value
             else:
-                try:
-                    json.dumps({key: value})
-                    serializable_config[key] = value
-                except TypeError:
-                    serializable_config[key] = str(value)
+                serializable_config[key] = str(value)
         return serializable_config
 
     def _load_base_config(self):
@@ -133,50 +113,40 @@ class TradingBot:
             self.base_config = loaded_config.copy()
             self.config = loaded_config.copy()
             log_info(":gear: Base configuration loaded successfully.")
-
             if not os.path.exists(DYNAMIC_CONFIG_FILE):
                 with open(DYNAMIC_CONFIG_FILE, 'w', encoding='utf-8') as f:
                     json.dump(self._filter_serializable_config(self.config), f, indent=4)
-
         except Exception as e:
             log_critical(f":x: [bold red]CRITICAL: Failed to load base configuration[/bold red]: {e}", exc_info=True)
             raise ValueError("Failed to load critical base configuration.") from e
         
-    
     def register_signal_handlers(self):
-        """Register signal handlers for graceful shutdown."""
         def signal_handler():
             log_info(":heavy_exclamation_mark: [bold red]Signal received[/bold red], initiating shutdown...")
             self.state.trigger_shutdown()
-
         if hasattr(signal, 'SIGINT'):
             signal.signal(signal.SIGINT, lambda *_: signal_handler())
         if hasattr(signal, 'SIGTERM'):
             signal.signal(signal.SIGTERM, lambda *_: signal_handler())
 
     async def config_updater(self):
-        """Periodically checks dynamic_config.json for updates and applies them."""
         log_info(f"⚙️ Dynamic config updater started. Watching: {os.path.abspath(DYNAMIC_CONFIG_FILE)}")
         while not self.state.shutdown_event.is_set():
             await asyncio.sleep(10)
             try:
-                if not os.path.exists(DYNAMIC_CONFIG_FILE):
-                    continue
+                if not os.path.exists(DYNAMIC_CONFIG_FILE): continue
                 current_mtime = os.path.getmtime(DYNAMIC_CONFIG_FILE)
                 if current_mtime > self._last_dynamic_config_mtime:
                     log_info(f"Detected change in {DYNAMIC_CONFIG_FILE}. Attempting to load updates.")
                     with open(DYNAMIC_CONFIG_FILE, 'r', encoding='utf-8') as f:
                         dynamic_conf = json.load(f)
-
-                    updated_count = 0
-                    changed_params = {}
+                    updated_count = 0; changed_params = {}
                     for key, value in dynamic_conf.items():
                         key_upper = key.upper()
                         if key_upper in self.config and value != self.config[key_upper]:
                             self.config[key_upper] = value
                             changed_params[key_upper] = value
                             updated_count += 1
-                    
                     if updated_count > 0:
                         log_info(f"Applied {updated_count} configuration updates: {changed_params}")
                     self._last_dynamic_config_mtime = current_mtime
@@ -185,48 +155,30 @@ class TradingBot:
         log_info("⚙️ Dynamic config updater task shutting down.")
 
     def _write_status(self, status_data: dict):
-        """Writes the bot's status dictionary to the status JSON file."""
         try:
             with open(STATUS_FILE, 'w', encoding='utf-8') as f:
                 json.dump(status_data, f, indent=4)
         except IOError as e:
             log_error(f":police_car_light: Error writing status file {STATUS_FILE}: {e}")
 
-    # <<< NEW AI WORKER TASK >>>
     async def ai_evaluation_worker(self):
-        """Continuously processes tokens from the AI evaluation queue."""
         log_info("🤖 AI Evaluation Worker started.")
         if not self.ai_decision_maker or not self.db_client:
-            log_critical("AI Worker cannot start: AIDecisionMaker or DatabaseClient not initialized.")
+            log_critical("🤖 AI Worker cannot start: AIDecisionMaker or DatabaseClient not initialized.")
             return
-
         while not self.state.shutdown_event.is_set():
             mint = None
             try:
-                # Get item with timeout to allow periodic shutdown checks
                 priority, (mint, decision_context) = await asyncio.wait_for(
-                    self.state.get_ai_evaluation_queue().get(),
-                    timeout=1.0
+                    self.state.get_ai_evaluation_queue().get(), timeout=1.0
                 )
-                log_debug(f"AI Worker picked up {mint} (Context: {decision_context}, Priority: {priority})")
-
-                log_debug(f"AI Worker ({mint}): WAITING to acquire semaphore...")
-                # Acquire semaphore to limit concurrent evaluations
+                log_debug(f"🤖 AI Worker: Picked up {mint} (Context: {decision_context}, Prio: {priority})")
                 async with self.ai_semaphore:
-                    log_debug(f"AI Worker ({mint}): ACQUIRED semaphore. Starting evaluation...")
                     evaluation_start_time = time.monotonic()
-
-                    # 1. Fetch data
                     comprehensive_data = await fetch_comprehensive_token_data(self.db_client, mint)
-
-                    # 2. Get AI Advice
-                    advice = self.ai_decision_maker.get_trade_advice(comprehensive_data) # This internally calls LLM and RAG
-
-                    # 3. Store result in DB
+                    advice = await self.ai_decision_maker.get_trade_advice(comprehensive_data) 
                     eval_ts = datetime.now(timezone.utc)
-                    prompt_hash = None # Optional: Calculate hash if needed
-                    data_snapshot = comprehensive_data # Optional: Store input data
-
+                    prompt_hash = None; data_snapshot = comprehensive_data 
                     async with self.db_client.pool.acquire() as conn:
                         async with conn.transaction():
                             await self.db_client.insert_ai_decision(
@@ -236,160 +188,105 @@ class TradingBot:
                                 data_snapshot=data_snapshot, prompt_hash=prompt_hash,
                                 conn=conn
                             )
-                            # 4. Update the last evaluation timestamp on the token
                             await self.db_client.update_token_ai_eval_timestamp(mint, eval_ts, conn=conn)
-
                     evaluation_duration = time.monotonic() - evaluation_start_time
-                    log_info(f"🤖 AI evaluation complete for {mint} ({decision_context}) -> {advice['decision']} ({advice['confidence']}%) in {evaluation_duration:.2f}s")
-
-                # Mark task as done AFTER the semaphore block finishes naturally
+                    log_info(f"🤖 AI eval complete for {mint} ({decision_context}) -> {advice['decision']} ({advice['confidence']}%) in {evaluation_duration:.2f}s")
                 self.state.get_ai_evaluation_queue().task_done()
-                # <<< --- ADD LOGGING HERE --- >>>
-                log_debug(f"AI Worker ({mint}): RELEASED semaphore.")
-                # <<< --- END LOGGING --- >>>
-                mint = None # Reset mint after successful processing and release
-
-            except asyncio.TimeoutError:
-                # Queue was empty, continue loop
-                continue
-            except asyncio.CancelledError:
-                log_info("🤖 AI Evaluation Worker task cancelled.")
-                break
-            except ValueError as ve: # Catch token not found
-                log_error(f"AI Worker: Error fetching data for {mint} (likely deleted): {ve}")
-                if mint: # Ensure mint was assigned before error
-                    try:
-                        self.state.get_ai_evaluation_queue().task_done()
-                        # Also log semaphore release here in case error happened inside 'with' block
-                        log_debug(f"AI Worker ({mint}): Releasing semaphore due to ValueError.")
-                    except ValueError: pass # task_done might fail if called twice
+                mint = None 
+            except asyncio.TimeoutError: continue
+            except asyncio.CancelledError: log_info("🤖 AI Evaluation Worker task cancelled."); break
+            except ValueError as ve: 
+                log_error(f"🤖 AI Worker: Error fetching data for {mint} (likely deleted): {ve}")
+                if mint:
+                    try: self.state.get_ai_evaluation_queue().task_done()
+                    except ValueError: pass
             except Exception as e:
                 log_error(f"🚨 Unexpected error in AI Evaluation Worker: {e}", exc_info=True)
-                if mint: # Ensure mint was assigned before error
-                    try:
-                        self.state.get_ai_evaluation_queue().task_done()
-                         # Also log semaphore release here in case error happened inside 'with' block
-                        log_debug(f"AI Worker ({mint}): Releasing semaphore due to Exception.")
+                if mint:
+                    try: self.state.get_ai_evaluation_queue().task_done()
                     except ValueError: pass
-                await asyncio.sleep(10) # Wait a bit after an unexpected error
-
+                await asyncio.sleep(10)
         log_info("🤖 AI Evaluation Worker shutting down.")
 
-    # <<< NEW AI QUEUE POPULATION TASKS >>>
     async def populate_ai_queue_periodic(self):
-        """Periodically runs different AI queue population strategies."""
         log_info("📊 AI Queue Populator started.")
         while not self.state.shutdown_event.is_set():
             if not self.config.get('AI_DECISION_MAKING_ENABLED', False):
-                await asyncio.sleep(60) # Sleep longer if AI is disabled
-                continue
-
+                await asyncio.sleep(60); continue
             q = self.state.get_ai_evaluation_queue()
             if q.full():
-                logger.warning("AI evaluation queue is full. Skipping population cycle.")
-                await asyncio.sleep(30) # Wait longer if full
-                continue
-
-            current_q_size = q.qsize()
-            max_q_size = self.config.get('AI_QUEUE_MAX_SIZE', 1000)
-            added_count = 0
-
+                log_warning("🤖 AI evaluation queue is full. Skipping population cycle.")
+                await asyncio.sleep(30); continue
+            max_q_size = self.config.get('AI_QUEUE_MAX_SIZE', 1000); added_count = 0
             try:
-                # --- Priority 1: Active Portfolio ---
                 portfolio_mints = await self.db_client.get_active_portfolio_for_ai_eval(
                     self.config.get('AI_REFRESH_INTERVAL_PORTFOLIO_MIN', 5)
                 )
                 for mint in portfolio_mints:
-                    if q.qsize() < max_q_size:
-                        await q.put((-100, (mint, 'SELL/HOLD')))
-                        added_count += 1
+                    if q.qsize() < max_q_size: await q.put((-100, (mint, 'SELL/HOLD'))); added_count += 1
                     else: break
-                if portfolio_mints: log_debug(f"AI Queue: Added {len(portfolio_mints)} portfolio tokens.")
-
-                # --- Priority 2: High Momentum (PUMP) ---
+                if portfolio_mints: log_debug(f"🤖 AI Queue: Added {len(portfolio_mints)} portfolio tokens.")
                 if q.qsize() < max_q_size:
                     pump_mints = await self.db_client.get_top_pump_momentum_for_ai_eval(
-                        self.config.get('AI_MOMENTUM_TOP_N', 5), 30, # Lookback 30 min
-                        self.config.get('AI_REFRESH_INTERVAL_MOMENTUM_MIN', 15)
+                        self.config.get('AI_MOMENTUM_TOP_N', 5), 30, self.config.get('AI_REFRESH_INTERVAL_MOMENTUM_MIN', 15)
                     )
                     for mint in pump_mints:
                         if q.qsize() < max_q_size:
-                            # Determine context (REBUY if history exists, else INITIAL)
                             past_pos_count = await self.db_client.pool.fetchval("SELECT COUNT(*) FROM portfolio WHERE mint = $1", mint)
                             context = "REBUY" if past_pos_count > 0 else "INITIAL BUY"
-                            await q.put((-50, (mint, context)))
-                            added_count += 1
+                            await q.put((-50, (mint, context))); added_count += 1
                         else: break
-                    if pump_mints: log_debug(f"AI Queue: Added {len(pump_mints)} PUMP momentum tokens.")
-
-                # --- Priority 2: High Momentum (DEX) ---
+                    if pump_mints: log_debug(f"🤖 AI Queue: Added {len(pump_mints)} PUMP momentum tokens.")
                 if q.qsize() < max_q_size:
                     dex_mints = await self.db_client.get_top_dex_momentum_for_ai_eval(
-                        self.config.get('AI_MOMENTUM_TOP_N', 5), 30, # Lookback 30 min
-                        self.config.get('AI_REFRESH_INTERVAL_MOMENTUM_MIN', 15)
+                        self.config.get('AI_MOMENTUM_TOP_N', 5), 30, self.config.get('AI_REFRESH_INTERVAL_MOMENTUM_MIN', 15)
                     )
                     for mint in dex_mints:
                          if q.qsize() < max_q_size:
                             past_pos_count = await self.db_client.pool.fetchval("SELECT COUNT(*) FROM portfolio WHERE mint = $1", mint)
                             context = "REBUY" if past_pos_count > 0 else "INITIAL BUY"
-                            await q.put((-45, (mint, context))) # Slightly lower prio than PUMP momentum maybe?
-                            added_count += 1
+                            await q.put((-45, (mint, context))); added_count += 1
                          else: break
-                    if dex_mints: log_debug(f"AI Queue: Added {len(dex_mints)} DEX momentum tokens.")
-
-                # --- Priority 3: Events ---
+                    if dex_mints: log_debug(f"🤖 AI Queue: Added {len(dex_mints)} DEX momentum tokens.")
                 if q.qsize() < max_q_size:
                     event_mints = await self.db_client.get_tokens_with_recent_events_for_ai_eval(
-                        200, 15, # Score change thresholds
-                        self.config.get('AI_REFRESH_INTERVAL_EVENT_MIN', 30)
+                        200, 15, self.config.get('AI_REFRESH_INTERVAL_EVENT_MIN', 30)
                     )
                     for mint in event_mints:
                         if q.qsize() < max_q_size:
-                            # Determine context based on current holding status
                             active_pos = await self.db_client.pool.fetchval("SELECT 1 FROM portfolio WHERE mint = $1 AND status = 'active' AND tx_type = 'buy' LIMIT 1", mint)
-                            context = "SELL/HOLD" if active_pos else "REBUY" # Rebuy if not holding but event occurred
-                            await q.put((-25, (mint, context)))
-                            added_count += 1
+                            context = "SELL/HOLD" if active_pos else "REBUY"
+                            await q.put((-25, (mint, context))); added_count += 1
                         else: break
-                    if event_mints: log_debug(f"AI Queue: Added {len(event_mints)} event-triggered tokens.")
-
-                # --- Priority 5: General Staleness Refresh ---
+                    if event_mints: log_debug(f"🤖 AI Queue: Added {len(event_mints)} event-triggered tokens.")
                 if q.qsize() < max_q_size:
                     stale_mints = await self.db_client.get_stale_tokens_for_ai_eval(
-                         self.config.get('AI_STALE_REFRESH_BATCH_SIZE', 5),
-                         self.config.get('AI_REFRESH_INTERVAL_STALE_MIN', 60)
+                         self.config.get('AI_STALE_REFRESH_BATCH_SIZE', 5), self.config.get('AI_REFRESH_INTERVAL_STALE_MIN', 60)
                     )
                     for mint in stale_mints:
                         if q.qsize() < max_q_size:
                              active_pos = await self.db_client.pool.fetchval("SELECT 1 FROM portfolio WHERE mint = $1 AND status = 'active' AND tx_type = 'buy' LIMIT 1", mint)
-                             context = "SELL/HOLD" if active_pos else "INITIAL BUY" # Or Rebuy? Needs check maybe. Defaulting to INITIAL.
-                             await q.put((50, (mint, context)))
-                             added_count += 1
+                             context = "SELL/HOLD" if active_pos else "INITIAL BUY"
+                             await q.put((50, (mint, context))); added_count += 1
                         else: break
-                    if stale_mints: log_debug(f"AI Queue: Added {len(stale_mints)} stale tokens for refresh.")
-
+                    if stale_mints: log_debug(f"🤖 AI Queue: Added {len(stale_mints)} stale tokens for refresh.")
                 if added_count > 0:
                     log_info(f"AI Queue Populator added {added_count} tasks. Current size: {q.qsize()}.")
-
-            except asyncio.CancelledError:
-                log_info("📊 AI Queue Populator task cancelled.")
-                break
-            except Exception as e:
-                log_error(f"🚨 Error in AI Queue Populator: {e}", exc_info=True)
-
-            # Sleep until the next population cycle
-            await asyncio.sleep(60) # Check every minute
-
+            except asyncio.CancelledError: log_info("📊 AI Queue Populator task cancelled."); break
+            except Exception as e: log_error(f"🚨 Error in AI Queue Populator: {e}", exc_info=True)
+            await asyncio.sleep(60)
         log_info("📊 AI Queue Populator shutting down.")
 
     async def status_updater(self):
-        """Periodically gathers and writes detailed bot status to bot_status.json."""
+        """
+        [MODIFIED] Periodically gathers and writes detailed bot status to bot_status.json.
+        Now includes AI queue size and worker status.
+        """
         log_info(":rocket: Status updater task started.")
         while not self.state.shutdown_event.is_set():
             try:
                 current_process_status = "RUNNING"
-                if self.state.shutdown_event.is_set():
-                    current_process_status = "STOPPING"
+                if self.state.shutdown_event.is_set(): current_process_status = "STOPPING"
                 
                 uptime_seconds = (datetime.now(timezone.utc) - self.bot_start_time).total_seconds()
                 active_subs = await self.state.get_token_subscriptions()
@@ -397,10 +294,24 @@ class TradingBot:
                 sol_price = await self.state.get_sol_price()
                 sol_balance_usd = (sol_balance * sol_price) if sol_balance is not None and sol_price is not None else 0.0
                 
-                # --- MODIFICATION: Get full WebSocket summary ---
                 ws_summary = {}
-                if self.ws_handler:
-                    ws_summary = self.ws_handler.get_status()
+                if self.ws_handler: ws_summary = self.ws_handler.get_status()
+
+                # --- NEW AI STATUS ---
+                ai_q_size = -1
+                ai_workers_active = -1
+                if self.config.get('AI_DECISION_MAKING_ENABLED', False) and self.ai_semaphore:
+                    ai_q_size = self.state.get_ai_evaluation_queue().qsize()
+                    
+                    # --- FIX ---
+                    # Get max_workers from the config, not a private attribute
+                    max_workers = self.config.get('AI_MAX_CONCURRENT_EVALUATIONS', 1)
+                    # Access the (still private, but more stable) _value
+                    active_workers = max_workers - self.ai_semaphore._value 
+                    # --- END FIX ---
+
+                    ai_workers_active = active_workers
+                # --- END NEW AI STATUS ---
 
                 status_data = {
                     "bot_process_status": current_process_status,
@@ -412,7 +323,9 @@ class TradingBot:
                     "current_portfolio_value_usd": round(sol_balance_usd, 2),
                     "rugcheck_queue_size": self.state.get_rugcheck_queue().qsize(),
                     "socialscheck_queue_size": self.state.get_socialscheck_queue().qsize(),
-                    "websocket_summary": ws_summary # <-- ADD THIS
+                    "ai_evaluation_queue_size": ai_q_size,    # <-- ADDED
+                    "ai_workers_active": ai_workers_active, # <-- ADDED
+                    "websocket_summary": ws_summary 
                 }
                 self._write_status(status_data)
                 await asyncio.sleep(5)
@@ -429,7 +342,10 @@ class TradingBot:
 
 
     async def monitor_tasks(self):
-        """Monitor and log the status of background tasks."""
+        """
+        [MODIFIED] Monitor and log the status of background tasks.
+        Now includes AI worker status and queue size.
+        """
         try:
             while not self.state.shutdown_event.is_set():
                 sol_amount = await self.state.get_current_sol_balance() or 0.0
@@ -441,39 +357,26 @@ class TradingBot:
                 ws_lines = []
                 if self.ws_handler:
                     summary = self.ws_handler.get_status()
-                    status = summary.get("connection_status", "Error")
-                    style = "green" if status == "Connected" else "yellow" if status == "Reconnecting" else "red"
-
+                    status = summary.get("connection_status", "Error"); style = "green" if status == "Connected" else "yellow" if status == "Reconnecting" else "red"
                     time_since = summary.get("time_since_last_message_s", -1)
-                    if isinstance(time_since, (int, float)) and time_since > 60:
-                        status += f" (Stale: {time_since:.0f}s)"
-
+                    if isinstance(time_since, (int, float)) and time_since > 60: status += f" (Stale: {time_since:.0f}s)"
                     ws_lines.append(f"[bold cyan]│[/bold cyan] :electric_plug: [bold]Websocket:[/bold] [{style}]{status}[/{style}]")
                     ws_lines.append(f"[bold cyan]│  ├─ [/bold cyan][bold]NewToken Stream:[/bold] [{'green' if summary.get('new_token_subscribed') else 'red'}]Subscribed[/]")
                     ws_lines.append(f"[bold cyan]│  ├─ [/bold cyan][bold]Migration Stream:[/bold] [{'green' if summary.get('migration_subscribed') else 'red'}]Subscribed[/]")
                     ws_lines.append(f"[bold cyan]│  └─ [/bold cyan][bold]Token Trades Subbed:[/bold] [magenta]{summary.get('trade_subscriptions_count', 0)}[/magenta]")
-                    
                     next_run = await self.state.get_ws_refresh_next_run_ts()
                     if next_run:
                         remaining = (next_run - datetime.now(timezone.utc)).total_seconds() / 60
                         timer = f"[yellow]{remaining:.1f} min[/yellow]" if remaining > 0 else "[yellow]Soon.[/yellow]"
-                    else:
-                        timer = "[green]In Progress.[/green]"
+                    else: timer = "[green]In Progress.[/green]"
                     ws_lines.append(f"[bold cyan]│  └─ [/bold cyan][bold]Next WS Refresh:[/bold] {timer}")
 
-                task_lines = []
-                active_count = 0
+                task_lines = []; active_count = 0
                 for task in self.tasks:
-                    name = task.get_name()
-                    status = "running"
-                    style = "green"
-                    if task.done():
-                        status = "error" if task.exception() else "done"
-                        style = "red"
-                    else:
-                        active_count += 1
+                    name = task.get_name(); status = "running"; style = "green"
+                    if task.done(): status = "error" if task.exception() else "done"; style = "red"
+                    else: active_count += 1
                     task_lines.append(f"[bold cyan]├──[/bold cyan] {name}: [bold {style}]{status}[/bold {style}]")
-
 
                 log_parts = [
                     "\n[bold cyan]┌────────────────────────────────────[/bold cyan]",
@@ -485,12 +388,36 @@ class TradingBot:
                     f"[bold cyan]│[/bold cyan] :bar_chart: [bold]Open Trades:[/bold] {open_trades_str}",
                     f"[bold cyan]│[/bold cyan] :recycle: [bold]RugCheck Queue:[/bold] [blue]{self.state.get_rugcheck_queue().qsize()}[/blue]",
                     f"[bold cyan]│[/bold cyan] :speech_balloon: [bold]Socials Queue:[/bold] [blue]{self.state.get_socialscheck_queue().qsize()}[/blue]",
+                ]
+                
+                # --- ADDED AI MONITORING SECTION ---
+                ai_enabled = self.config.get('AI_DECISION_MAKING_ENABLED')
+                ai_status_color = "green" if ai_enabled else "red"
+                ai_status_text = "ENABLED" if ai_enabled else "DISABLED"
+                log_parts.append(f"[bold cyan]│[/bold cyan] :brain: [bold]AI Status:[/bold] [bold {ai_status_color}]{ai_status_text}[/bold {ai_status_color}]")
+                
+                if ai_enabled and self.ai_semaphore:
+                    # --- FIX ---
+                    # Get max_workers from the config, not a private attribute
+                    max_workers = self.config.get('AI_MAX_CONCURRENT_EVALUATIONS', 1)
+                    # Access the (still private, but more stable) _value
+                    active_workers = max_workers - self.ai_semaphore._value 
+                    # --- END FIX ---
+                    ai_q_size = self.state.get_ai_evaluation_queue().qsize()
+                    
+                    log_parts.extend([
+                        f"[bold cyan]│  ├─ [/bold cyan][bold]AI Queue:[/bold] [blue]{ai_q_size}[/blue]",
+                        f"[bold cyan]│  └─ [/bold cyan][bold]Active Workers:[/bold] [magenta]{active_workers}/{max_workers}[/magenta]",
+                    ])
+                # --- END AI MONITORING SECTION ---
+
+                log_parts.extend([
                     *ws_lines,
                     f"[bold cyan]│[/bold cyan] :gear: [bold]Managed Tasks:[/bold] {active_count}/{len(self.tasks)}",
                     "[bold cyan]│[/bold cyan] :clipboard: [bold]Tasks:[/bold]",
                     *task_lines,
                     "[bold cyan]└────────────────────────────────────[/bold cyan]"
-                ]
+                ])
                 log_debug("\n".join(log_parts))
                 
                 await asyncio.sleep(self.config.get('MONITOR_TASK_INTERVAL_SECONDS', 30))
@@ -500,7 +427,6 @@ class TradingBot:
             log_error(f":police_car_light: [bold red]FATAL error in Monitor task[/bold red]: {e}", exc_info=True)
 
     async def command_listener(self):
-        """Periodically checks the command file for commands."""
         last_command = None
         while not self.state.shutdown_event.is_set():
             try:
@@ -511,44 +437,26 @@ class TradingBot:
                         log_info(f"Received command: '{command}'")
                         last_command = command
                         if command.upper() == "RESTART_WEBSOCKET":
-                            if self.ws_handler:
-                                self.ws_handler.start() 
-                                log_info("WebSocket-Neustart durch Befehl initiiert.")
-                        elif command.upper() == "STOP":
-                            self.state.trigger_shutdown()
-                        elif command.upper() == "STOP_BUYING":
-                            self.state.is_buying_enabled = False
-                            log_info("Buying has been disabled.")
-                        elif command.upper() == "START_BUYING":
-                            self.state.is_buying_enabled = True
-                            log_info("Buying has been enabled.")
-                        elif command.upper() == "SELL_ALL_IMMEDIATELY":
-                            asyncio.create_task(self.trading_manager.execute_manual_sell_all())
-                        elif command.upper().startswith("SELL_"):
-                            mint = command[len("SELL_"):]
-                            asyncio.create_task(self.trading_manager.execute_manual_sell(mint))
-                        with open(COMMAND_FILE, 'w') as f: f.write("") # Clear command
+                            if self.ws_handler: self.ws_handler.start(); log_info("WebSocket-Neustart durch Befehl initiiert.")
+                        elif command.upper() == "STOP": self.state.trigger_shutdown()
+                        elif command.upper() == "STOP_BUYING": self.state.is_buying_enabled = False; log_info("Buying has been disabled.")
+                        elif command.upper() == "START_BUYING": self.state.is_buying_enabled = True; log_info("Buying has been enabled.")
+                        elif command.upper() == "SELL_ALL_IMMEDIATELY": asyncio.create_task(self.trading_manager.execute_manual_sell_all())
+                        elif command.upper().startswith("SELL_"): mint = command[len("SELL_"):]; asyncio.create_task(self.trading_manager.execute_manual_sell(mint))
+                        with open(COMMAND_FILE, 'w') as f: f.write("")
                 await asyncio.sleep(5)
-            except asyncio.CancelledError:
-                log_info(":stop_sign: Command listener task shutting down.")
-                break
-            except Exception as e:
-                log_error(f":police_car_light: Error in command listener: {e}", exc_info=True)
+            except asyncio.CancelledError: log_info(":stop_sign: Command listener task shutting down."); break
+            except Exception as e: log_error(f":police_car_light: Error in command listener: {e}", exc_info=True)
     
     async def shutdown(self):
         if getattr(self, '_shutdown_called', False): return
         self._shutdown_called = True
         log_info(":stop_button: [bold red]Shutdown initiated[/bold red]...")
         self.state.trigger_shutdown()
-        if self.ws_handler:
-            await self.ws_handler.shutdown()
-        
-        for task in self.tasks:
-            task.cancel()
+        if self.ws_handler: await self.ws_handler.shutdown()
+        for task in self.tasks: task.cancel()
         await asyncio.gather(*self.tasks, return_exceptions=True)
-
         if self.db_client and self.db_client.pool:
-            #await self.db_client.backup_creator_wallets()
             await self.db_client.close()
         log_info(":checkered_flag: Bot shutdown complete.")
 
@@ -561,17 +469,12 @@ class TradingBot:
         
         setup_logging()
         
-        # --- Database and Services Setup ---
         try:
             self.db_client = DatabaseClient(config_dict=self.config)
             await self.db_client.connect()
             await self.state.set_db_client(self.db_client)
-
             if self.backup: await self.db_client.backup_db(True)
             if self.cleanup: await self.db_client.cleanup_db(True)
-            
-            #await self.db_client.init_db()
-
         except Exception as db_err:
             log_critical(f"CRITICAL: Failed database setup: {db_err}", exc_info=True)
             self._write_status({"bot_process_status": "ERROR_DB_SETUP", "error_message": str(db_err), "timestamp": datetime.now(timezone.utc).isoformat()})
@@ -580,28 +483,23 @@ class TradingBot:
         if not await self._fetch_initial_sol_price():
             log_critical("🔴 Failed to fetch initial SOL price. Functionality may be limited.")
 
-        # <<< INITIALIZE AI DECISION MAKER >>>
         if self.config.get('AI_DECISION_MAKING_ENABLED', False):
             try:
-                self.ai_decision_maker = AIDecisionMaker(config=self.config)
+                self.ai_decision_maker = AIDecisionMaker(config=self.config, db_client=self.db_client)
                 log_info("✅ AI Decision Maker initialized successfully.")
-                # Initialize semaphore for concurrency control
                 self.ai_semaphore = asyncio.Semaphore(self.config.get('AI_MAX_CONCURRENT_EVALUATIONS', 1))
             except Exception as ai_init_err:
                 log_critical(f"CRITICAL: Failed to initialize AI Decision Maker: {ai_init_err}", exc_info=True)
-                self.config['AI_DECISION_MAKING_ENABLED'] = False # Disable AI if init fails
+                self.config['AI_DECISION_MAKING_ENABLED'] = False 
                 log_warning("AI Decision Making has been DISABLED due to initialization error.")
         else:
             log_info("AI Decision Making is DISABLED by configuration.")
 
-        # Create persistent instances of the main components.
         self.ws_handler = WebSocketHandler(self.db_client, self.state, self.config)
         await self.state.set_websocket_handler(self.ws_handler)
-
         self.socials_proc = SocialsProcessor(state=self.state, db_client=self.db_client, config_dict=self.config)
         self.trading_manager = TradingManager(db_client=self.db_client, config_dict=self.config, state=self.state)
         self.dexscreener_fetcher = DexscreenerFetcher(state=self.state, db_client=self.db_client)
-        # The Rugcheck handler now gets a stable reference to ws_handler
         self.rugchecker = Rugcheck(
             state=self.state, db_client=self.db_client,
             websocket_handler=self.ws_handler, 
@@ -623,9 +521,6 @@ class TradingBot:
             asyncio.create_task(self.run_buy_checks(), name="buy_opportunity_checker"),
             asyncio.create_task(self.run_sell_checks(), name="sell_opportunity_checker"),
             asyncio.create_task(self.run_heartbeat_emitter(), name="heartbeat_emitter"),
-            # The supervisor is replaced by the handler's own manager task
-            #asyncio.create_task(self.ws_handler.manage_connection(), name="websocket_manager"),
-            # The rugchecker is now a regular task, not tied to the supervisor
             self.rugchecker.start()
         ]
         if self.config.get('AI_DECISION_MAKING_ENABLED', False):
@@ -647,13 +542,11 @@ class TradingBot:
             if self.db_client: await self.db_client.insert_heartbeat(event_type="STARTUP")
         except Exception as e:
             log_error(f":police_car_light: Error in heartbeat emitter: {e}", exc_info=True)
-            
         while not self.state.shutdown_event.is_set():
             try:
                 if self.db_client: await self.db_client.insert_heartbeat()
                 await asyncio.sleep(self.config.get('HEARTBEAT_EMIT_INTERVAL_SECONDS', 60))
-            except asyncio.CancelledError:
-                break
+            except asyncio.CancelledError: break
             except Exception as e:
                 log_error(f":police_car_light: Error in heartbeat emitter: {e}", exc_info=True)
                 await asyncio.sleep(60)
@@ -664,8 +557,7 @@ class TradingBot:
             try:
                 if self.trading_manager: await self.trading_manager.check_trading_opportunities()
                 await asyncio.sleep(self.config.get('BUY_CHECK_INTERVAL', 10))
-            except asyncio.CancelledError:
-                break
+            except asyncio.CancelledError: break
             except Exception as e:
                 log_error(f":police_car_light: Error in buy checker loop: {e}", exc_info=True)
                 await asyncio.sleep(30)
@@ -676,8 +568,7 @@ class TradingBot:
             try:
                 if self.trading_manager: await self.trading_manager.check_sell_opportunities()
                 await asyncio.sleep(self.config.get('SELL_CHECK_INTERVAL', 3))
-            except asyncio.CancelledError:
-                break
+            except asyncio.CancelledError: break
             except Exception as e:
                 log_error(f":police_car_light: Error in sell checker loop: {e}", exc_info=True)
                 await asyncio.sleep(12)

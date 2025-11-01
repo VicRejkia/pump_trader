@@ -149,6 +149,7 @@ _DRPC_ENDPOINT = "https://lb.drpc.org/ogrpc?network=solana"
 # --- AI Decision Maker Configuration ---
 AI_DECISION_MAKING_ENABLED = True           # Master switch to enable/disable AI evaluation
 AI_MODEL_NAME = 'llama3:latest'             # Ollama model to use (e.g., 'llama3', 'mistral')
+AI_LOG_VERBOSE = False                      # Set to True for full AI debug spam, False for concise logs
 _AI_EMBEDDNG_MODEL = 'all-MiniLM-L6-v2'     # Sentence Transformer model for RAG embeddings
 _AI_PROMPTS_DIR = 'ai_decision_module/prompts' # Path to the YAML prompt files
 _AI_CHROMA_DB_PATH = './ai_decision_module/chroma_db_aidm' # Path for ChromaDB persistence
@@ -188,6 +189,26 @@ _BACKUP_STORAGE_PATH: str = "backups"  # Directory for backups
 
 # Telegram
 TELEGRAM_INTERACTION = True
+
+# Telegram Monitoring Settings
+TELEGRAM_AUTO_JOIN_GROUPS = True
+TELEGRAM_MAX_GROUPS_PER_TOKEN = 5
+TELEGRAM_REALTIME_MONITORING = True
+TELEGRAM_MESSAGE_HISTORY_HOURS = 24
+TELEGRAM_MAX_MESSAGES_PER_GROUP = 200
+TELEGRAM_SENTIMENT_ANALYSIS_ENABLED = True
+# Sentiment Analysis Settings
+SENTIMENT_ANALYSIS_MODEL = "llama3.1:8b"  # Ollama model for sentiment
+SENTIMENT_CONFIDENCE_THRESHOLD = 0.7
+SENTIMENT_URGENCY_THRESHOLD = 0.8
+# Group Health Scoring Weights
+GROUP_HEALTH_WEIGHTS = {
+    'member_count': 0.2,
+    'message_frequency': 0.3,
+    'active_users_ratio': 0.25,
+    'admin_activity': 0.15,
+    'media_share_ratio': 0.1
+}
 
 # --- Metadata Processor Configuration ---
 HEARTBEAT_EMIT_INTERVAL_SECONDS = 60  # Interval for emitting heartbeat messages in seconds
