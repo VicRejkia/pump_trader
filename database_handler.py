@@ -660,7 +660,66 @@ class DatabaseClient:
             if not conn and connection:
                 await self.pool.release(connection)
 
-    # --- Methods for AI Queue Population ---
+    async def get_tokens_for_outcome_analysis(self, lookback_hours: int, conn=None) -> List[asyncpg.Record]:
+        """
+        Fetches tokens that the AI has evaluated but the bot does not own,
+        and which have not had an "outcome" logged yet.
+        """
+        query = """
+            WITH LastDecision AS (
+                -- 1. Find the *last* decision the AI made for each mint
+                SELECT
+                    mint,
+                    decision,
+                    evaluation_timestamp,
+                    metadata,
+                    ROW_NUMBER() OVER (PARTITION BY mint ORDER BY evaluation_timestamp DESC) as rn
+                FROM
+                    ai_decision_memory
+                WHERE
+                    -- Only look at decisions that were NOT buys
+                    decision != 'BUY' 
+                    AND evaluation_timestamp >= NOW() - ($1 || ' hours')::interval
+            ),
+            LastOutcome AS (
+                -- 2. Find the last *outcome* we logged for each mint
+                SELECT
+                    mint,
+                    evaluation_timestamp AS last_outcome_ts
+                FROM
+                    ai_decision_memory
+                WHERE
+                    decision_context = 'NON_TRADE_OUTCOME'
+            )
+            -- 3. Return tokens that meet the criteria
+            SELECT
+                ld.mint,
+                ld.decision,
+                ld.evaluation_timestamp,
+                ld.metadata
+            FROM
+                LastDecision ld
+            WHERE
+                ld.rn = 1 -- It's the most recent decision
+                -- 4. And is not in the active portfolio
+                AND ld.mint NOT IN (SELECT p.mint FROM portfolio p WHERE p.status = 'active')
+                -- 5. And we have *never* logged an outcome for it, OR
+                --    the last decision is *newer* than the last outcome we logged
+                AND (
+                    ld.mint NOT IN (SELECT lo.mint FROM LastOutcome lo)
+                    OR
+                    ld.evaluation_timestamp > (SELECT lo.last_outcome_ts FROM LastOutcome lo WHERE lo.mint = ld.mint ORDER BY lo.last_outcome_ts DESC LIMIT 1)
+                );
+        """
+        connection = conn or await self.pool.acquire()
+        try:
+            return await connection.fetch(query, str(lookback_hours))
+        except Exception as e:
+            logger.error(f":police_car_light: Error fetching tokens for outcome analysis: {e}", exc_info=True)
+            return []
+        finally:
+            if not conn and connection:
+                await self.pool.release(connection)
 
     async def get_active_portfolio_for_ai_eval(self, staleness_minutes: int, conn=None):
         """Fetches active portfolio mints needing AI evaluation."""

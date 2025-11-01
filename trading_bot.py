@@ -132,9 +132,10 @@ class TradingBot:
     async def config_updater(self):
         log_info(f"⚙️ Dynamic config updater started. Watching: {os.path.abspath(DYNAMIC_CONFIG_FILE)}")
         while not self.state.shutdown_event.is_set():
-            await asyncio.sleep(10)
             try:
-                if not os.path.exists(DYNAMIC_CONFIG_FILE): continue
+                if not os.path.exists(DYNAMIC_CONFIG_FILE): 
+                    await self.state.wait_or_interrupt(timeout=10)
+                    continue
                 current_mtime = os.path.getmtime(DYNAMIC_CONFIG_FILE)
                 if current_mtime > self._last_dynamic_config_mtime:
                     log_info(f"Detected change in {DYNAMIC_CONFIG_FILE}. Attempting to load updates.")
@@ -150,8 +151,11 @@ class TradingBot:
                     if updated_count > 0:
                         log_info(f"Applied {updated_count} configuration updates: {changed_params}")
                     self._last_dynamic_config_mtime = current_mtime
+                await self.state.wait_or_interrupt(timeout=10)
+            except asyncio.CancelledError: break
             except Exception as e:
                 log_error(f":police_car_light: Error in config_updater loop: {e}", exc_info=True)
+                await self.state.wait_or_interrupt(timeout=30)
         log_info("⚙️ Dynamic config updater task shutting down.")
 
     def _write_status(self, status_data: dict):
@@ -162,35 +166,45 @@ class TradingBot:
             log_error(f":police_car_light: Error writing status file {STATUS_FILE}: {e}")
 
     async def ai_evaluation_worker(self):
+        """
+        [MODIFIED] Continuously processes tokens from the AI evaluation queue.
+        The call to insert_ai_decision is removed, as get_trade_advice now handles storage.
+        """
         log_info("🤖 AI Evaluation Worker started.")
         if not self.ai_decision_maker or not self.db_client:
             log_critical("🤖 AI Worker cannot start: AIDecisionMaker or DatabaseClient not initialized.")
             return
+            
         while not self.state.shutdown_event.is_set():
             mint = None
             try:
                 priority, (mint, decision_context) = await asyncio.wait_for(
                     self.state.get_ai_evaluation_queue().get(), timeout=1.0
                 )
+                
                 log_debug(f"🤖 AI Worker: Picked up {mint} (Context: {decision_context}, Prio: {priority})")
+                
                 async with self.ai_semaphore:
+                    if self.state.shutdown_event.is_set(): break # Check shutdown *after* acquiring semaphore
+                        
                     evaluation_start_time = time.monotonic()
+                    
+                    # 1. Fetch data
                     comprehensive_data = await fetch_comprehensive_token_data(self.db_client, mint)
+                    
+                    # 2. Get AI Advice (this now *also* saves to ai_decision_memory)
                     advice = await self.ai_decision_maker.get_trade_advice(comprehensive_data) 
+                    
                     eval_ts = datetime.now(timezone.utc)
-                    prompt_hash = None; data_snapshot = comprehensive_data 
+
+                    # 3. Update the token's last evaluation timestamp
                     async with self.db_client.pool.acquire() as conn:
-                        async with conn.transaction():
-                            await self.db_client.insert_ai_decision(
-                                mint=mint, context=decision_context,
-                                decision=advice['decision'], confidence=advice['confidence'],
-                                explanation=advice.get('explanation'),
-                                data_snapshot=data_snapshot, prompt_hash=prompt_hash,
-                                conn=conn
-                            )
-                            await self.db_client.update_token_ai_eval_timestamp(mint, eval_ts, conn=conn)
+                        await self.db_client.update_token_ai_eval_timestamp(mint, eval_ts, conn=conn)
+
                     evaluation_duration = time.monotonic() - evaluation_start_time
+                    
                     log_info(f"🤖 AI eval complete for {mint} ({decision_context}) -> {advice['decision']} ({advice['confidence']}%) in {evaluation_duration:.2f}s")
+                
                 self.state.get_ai_evaluation_queue().task_done()
                 mint = None 
             except asyncio.TimeoutError: continue
@@ -205,20 +219,26 @@ class TradingBot:
                 if mint:
                     try: self.state.get_ai_evaluation_queue().task_done()
                     except ValueError: pass
-                await asyncio.sleep(10)
+                await self.state.wait_or_interrupt(timeout=10)
         log_info("🤖 AI Evaluation Worker shutting down.")
 
     async def populate_ai_queue_periodic(self):
         log_info("📊 AI Queue Populator started.")
         while not self.state.shutdown_event.is_set():
-            if not self.config.get('AI_DECISION_MAKING_ENABLED', False):
-                await asyncio.sleep(60); continue
-            q = self.state.get_ai_evaluation_queue()
-            if q.full():
-                log_warning("🤖 AI evaluation queue is full. Skipping population cycle.")
-                await asyncio.sleep(30); continue
-            max_q_size = self.config.get('AI_QUEUE_MAX_SIZE', 1000); added_count = 0
             try:
+                if not self.config.get('AI_DECISION_MAKING_ENABLED', False):
+                    await self.state.wait_or_interrupt(timeout=60)
+                    continue
+
+                q = self.state.get_ai_evaluation_queue()
+                if q.full():
+                    log_warning("🤖 AI evaluation queue is full. Skipping population cycle.")
+                    await self.state.wait_or_interrupt(timeout=30)
+                    continue
+                
+                max_q_size = self.config.get('AI_QUEUE_MAX_SIZE', 1000); added_count = 0
+                
+                # --- Priority 1: Active Portfolio ---
                 portfolio_mints = await self.db_client.get_active_portfolio_for_ai_eval(
                     self.config.get('AI_REFRESH_INTERVAL_PORTFOLIO_MIN', 5)
                 )
@@ -226,6 +246,8 @@ class TradingBot:
                     if q.qsize() < max_q_size: await q.put((-100, (mint, 'SELL/HOLD'))); added_count += 1
                     else: break
                 if portfolio_mints: log_debug(f"🤖 AI Queue: Added {len(portfolio_mints)} portfolio tokens.")
+                
+                # --- Priority 2: High Momentum (PUMP) ---
                 if q.qsize() < max_q_size:
                     pump_mints = await self.db_client.get_top_pump_momentum_for_ai_eval(
                         self.config.get('AI_MOMENTUM_TOP_N', 5), 30, self.config.get('AI_REFRESH_INTERVAL_MOMENTUM_MIN', 15)
@@ -237,6 +259,8 @@ class TradingBot:
                             await q.put((-50, (mint, context))); added_count += 1
                         else: break
                     if pump_mints: log_debug(f"🤖 AI Queue: Added {len(pump_mints)} PUMP momentum tokens.")
+
+                # --- Priority 2: High Momentum (DEX) ---
                 if q.qsize() < max_q_size:
                     dex_mints = await self.db_client.get_top_dex_momentum_for_ai_eval(
                         self.config.get('AI_MOMENTUM_TOP_N', 5), 30, self.config.get('AI_REFRESH_INTERVAL_MOMENTUM_MIN', 15)
@@ -248,6 +272,8 @@ class TradingBot:
                             await q.put((-45, (mint, context))); added_count += 1
                          else: break
                     if dex_mints: log_debug(f"🤖 AI Queue: Added {len(dex_mints)} DEX momentum tokens.")
+                
+                # --- Priority 3: Events ---
                 if q.qsize() < max_q_size:
                     event_mints = await self.db_client.get_tokens_with_recent_events_for_ai_eval(
                         200, 15, self.config.get('AI_REFRESH_INTERVAL_EVENT_MIN', 30)
@@ -259,6 +285,8 @@ class TradingBot:
                             await q.put((-25, (mint, context))); added_count += 1
                         else: break
                     if event_mints: log_debug(f"🤖 AI Queue: Added {len(event_mints)} event-triggered tokens.")
+
+                # --- Priority 5: General Staleness Refresh ---
                 if q.qsize() < max_q_size:
                     stale_mints = await self.db_client.get_stale_tokens_for_ai_eval(
                          self.config.get('AI_STALE_REFRESH_BATCH_SIZE', 5), self.config.get('AI_REFRESH_INTERVAL_STALE_MIN', 60)
@@ -270,82 +298,65 @@ class TradingBot:
                              await q.put((50, (mint, context))); added_count += 1
                         else: break
                     if stale_mints: log_debug(f"🤖 AI Queue: Added {len(stale_mints)} stale tokens for refresh.")
+                
                 if added_count > 0:
-                    log_info(f"AI Queue Populator added {added_count} tasks. Current size: {q.qsize()}.")
+                    log_info(f"🤖 AI Queue Populator added {added_count} tasks. Current size: {q.qsize()}.")
+
             except asyncio.CancelledError: log_info("📊 AI Queue Populator task cancelled."); break
             except Exception as e: log_error(f"🚨 Error in AI Queue Populator: {e}", exc_info=True)
-            await asyncio.sleep(60)
+            
+            await self.state.wait_or_interrupt(timeout=60)
+            
         log_info("📊 AI Queue Populator shutting down.")
 
     async def status_updater(self):
-        """
-        [MODIFIED] Periodically gathers and writes detailed bot status to bot_status.json.
-        Now includes AI queue size and worker status.
-        """
         log_info(":rocket: Status updater task started.")
         while not self.state.shutdown_event.is_set():
             try:
                 current_process_status = "RUNNING"
                 if self.state.shutdown_event.is_set(): current_process_status = "STOPPING"
-                
                 uptime_seconds = (datetime.now(timezone.utc) - self.bot_start_time).total_seconds()
                 active_subs = await self.state.get_token_subscriptions()
                 sol_balance = await self.state.get_current_sol_balance()
                 sol_price = await self.state.get_sol_price()
                 sol_balance_usd = (sol_balance * sol_price) if sol_balance is not None and sol_price is not None else 0.0
-                
                 ws_summary = {}
                 if self.ws_handler: ws_summary = self.ws_handler.get_status()
 
-                # --- NEW AI STATUS ---
                 ai_q_size = -1
                 ai_workers_active = -1
                 if self.config.get('AI_DECISION_MAKING_ENABLED', False) and self.ai_semaphore:
                     ai_q_size = self.state.get_ai_evaluation_queue().qsize()
-                    
-                    # --- FIX ---
-                    # Get max_workers from the config, not a private attribute
                     max_workers = self.config.get('AI_MAX_CONCURRENT_EVALUATIONS', 1)
-                    # Access the (still private, but more stable) _value
                     active_workers = max_workers - self.ai_semaphore._value 
-                    # --- END FIX ---
-
                     ai_workers_active = active_workers
-                # --- END NEW AI STATUS ---
 
                 status_data = {
-                    "bot_process_status": current_process_status,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "uptime_seconds": int(uptime_seconds),
-                    "active_token_subscriptions_count": len(active_subs),
+                    "bot_process_status": current_process_status, "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "uptime_seconds": int(uptime_seconds), "active_token_subscriptions_count": len(active_subs),
                     "current_sol_balance": round(sol_balance, 6) if sol_balance is not None else None,
                     "current_sol_price_usd": round(sol_price, 4) if sol_price is not None else None,
                     "current_portfolio_value_usd": round(sol_balance_usd, 2),
                     "rugcheck_queue_size": self.state.get_rugcheck_queue().qsize(),
                     "socialscheck_queue_size": self.state.get_socialscheck_queue().qsize(),
-                    "ai_evaluation_queue_size": ai_q_size,    # <-- ADDED
-                    "ai_workers_active": ai_workers_active, # <-- ADDED
+                    "ai_evaluation_queue_size": ai_q_size,
+                    "ai_workers_active": ai_workers_active,
                     "websocket_summary": ws_summary 
                 }
                 self._write_status(status_data)
-                await asyncio.sleep(5)
+                await self.state.wait_or_interrupt(timeout=5)
             except asyncio.CancelledError:
                 log_info(":stop_sign: Status updater task shutting down.")
                 break
             except Exception as e:
                 log_error(f":police_car_light: Error in status updater: {e}", exc_info=True)
                 self._write_status({"bot_process_status": "ERROR_IN_STATUS_UPDATER", "error_message": str(e), "timestamp": datetime.now(timezone.utc).isoformat()})
-                await asyncio.sleep(15)
+                await self.state.wait_or_interrupt(timeout=15)
         
         log_info("Status updater task finished. Writing final STOPPED status.")
         self._write_status({"bot_process_status": "STOPPED", "timestamp": datetime.now(timezone.utc).isoformat()})
 
-
     async def monitor_tasks(self):
-        """
-        [MODIFIED] Monitor and log the status of background tasks.
-        Now includes AI worker status and queue size.
-        """
         try:
             while not self.state.shutdown_event.is_set():
                 sol_amount = await self.state.get_current_sol_balance() or 0.0
@@ -390,26 +401,20 @@ class TradingBot:
                     f"[bold cyan]│[/bold cyan] :speech_balloon: [bold]Socials Queue:[/bold] [blue]{self.state.get_socialscheck_queue().qsize()}[/blue]",
                 ]
                 
-                # --- ADDED AI MONITORING SECTION ---
                 ai_enabled = self.config.get('AI_DECISION_MAKING_ENABLED')
                 ai_status_color = "green" if ai_enabled else "red"
                 ai_status_text = "ENABLED" if ai_enabled else "DISABLED"
                 log_parts.append(f"[bold cyan]│[/bold cyan] :brain: [bold]AI Status:[/bold] [bold {ai_status_color}]{ai_status_text}[/bold {ai_status_color}]")
                 
                 if ai_enabled and self.ai_semaphore:
-                    # --- FIX ---
-                    # Get max_workers from the config, not a private attribute
                     max_workers = self.config.get('AI_MAX_CONCURRENT_EVALUATIONS', 1)
-                    # Access the (still private, but more stable) _value
                     active_workers = max_workers - self.ai_semaphore._value 
-                    # --- END FIX ---
                     ai_q_size = self.state.get_ai_evaluation_queue().qsize()
                     
                     log_parts.extend([
                         f"[bold cyan]│  ├─ [/bold cyan][bold]AI Queue:[/bold] [blue]{ai_q_size}[/blue]",
                         f"[bold cyan]│  └─ [/bold cyan][bold]Active Workers:[/bold] [magenta]{active_workers}/{max_workers}[/magenta]",
                     ])
-                # --- END AI MONITORING SECTION ---
 
                 log_parts.extend([
                     *ws_lines,
@@ -420,7 +425,7 @@ class TradingBot:
                 ])
                 log_debug("\n".join(log_parts))
                 
-                await asyncio.sleep(self.config.get('MONITOR_TASK_INTERVAL_SECONDS', 30))
+                await self.state.wait_or_interrupt(timeout=self.config.get('MONITOR_TASK_INTERVAL_SECONDS', 30))
         except asyncio.CancelledError:
             log_info(":stop_sign: Monitor task shutting down.")
         except Exception as e:
@@ -444,7 +449,7 @@ class TradingBot:
                         elif command.upper() == "SELL_ALL_IMMEDIATELY": asyncio.create_task(self.trading_manager.execute_manual_sell_all())
                         elif command.upper().startswith("SELL_"): mint = command[len("SELL_"):]; asyncio.create_task(self.trading_manager.execute_manual_sell(mint))
                         with open(COMMAND_FILE, 'w') as f: f.write("")
-                await asyncio.sleep(5)
+                await self.state.wait_or_interrupt(timeout=5)
             except asyncio.CancelledError: log_info(":stop_sign: Command listener task shutting down."); break
             except Exception as e: log_error(f":police_car_light: Error in command listener: {e}", exc_info=True)
     
@@ -459,6 +464,139 @@ class TradingBot:
         if self.db_client and self.db_client.pool:
             await self.db_client.close()
         log_info(":checkered_flag: Bot shutdown complete.")
+
+    # --- NEW FUNCTION ---
+    async def run_vector_index_maintenance(self):
+        """Periodically runs VACUUM ANALYZE on the AI memory table."""
+        await self.state.wait_or_interrupt(timeout=300) # Wait 5 mins after startup
+        log_info("🔧 Vector Index Maintenance task started.")
+        
+        while not self.state.shutdown_event.is_set():
+            try:
+                log_info("🔧 Starting periodic VACUUM ANALYZE on ai_decision_memory...")
+                async with self.db_client.pool.acquire() as conn:
+                    # Set a statement timeout (e.g., 10 minutes)
+                    await conn.execute("SET statement_timeout = 600000;")
+                    await conn.execute("VACUUM ANALYZE ai_decision_memory;")
+                    await conn.execute("RESET statement_timeout;")
+                log_info("🔧 Vector index maintenance complete.")
+                
+                # Run every 6 hours
+                await self.state.wait_or_interrupt(timeout=(6 * 60 * 60)) 
+            
+            except asyncio.CancelledError:
+                log_info("🔧 Vector Index Maintenance task cancelled.")
+                break
+            except Exception as e:
+                log_error(f":police_car_light: Error in vector index maintenance: {e}", exc_info=True)
+                await self.state.wait_or_interrupt(timeout=3600) # Wait 1 hour on error
+        
+        log_info("🔧 Vector Index Maintenance task shutting down.")
+    # --- END NEW FUNCTION ---
+
+    # --- NEW FUNCTION ---
+    async def ai_outcome_monitor_task(self):
+        """
+        Periodically checks for outcomes (rugs, moons) of tokens the
+        AI evaluated but the bot did not purchase.
+        """
+        await self.state.wait_or_interrupt(timeout=600) # Wait 10 mins after startup
+        log_info("🧠 AI Outcome Monitor task started.")
+
+        while not self.state.shutdown_event.is_set():
+            try:
+                if not (self.config.get('AI_DECISION_MAKING_ENABLED', False) and self.ai_decision_maker):
+                    await self.state.wait_or_interrupt(timeout=1800) # Sleep 30 mins if AI is off
+                    continue
+
+                log_debug("🧠 AI Outcome Monitor: Checking for non-trade outcomes...")
+                async with self.db_client.pool.acquire() as conn:
+                    # 1. Get tokens AI has evaluated but bot doesn't own
+                    tokens_to_check = await self.db_client.get_tokens_for_outcome_analysis(lookback_hours=24, conn=conn)
+                    if not tokens_to_check:
+                        log_debug("🧠 AI Outcome Monitor: No new non-portfolio tokens to analyze.")
+                        await self.state.wait_or_interrupt(timeout=1800) # Sleep 30 mins
+                        continue
+
+                    log_info(f"🧠 AI Outcome Monitor: Found {len(tokens_to_check)} tokens to analyze for outcomes.")
+                    
+                    for record in tokens_to_check:
+                        mint = record['mint']
+                        last_decision = record['decision']
+                        last_decision_ts = record['evaluation_timestamp']
+                        last_metadata = json.loads(record['metadata']) if isinstance(record['metadata'], str) else record['metadata']
+                        price_at_decision = last_metadata.get('price', 0.0)
+
+                        # 2. Check for "Dodged Bullet" (Rug)
+                        rugged_record = await conn.fetchrow(
+                            "SELECT backup_reason, backup_timestamp FROM tokens_backup WHERE mint = $1 AND backup_reason IN ('high_rugcheckscore', 'dead_token')",
+                            mint
+                        )
+                        
+                        outcome_snapshot = None
+                        outcome_decision = None
+
+                        if rugged_record:
+                            # This token was rugged!
+                            outcome_snapshot = {
+                                "mint": mint, "source": last_metadata.get('source', 'PUMP'), "timestamp": rugged_record['backup_timestamp'].isoformat(),
+                                "decision_context": "NON_TRADE_OUTCOME", "market_cap": 0, "volatility": 0,
+                                "token_age_minutes": last_metadata.get('token_age_minutes', 0),
+                                "is_prolific_creator": last_metadata.get('is_prolific_creator', False),
+                                "uri_status": last_metadata.get('uri_status', 'N/A'),
+                                "market_dynamics_summary_str": f"Token rugged. Reason: {rugged_record['backup_reason']}",
+                                "trade_history_summary": "No trades by bot."
+                            }
+                            outcome_decision = {
+                                "decision": "DODGED_BULLET (RUGGED)", "confidence": 100,
+                                "explanation": f"AI previously decided '{last_decision}' at {last_decision_ts.isoformat()}.\n"
+                                             f"Token was later rugged for reason: {rugged_record['backup_reason']} at {rugged_record['backup_timestamp'].isoformat()}.\n"
+                                             f"This was a correct non-action."
+                            }
+                            log_info(f"🧠 AI Outcome: Logged DODGED_BULLET for {mint}.")
+
+                        else:
+                            # 3. Check for "Missed Opportunity" (Moon)
+                            price_data = await self.db.get_price_and_market_cap_for_decision(mint, self.config, conn)
+                            current_price = price_data.get('price')
+                            
+                            if current_price and price_at_decision > 0:
+                                price_multiplier = current_price / price_at_decision
+                                # Let's define "moon" as 10x (900% profit)
+                                if price_multiplier >= 10.0:
+                                    outcome_snapshot = {
+                                        "mint": mint, "source": last_metadata.get('source', 'PUMP'), "timestamp": datetime.now(timezone.utc).isoformat(),
+                                        "decision_context": "NON_TRADE_OUTCOME",
+                                        "market_cap": price_data.get('market_cap', 0) * (await self.state.get_sol_price()),
+                                        "volatility": 0, "token_age_minutes": last_metadata.get('token_age_minutes', 0),
+                                        "is_prolific_creator": last_metadata.get('is_prolific_creator', False),
+                                        "uri_status": last_metadata.get('uri_status', 'N/A'),
+                                        "market_dynamics_summary_str": f"Token price increased {price_multiplier:.0f}x.",
+                                        "trade_history_summary": "No trades by bot."
+                                    }
+                                    outcome_decision = {
+                                        "decision": "MISSED_OPPORTUNITY (MOON)", "confidence": 100,
+                                        "explanation": f"AI previously decided '{last_decision}' at price {price_at_decision:.9f} SOL.\n"
+                                                     f"Token subsequently rose to {current_price:.9f} SOL ({price_multiplier:.0f}x increase).\n"
+                                                     f"This was an incorrect non-action."
+                                    }
+                                    log_info(f"🧠 AI Outcome: Logged MISSED_OPPORTUNITY for {mint}.")
+
+                        # 4. If an outcome was found, log it to RAG memory
+                        if outcome_snapshot and outcome_decision:
+                            await self.ai_decision_maker.add_decision_snapshot_to_memory(outcome_snapshot, outcome_decision)
+
+            except asyncio.CancelledError:
+                log_info("🧠 AI Outcome Monitor task cancelled.")
+                break
+            except Exception as e:
+                log_error(f":police_car_light: Error in AI Outcome Monitor: {e}", exc_info=True)
+            
+            # Sleep for 30 minutes before the next check
+            await self.state.wait_or_interrupt(timeout=1800)
+        
+        log_info("🧠 AI Outcome Monitor task shutting down.")
+    # --- END NEW FUNCTION ---
 
     async def main(self):
         self.loop = asyncio.get_running_loop()
@@ -491,14 +629,23 @@ class TradingBot:
             except Exception as ai_init_err:
                 log_critical(f"CRITICAL: Failed to initialize AI Decision Maker: {ai_init_err}", exc_info=True)
                 self.config['AI_DECISION_MAKING_ENABLED'] = False 
-                log_warning("AI Decision Making has been DISABLED due to initialization error.")
+                log_warning("🤖 AI Decision Making has been DISABLED due to initialization error.")
         else:
-            log_info("AI Decision Making is DISABLED by configuration.")
+            log_info("🤖 AI Decision Making is DISABLED by configuration.")
 
         self.ws_handler = WebSocketHandler(self.db_client, self.state, self.config)
         await self.state.set_websocket_handler(self.ws_handler)
         self.socials_proc = SocialsProcessor(state=self.state, db_client=self.db_client, config_dict=self.config)
-        self.trading_manager = TradingManager(db_client=self.db_client, config_dict=self.config, state=self.state)
+        
+        # --- MODIFICATION: Pass ai_decision_maker to TradingManager ---
+        self.trading_manager = TradingManager(
+            db_client=self.db_client, 
+            config_dict=self.config, 
+            state=self.state,
+            ai_decision_maker=self.ai_decision_maker # Pass the instance
+        )
+        # --- END MODIFICATION ---
+
         self.dexscreener_fetcher = DexscreenerFetcher(state=self.state, db_client=self.db_client)
         self.rugchecker = Rugcheck(
             state=self.state, db_client=self.db_client,
@@ -521,11 +668,17 @@ class TradingBot:
             asyncio.create_task(self.run_buy_checks(), name="buy_opportunity_checker"),
             asyncio.create_task(self.run_sell_checks(), name="sell_opportunity_checker"),
             asyncio.create_task(self.run_heartbeat_emitter(), name="heartbeat_emitter"),
-            self.rugchecker.start()
+            self.rugchecker.start(),
+            # --- NEW TASKS ---
+            asyncio.create_task(self.run_vector_index_maintenance(), name="vector_index_maintenance"),
         ]
         if self.config.get('AI_DECISION_MAKING_ENABLED', False):
-             self.tasks.append(asyncio.create_task(self.ai_evaluation_worker(), name="ai_evaluation_worker"))
-             self.tasks.append(asyncio.create_task(self.populate_ai_queue_periodic(), name="ai_queue_populator"))
+             self.tasks.extend([
+                asyncio.create_task(self.ai_evaluation_worker(), name="ai_evaluation_worker"),
+                asyncio.create_task(self.populate_ai_queue_periodic(), name="ai_queue_populator"),
+                asyncio.create_task(self.ai_outcome_monitor_task(), name="ai_outcome_monitor") # <-- Add the new task
+             ])
+        # --- END MODIFICATION ---
         
         log_info(":rocket: [bold green]Trading bot core components started.[/bold green]")
         try:
@@ -545,33 +698,33 @@ class TradingBot:
         while not self.state.shutdown_event.is_set():
             try:
                 if self.db_client: await self.db_client.insert_heartbeat()
-                await asyncio.sleep(self.config.get('HEARTBEAT_EMIT_INTERVAL_SECONDS', 60))
+                await self.state.wait_or_interrupt(timeout=self.config.get('HEARTBEAT_EMIT_INTERVAL_SECONDS', 60))
             except asyncio.CancelledError: break
             except Exception as e:
                 log_error(f":police_car_light: Error in heartbeat emitter: {e}", exc_info=True)
-                await asyncio.sleep(60)
+                await self.state.wait_or_interrupt(timeout=60)
 
     async def run_buy_checks(self):
         log_info(":chart_with_upwards_trend: [bold]Starting buy opportunity checker...[/bold]")
         while not self.state.shutdown_event.is_set():
             try:
                 if self.trading_manager: await self.trading_manager.check_trading_opportunities()
-                await asyncio.sleep(self.config.get('BUY_CHECK_INTERVAL', 10))
+                await self.state.wait_or_interrupt(timeout=self.config.get('BUY_CHECK_INTERVAL', 10))
             except asyncio.CancelledError: break
             except Exception as e:
                 log_error(f":police_car_light: Error in buy checker loop: {e}", exc_info=True)
-                await asyncio.sleep(30)
+                await self.state.wait_or_interrupt(timeout=30)
 
     async def run_sell_checks(self):
         log_info(":chart_with_downwards_trend: [bold]Starting sell opportunity checker...[/bold]")
         while not self.state.shutdown_event.is_set():
             try:
                 if self.trading_manager: await self.trading_manager.check_sell_opportunities()
-                await asyncio.sleep(self.config.get('SELL_CHECK_INTERVAL', 3))
+                await self.state.wait_or_interrupt(timeout=self.config.get('SELL_CHECK_INTERVAL', 3))
             except asyncio.CancelledError: break
             except Exception as e:
                 log_error(f":police_car_light: Error in sell checker loop: {e}", exc_info=True)
-                await asyncio.sleep(12)
+                await self.state.wait_or_interrupt(timeout=12)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PumpTrader Bot")

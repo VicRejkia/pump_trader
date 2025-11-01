@@ -8,7 +8,7 @@ import asyncio
 from datetime import datetime, timezone, timedelta
 import json
 import pandas as pd
-from typing import Optional
+from typing import Optional, Dict, Any
 
 from database_handler import DatabaseClient
 from bot_logger import logger
@@ -20,7 +20,10 @@ from utils import (
 from connectors.live_trader_pumpportal import execute_live_pumpportal_trade
 from telegram_interface import send_telegram_message
 
-# --- HELPER FUNCTIONS FOR LOGGING (moved to top level of the module) ---
+# --- ADD THIS IMPORT ---
+from ai_decision_module.ai_decision_maker import AIDecisionMaker
+
+# --- HELPER FUNCTIONS FOR LOGGING (Unchanged) ---
 def format_price_for_log(price):
     if price is None: return "N/A"
     if price == 0: return "0.0"
@@ -37,13 +40,17 @@ def format_profit_pct(pct):
 # --- END HELPER FUNCTIONS ---
 
 class TradingManager:
-    def __init__(self, db_client: DatabaseClient, config_dict: dict, state: GlobalState):
+    # --- MODIFIED __init__ ---
+    def __init__(self, db_client: DatabaseClient, config_dict: dict, state: GlobalState, ai_decision_maker: Optional[AIDecisionMaker] = None):
         self.db = db_client
         self.config = config_dict
         self.state = state
+        # --- ADD THIS LINE ---
+        self.ai_decision_maker = ai_decision_maker
+    # --- END MODIFICATION ---
 
     def get_adaptive_atr_multiplier(self, rsi_value: float) -> float:
-        """ Returns an ATR multiplier based on the current RSI momentum. """
+        """ Returns an ATR multiplier based on the current RSI momentum. (Unchanged) """
         if rsi_value >= self.config['ADAPTIVE_RSI_EXTREME_LEVEL']:
             return self.config['ADAPTIVE_ATR_EXTREME_MULTIPLIER']
         elif rsi_value >= self.config['ADAPTIVE_RSI_STRONG_LEVEL']:
@@ -53,7 +60,7 @@ class TradingManager:
 
     async def _is_trend_reversal_confirmed(self, mint: str) -> bool:
         """
-        Checks if a token that was recently stopped out shows signs of a trend reversal.
+        Checks if a token that was recently stopped out shows signs of a trend reversal. (Unchanged)
         """
         if not self.config.get('USE_TREND_REVERSAL_CONFIRMATION', False):
             return True
@@ -173,7 +180,7 @@ class TradingManager:
             return False
 
     async def check_trading_opportunities(self):
-        """✅ Check for new trading opportunities, incorporating AI advice."""
+        """✅ Check for new trading opportunities, incorporating AI advice. (Unchanged)"""
         if self.state.shutdown_event.is_set():
             return
 
@@ -208,9 +215,8 @@ class TradingManager:
                     logger.warning(f"Skipping buy for {mint} due to invalid opportunity price: {opportunity_price}")
                     continue
 
-                # <<< AI ADVICE INTEGRATION START >>>
                 ai_advice_used = None
-                if self.config.get('AI_DECISION_MAKING_ENABLED', False):
+                if self.config.get('AI_DECISION_MAKING_ENABLED', False) and self.ai_decision_maker:
                     async with self.db.pool.acquire() as conn_ai:
                         ai_decision_record = await self.db.get_latest_ai_decision(mint, conn_ai)
 
@@ -222,24 +228,19 @@ class TradingManager:
                         max_staleness = timedelta(minutes=self.config.get('AI_ADVICE_MAX_STALENESS_MINUTES', 20))
 
                         if advice_age <= max_staleness:
-                            ai_advice_used = {'decision': ai_decision, 'confidence': ai_confidence, 'timestamp': ai_timestamp.isoformat()} # Store context for logging/portfolio
-                            logger.debug(f"AI Advice ({mint}): {ai_decision} ({ai_confidence}%) - Age: {advice_age.total_seconds():.0f}s")
-
-                            # AI Veto Logic (HOLD decision)
+                            ai_advice_used = {'decision': ai_decision, 'confidence': ai_confidence, 'timestamp': ai_timestamp.isoformat()}
+                            logger.debug(f"🤖 AI Advice ({mint}): {ai_decision} ({ai_confidence}%) - Age: {advice_age.total_seconds():.0f}s")
                             hold_veto_threshold = self.config.get('AI_BUY_HOLD_CONFIDENCE_THRESHOLD', 60)
                             if ai_decision == 'HOLD' and ai_confidence >= hold_veto_threshold:
-                                logger.info(f":no_entry_sign: AI advised HOLD (Confidence: {ai_confidence} >= {hold_veto_threshold}) for potential buy of {mint}. Deferring purchase.")
-                                continue # Skip to the next opportunity
-
-                            # Optional: AI Confirmation (BUY decision) - Primarily for logging here
+                                logger.info(f"🤖 AI advised HOLD (Confidence: {ai_confidence} >= {hold_veto_threshold}) for potential buy of {mint}. Deferring purchase.")
+                                continue 
                             if ai_decision == 'BUY':
-                                logger.debug(f"AI confirmed potential BUY for {mint} (Confidence: {ai_confidence}).")
+                                logger.debug(f"🤖 AI confirmed potential BUY for {mint} (Confidence: {ai_confidence}).")
                         else:
-                            logger.debug(f"AI advice for {mint} is stale (Age: {advice_age.total_seconds():.0f}s > {max_staleness.total_seconds():.0f}s). Ignoring.")
+                            logger.debug(f"🤖 AI advice for {mint} is stale (Age: {advice_age.total_seconds():.0f}s > {max_staleness.total_seconds():.0f}s). Ignoring.")
                     else:
-                        logger.debug(f"AI advice for {mint} buy check unavailable. Using rule-based logic only.")
-                # <<< AI ADVICE INTEGRATION END >>>
-
+                        logger.debug(f"🤖 AI advice for {mint} buy check unavailable. Using rule-based logic only.")
+                
                 if self.config.get('USE_TREND_REVERSAL_CONFIRMATION', False):
                     if not await self._is_trend_reversal_confirmed(mint):
                         logger.debug(f"Trend reversal not confirmed for {mint}. Skipping buy opportunity.")
@@ -253,9 +254,7 @@ class TradingManager:
             await asyncio.sleep(5) 
 
     async def execute_buy(self, mint: str, trigger_price: float, market_cap_sol_at_trigger: float, ai_context: Optional[dict] = None):
-        """🛒 Dispatches buy execution based on TRADING_MODE."""
-        # This method's implementation remains the same as provided in the full file context...
-        # ... (full content of execute_buy method) ...
+        """🛒 Dispatches buy execution based on TRADING_MODE. (Unchanged)"""
         trading_mode = self.config['TRADING_MODE'].lower()
 
         if trigger_price <= 0:
@@ -277,7 +276,6 @@ class TradingManager:
                 sim_buy_fee = float(self.config['DEFAULT_BUY_FEE'])
                 sim_buy_tip = float(self.config['DEFAULT_BUY_TIP'])
                 sim_total_investment = sol_to_spend_on_tokens + sim_buy_fee + sim_buy_tip
-                
                 current_sol_balance = await self.state.get_current_sol_balance()
 
                 if trading_mode == "simulate":
@@ -365,45 +363,34 @@ class TradingManager:
                         logger.error(f"[SIMULATE MODE] Buy DB operation failed for {mint}: {e_sim}", exc_info=True)
 
         elif trading_mode in ["paper_trading", "live"]:
-            # ... (full content of live/paper trading buy logic) ...
             api_amount_str = f"{sol_to_spend_on_tokens:.9f}" 
             api_priority_fee = float(self.config['DEFAULT_BUY_TIP']) 
             api_slippage = int(self.config.get('DEFAULT_SLIPPAGE_PERCENT', 25))
             api_pool = self.config.get('DEFAULT_BUY_POOL', "auto")
-
             logger.info(f"[{trading_mode.upper()} MODE] Initiating buy for {mint} with {api_amount_str} SOL (Priority: {api_priority_fee} SOL) via PumpPortal API.")
-
             trade_result = await execute_live_pumpportal_trade(
                 trigger_price=trigger_price, action="buy", mint_address=mint,
                 amount_str=api_amount_str, denominated_in_sol=True,
                 slippage_percent=api_slippage, priority_fee_sol=api_priority_fee, pool=api_pool
             )
-
             if trade_result and trade_result.get("success"):
                 signature = trade_result.get("signature", "N/A")
                 executed_price = trade_result.get("executed_price", trigger_price) 
                 tokens_bought_actual = trade_result.get("quantity_exchanged", 0.0) 
-
                 if tokens_bought_actual <= 0 or executed_price <= 0:
                     logger.error(f"[{trading_mode.upper()} MODE] Trade for {mint} reported success but returned invalid executed price/quantity. Sig: {signature}")
                     return
-
                 logger.info(f"[{trading_mode.upper()} MODE] Buy for {mint} successful. Sig: {signature}, Executed Price (approx): {executed_price:.9f}, Tokens (approx): {tokens_bought_actual:.4f}")
-                
                 async with self.db.pool.acquire() as conn_live: 
                     async with conn_live.transaction():
                         total_sol_outflow_for_pnl = sol_to_spend_on_tokens + api_priority_fee 
-
                         initial_sl_price_live = executed_price * (1 - float(self.config['INITIAL_STOP_LOSS_PERCENT']) / 100.0)
-                        
                         live_sell_fee_tp1 = float(self.config.get('DEFAULT_SELL_FEE_LIVE', self.config['DEFAULT_SELL_FEE']))
                         live_sell_tip_tp1 = float(self.config.get('DEFAULT_SELL_TIP_LIVE', self.config['DEFAULT_SELL_TIP'])) 
                         live_fees_for_tp1_sell = live_sell_fee_tp1 + live_sell_tip_tp1
                         live_profit_margin_tp1_frac = float(self.config['FIRST_SELL_PROFIT_MARGIN']) / 100.0
                         live_sell_percent_tp1_frac = float(self.config['FIRST_SELL_PERCENT']) / 100.0
-                        
                         live_cost_of_all_tokens = sol_to_spend_on_tokens
-
                         live_tokens_to_sell_tp1 = tokens_bought_actual * live_sell_percent_tp1_frac
                         initial_tp1_price_live = float('inf')
                         if live_tokens_to_sell_tp1 > 1e-9:
@@ -413,9 +400,7 @@ class TradingManager:
                             initial_tp1_price_live = live_gross_sol_needed_tp1 / live_tokens_to_sell_tp1
                         else:
                             logger.warning(f"[{trading_mode.upper()}] Tokens to sell at TP1 for {mint} is negligible. TP1 price set to infinity.")
-
                         second_tp_price_live = executed_price * (1 + float(self.config['SECOND_TAKE_PROFIT_PERCENT']) / 100.0)
-
                         live_buy_settings = {
                             "mode": trading_mode, "signature": signature,
                             "api_executed_price": executed_price, "api_tokens_bought": tokens_bought_actual,
@@ -451,10 +436,9 @@ class TradingManager:
                             tx_fee_sol=0,
                             tip_sol=api_priority_fee,
                             slippage_percent=trade_result.get("slippage"),
-                            trade_context={**live_buy_settings, "ai_advice_at_buy": ai_context} if ai_context else live_buy_settings, # <<< Add AI context
+                            trade_context={**live_buy_settings, "ai_advice_at_buy": ai_context} if ai_context else live_buy_settings,
                         )
                         await self.state.update_sol_balance(-total_sol_outflow_for_pnl)
-                        
                         token_name_row = await self.db.get_token_name(mint, conn_live)
                         token_name = token_name_row['name'] if token_name_row else mint
                         log_msg = format_buy_order_log(self.state, name=token_name, mint=mint, price_per_token=executed_price, tokens_bought=tokens_bought_actual, market_cap=market_cap_sol_at_trigger, sol_price=sol_price_usd, total_investment=sol_to_spend_on_tokens)
@@ -469,14 +453,17 @@ class TradingManager:
         else:
             logger.error(f"Unknown TRADING_MODE: '{trading_mode}' in execute_buy for {mint}.")
     
+    # --- MODIFIED execute_sell ---
     async def execute_sell(self, conn, mint: str, trigger_price: float, market_cap_sol_at_trigger: float, reason: str, sell_percentage: float, position_id_to_update: int, sell_trigger_values: dict = None, ai_context: Optional[dict] = None):
-        """💸 Dispatches sell execution based on TRADING_MODE."""
-        # This method's implementation remains the same...
-        # ... (full content of execute_sell method) ...
+        """
+        💸 Dispatches sell execution based on TRADING_MODE.
+        NOW ALSO logs the sell event to the AI RAG memory for feedback.
+        """
         trading_mode = self.config['TRADING_MODE'].lower()
         if sell_trigger_values is None: sell_trigger_values = {}
         
         sol_price_usd = await self.state.get_sol_price() 
+        profit_from_sell = None # Initialize profit variable
 
         try:
             buy_entry = await self.db.get_portfolio_entry_for_update(position_id_to_update, conn)
@@ -502,6 +489,14 @@ class TradingManager:
             if tokens_to_sell_on_trigger <= 1e-9:
                 logger.info(f"ℹ️ [{trading_mode.upper()}] Sell amount for {mint} (Reason: {reason}) is negligible ({tokens_to_sell_on_trigger:.12f}). Skipping.")
                 return None
+            
+            # --- Initialize variables for RAG logging ---
+            final_executed_price = trigger_price # Default to trigger price
+            final_profit_sol = 0.0
+            final_net_sol_received = 0.0
+            final_market_cap_sol = market_cap_sol_at_trigger
+            final_sell_settings = {}
+            # ---
 
             if trading_mode == "simulate":
                 logger.info(f"[SIMULATE MODE] Executing simulated sell for {tokens_to_sell_on_trigger:.4f} of {mint} at {trigger_price:.9f} (Reason: {reason})")
@@ -536,36 +531,19 @@ class TradingManager:
                     reason=reason, timestamp=datetime.now(timezone.utc), settings=sim_sell_settings, ai_context=ai_context, conn=conn
                 )
                 await self.db.log_completed_trade(
-                    token_address=mint,
-                    side='sell',
-                    amount_in_sol=sim_net_sol_received,
-                    amount_out_tokens=tokens_to_sell_on_trigger,
-                    fill_price=trigger_price,
-                    market_cap_at_trade=market_cap_sol_at_trigger,
-                    tx_fee_sol=sim_sell_fee,
-                    tip_sol=sim_sell_tip,
-                    slippage_percent=0,
-                    trade_context={**sim_sell_settings, "ai_advice_at_sell": ai_context} if ai_context else sim_sell_settings, # <<< Add AI context
+                    token_address=mint, side='sell',
+                    amount_in_sol=sim_net_sol_received, amount_out_tokens=tokens_to_sell_on_trigger,
+                    fill_price=trigger_price, market_cap_at_trade=market_cap_sol_at_trigger,
+                    tx_fee_sol=sim_sell_fee, tip_sol=sim_sell_tip, slippage_percent=0,
+                    trade_context={**sim_sell_settings, "ai_advice_at_sell": ai_context} if ai_context else sim_sell_settings,
                 )
                 await self.state.update_sol_balance(sim_net_sol_received)
                 
-                token_name_row = await self.db.get_token_name(mint, conn)
-                token_name = token_name_row['name'] if token_name_row else mint
-                log_msg = format_sell_order_log(mint=mint, token_name=token_name, market_cap_sol=market_cap_sol_at_trigger, profit=sim_profit, reason=reason, sol_price=sol_price_usd)
-                logger.info(log_msg)
-                if self.config.get('PLAY_SELL_SOUND'):
-                    if any(sl_reason in reason for sl_reason in ["Stop Loss", "Breakeven SL", "Emergency SL", "manual_override"]): asyncio.create_task(play_sell_sl_sound_async())
-                    elif any(tp_reason in reason for tp_reason in ["First TP", "Second TP", "Trailing SL"]): asyncio.create_task(play_sell_tp_sound_async())
-                if self.config.get('TELEGRAM_INTERACTION'):
-                    telegram_msg = format_sell_order_log(mint=mint, token_name=token_name, market_cap_sol=market_cap_sol_at_trigger, profit=sim_profit, reason=reason, sol_price=sol_price_usd, for_telegram=True)
-                    asyncio.create_task(send_telegram_message(telegram_msg))
-                
-                sell_reasons_triggering_hard_cooldown = self.config.get('APPLY_TREND_REVERSAL_ON_SELL_REASONS', [])
-                if any(configured_reason in reason for configured_reason in sell_reasons_triggering_hard_cooldown):
-                    cooldown_minutes = self.config.get('STOP_LOSS_COOLDOWN_MINUTES', 0)
-                    if cooldown_minutes > 0:
-                        await self.db.set_token_cooldown(mint, cooldown_minutes) 
-                return sim_profit
+                # Set variables for RAG logging
+                profit_from_sell = sim_profit
+                final_profit_sol = sim_profit
+                final_net_sol_received = sim_net_sol_received
+                final_sell_settings = sim_sell_settings
 
             elif trading_mode in ["paper_trading", "live"]:
                 api_pool = self.config.get('DEFAULT_SELL_POOL', "auto")
@@ -602,91 +580,132 @@ class TradingManager:
                     
                     logger.info(f"[{trading_mode.upper()} MODE] Sell for {mint} successful. Sig: {signature}, Executed Price (approx): {executed_price_live:.9f}, SOL Received (approx gross): {sol_received_from_api:.9f}")
 
-                    async with self.db.pool.acquire() as conn_live_sell:
-                        async with conn_live_sell.transaction():
-                            cost_basis_sold_portion_live = total_investment_sol_at_buy_portfolio * (tokens_to_sell_on_trigger / initial_tokens_portfolio) if initial_tokens_portfolio > 0 else 0
-                            profit_live = sol_received_from_api - cost_basis_sold_portion_live
+                    # --- This transaction is now inside the outer `execute_sell` transaction ---
+                    cost_basis_sold_portion_live = total_investment_sol_at_buy_portfolio * (tokens_to_sell_on_trigger / initial_tokens_portfolio) if initial_tokens_portfolio > 0 else 0
+                    profit_live = sol_received_from_api - cost_basis_sold_portion_live
 
-                            new_remaining_tokens_live = remaining_tokens_portfolio - tokens_to_sell_on_trigger
-                            new_status_live = 'closed' if new_remaining_tokens_live < 1e-9 else 'active'
+                    new_remaining_tokens_live = remaining_tokens_portfolio - tokens_to_sell_on_trigger
+                    new_status_live = 'closed' if new_remaining_tokens_live < 1e-9 else 'active'
 
-                            await self.db.update_portfolio_entry_after_sell(position_id_to_update, new_remaining_tokens_live, new_status_live, conn_live_sell)
-                            
-                            live_sell_settings = {
-                                "mode": trading_mode, "signature": signature, "reason": reason,
-                                "api_pool_used": api_pool,
-                                "api_executed_price": executed_price_live, "api_sol_received": sol_received_from_api,
-                                "api_priority_fee_sent": api_priority_fee, "api_slippage_sent": api_slippage,
-                                **sell_trigger_values,
-                                "sell_percentage_of_initial_request": sell_percentage * 100 if reason == "First TP" else (sell_percentage * 100.0 if reason in ["Stop Loss", "Breakeven SL", "Second TP", "Trailing SL", "Emergency SL (MCap)", "manual_override"] else 0.0),
-                                "actual_tokens_sold_as_fraction_of_remaining_at_sell_time": (tokens_to_sell_on_trigger / remaining_tokens_portfolio) if remaining_tokens_portfolio > 0 else 0,
-                                "sell_fee_config": self.config['DEFAULT_SELL_FEE'],
-                                "sell_tip_config": self.config['DEFAULT_SELL_TIP'],
-                                "price_determination_method_used": self.config.get('PRICE_DETERMINATION_METHOD'),
-                                "trigger_price_at_sell": trigger_price
-                            }
-                            if market_cap_sol_at_trigger is not None: live_sell_settings["market_cap_sol_at_sell"] = market_cap_sol_at_trigger
-
-                            await self.db.insert_portfolio_sell_record(
-                                mint=mint, current_price=executed_price_live, market_cap_sol=market_cap_sol_at_trigger,
-                                net_sol_received=sol_received_from_api, 
-                                sol_price_usd=sol_price_usd if sol_price_usd else 0.0,
-                                tokens_sold=tokens_to_sell_on_trigger,
-                                sell_fee=0, sell_tip=api_priority_fee, 
-                                profit=profit_live,
-                                reason=reason, timestamp=datetime.now(timezone.utc), settings=live_sell_settings, ai_context=ai_context, conn=conn_live_sell
-                            )
-                            await self.db.log_completed_trade(
-                                token_address=mint,
-                                side='sell',
-                                amount_in_sol=sol_received_from_api,
-                                amount_out_tokens=tokens_to_sell_on_trigger,
-                                fill_price=executed_price_live,
-                                market_cap_at_trade=market_cap_sol_at_trigger,
-                                tx_fee_sol=0,
-                                tip_sol=api_priority_fee,
-                                slippage_percent=trade_result.get("slippage"),
-                                trade_context={**sim_sell_settings, "ai_advice_at_sell": ai_context} if ai_context else sim_sell_settings, # <<< Add AI context
-                            )
-                            await self.state.update_sol_balance(sol_received_from_api)
-                            
-                            token_name_row = await self.db.get_token_name(mint, conn_live_sell)
-                            token_name = token_name_row['name'] if token_name_row else mint
-                            log_msg = format_sell_order_log(mint=mint, token_name=token_name, market_cap_sol=market_cap_sol_at_trigger, profit=profit_live, reason=reason, sol_price=sol_price_usd)
-                            logger.info(f"[{trading_mode.upper()}] {log_msg}")
-                            if self.config.get('PLAY_SELL_SOUND'):
-                                if any(sl_reason in reason for sl_reason in ["Stop Loss", "Breakeven SL", "Emergency SL", "manual_override"]): asyncio.create_task(play_sell_sl_sound_async())
-                                elif any(tp_reason in reason for tp_reason in ["First TP", "Second TP", "Trailing SL"]): asyncio.create_task(play_sell_tp_sound_async())
-                            if self.config.get('TELEGRAM_INTERACTION'):
-                                telegram_msg = format_sell_order_log(mint=mint, token_name=token_name, market_cap_sol=market_cap_sol_at_trigger, profit=profit_live, reason=reason, sol_price=sol_price_usd, for_telegram=True)
-                                telegram_msg += f"\nMode: {trading_mode.upper()}\nSignature: {signature}"
-                                asyncio.create_task(send_telegram_message(telegram_msg))
+                    await self.db.update_portfolio_entry_after_sell(position_id_to_update, new_remaining_tokens_live, new_status_live, conn)
                     
-                    sell_reasons_triggering_hard_cooldown = self.config.get('APPLY_TREND_REVERSAL_ON_SELL_REASONS', [])
-                    if any(configured_reason in reason for configured_reason in sell_reasons_triggering_hard_cooldown):
-                        cooldown_minutes = self.config.get('STOP_LOSS_COOLDOWN_MINUTES', 0)
-                        if cooldown_minutes > 0:
-                            await self.db.set_token_cooldown(mint, cooldown_minutes) 
-                    return profit_live
+                    live_sell_settings = {
+                        "mode": trading_mode, "signature": signature, "reason": reason,
+                        "api_pool_used": api_pool,
+                        "api_executed_price": executed_price_live, "api_sol_received": sol_received_from_api,
+                        "api_priority_fee_sent": api_priority_fee, "api_slippage_sent": api_slippage,
+                        **sell_trigger_values,
+                        "sell_percentage_of_initial_request": sell_percentage * 100 if reason == "First TP" else (sell_percentage * 100.0 if reason in ["Stop Loss", "Breakeven SL", "Second TP", "Trailing SL", "Emergency SL (MCap)", "manual_override"] else 0.0),
+                        "actual_tokens_sold_as_fraction_of_remaining_at_sell_time": (tokens_to_sell_on_trigger / remaining_tokens_portfolio) if remaining_tokens_portfolio > 0 else 0,
+                        "sell_fee_config": self.config['DEFAULT_SELL_FEE'],
+                        "sell_tip_config": self.config['DEFAULT_SELL_TIP'],
+                        "price_determination_method_used": self.config.get('PRICE_DETERMINATION_METHOD'),
+                        "trigger_price_at_sell": trigger_price
+                    }
+                    if market_cap_sol_at_trigger is not None: live_sell_settings["market_cap_sol_at_sell"] = market_cap_sol_at_trigger
+
+                    await self.db.insert_portfolio_sell_record(
+                        mint=mint, current_price=executed_price_live, market_cap_sol=market_cap_sol_at_trigger,
+                        net_sol_received=sol_received_from_api, 
+                        sol_price_usd=sol_price_usd if sol_price_usd else 0.0,
+                        tokens_sold=tokens_to_sell_on_trigger,
+                        sell_fee=0, tip_sol=api_priority_fee, 
+                        profit=profit_live,
+                        reason=reason, timestamp=datetime.now(timezone.utc), settings=live_sell_settings, ai_context=ai_context, conn=conn
+                    )
+                    await self.db.log_completed_trade(
+                        token_address=mint,
+                        side='sell',
+                        amount_in_sol=sol_received_from_api,
+                        amount_out_tokens=tokens_to_sell_on_trigger,
+                        fill_price=executed_price_live,
+                        market_cap_at_trade=market_cap_sol_at_trigger,
+                        tx_fee_sol=0,
+                        tip_sol=api_priority_fee,
+                        slippage_percent=trade_result.get("slippage"),
+                        trade_context={**live_sell_settings, "ai_advice_at_sell": ai_context} if ai_context else live_sell_settings,
+                    )
+                    await self.state.update_sol_balance(sol_received_from_api)
+
+                    # Set variables for RAG logging
+                    profit_from_sell = profit_live
+                    final_executed_price = executed_price_live
+                    final_profit_sol = profit_live
+                    final_net_sol_received = sol_received_from_api
+                    final_sell_settings = live_sell_settings
+
                 else:
                     logger.error(f"[{trading_mode.upper()} MODE] Sell failed for {mint}. API Error: {trade_result.get('error', 'Unknown error') if trade_result else 'No API result'}")
                     return None
             else:
                 logger.error(f"Unknown TRADING_MODE: '{trading_mode}' in execute_sell for {mint}.")
                 return None
+            
+            # --- RAG FEEDBACK LOOP & LOGGING ---
+            # This block runs for *both* SIMULATE and LIVE modes if profit_from_sell is not None
+            if profit_from_sell is not None:
+                token_name_row = await self.db.get_token_name(mint, conn)
+                token_name = token_name_row['name'] if token_name_row else mint
+                log_msg = format_sell_order_log(mint=mint, token_name=token_name, market_cap_sol=market_cap_sol_at_trigger, profit=profit_from_sell, reason=reason, sol_price=sol_price_usd)
+                logger.info(log_msg)
+                
+                # --- NEW: Log Outcome to RAG Memory ---
+                if self.config.get('AI_DECISION_MAKING_ENABLED', False) and self.ai_decision_maker:
+                    # Create a "snapshot" of the sell event
+                    sell_snapshot_data = {
+                        "mint": mint,
+                        "source": (await conn.fetchval("SELECT data_source FROM tokens WHERE mint = $1", mint)) or "PUMP",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "decision_context": "SELL_EVENT_OUTCOME", # Special context
+                        "market_cap": (final_market_cap_sol * sol_price_usd) if final_market_cap_sol and sol_price_usd else 0,
+                        "volatility": 0, # Volatility at sell time isn't as relevant as the reason
+                        "token_age_minutes": (datetime.now(timezone.utc) - (await conn.fetchval("SELECT timestamp FROM tokens WHERE mint = $1", mint))).total_seconds() / 60,
+                        "is_prolific_creator": False, # Not relevant for sell event
+                        "uri_status": "N/A", # Not relevant
+                        "market_dynamics_summary_str": f"Sell executed at {final_executed_price:.9f} SOL",
+                        "trade_history_summary": "N/A" # Not relevant, outcome is what matters
+                    }
+                    # Create the "decision" (outcome) info
+                    sell_decision_info = {
+                        "decision": f"SELL_OUTCOME: {reason}",
+                        "confidence": 100, # This was an actual event
+                        "explanation": f"Sell of {tokens_to_sell_on_trigger:.4f} tokens executed.\nReason: {reason}\nProfit: {final_profit_sol:+.6f} SOL\nNet SOL Received: {final_net_sol_received:+.6f} SOL"
+                    }
+                    
+                    # Asynchronously add this to RAG memory, don't block the sell logic
+                    asyncio.create_task(
+                        self.ai_decision_maker.add_decision_snapshot_to_memory(sell_snapshot_data, sell_decision_info)
+                    )
+                    logger.debug(f"🤖 AI Feedback: Queued sell outcome for {mint} (Reason: {reason}) to RAG memory.")
+                # --- END RAG FEEDBACK LOOP ---
+
+                if self.config.get('PLAY_SELL_SOUND'):
+                    if any(sl_reason in reason for sl_reason in ["Stop Loss", "Breakeven SL", "Emergency SL", "manual_override"]): asyncio.create_task(play_sell_sl_sound_async())
+                    elif any(tp_reason in reason for tp_reason in ["First TP", "Second TP", "Trailing SL"]): asyncio.create_task(play_sell_tp_sound_async())
+                if self.config.get('TELEGRAM_INTERACTION'):
+                    telegram_msg = format_sell_order_log(mint=mint, token_name=token_name, market_cap_sol=market_cap_sol_at_trigger, profit=profit_from_sell, reason=reason, sol_price=sol_price_usd, for_telegram=True)
+                    if trading_mode in ["paper_trading", "live"]:
+                        telegram_msg += f"\nMode: {trading_mode.upper()}\nSignature: {final_sell_settings.get('signature', 'N/A')}"
+                    asyncio.create_task(send_telegram_message(telegram_msg))
+                
+                sell_reasons_triggering_hard_cooldown = self.config.get('APPLY_TREND_REVERSAL_ON_SELL_REASONS', [])
+                if any(configured_reason in reason for configured_reason in sell_reasons_triggering_hard_cooldown):
+                    cooldown_minutes = self.config.get('STOP_LOSS_COOLDOWN_MINUTES', 0)
+                    if cooldown_minutes > 0:
+                        await self.db.set_token_cooldown(mint, cooldown_minutes) 
+                return profit_from_sell
+            
+            # This return is for cases where the trade_result failed
+            return None
 
         except Exception as e:
             logger.error(f"❌ [{trading_mode.upper()}] Overall error in execute_sell for {mint} (PosID: {position_id_to_update}, Reason: {reason}): {e}", exc_info=True)
             if trading_mode == "simulate": raise 
             return None
-
-    # --- THIS IS THE CORRECTLY INDENTED METHOD ---
+    
     async def check_sell_opportunities(self):
         """
-        [REFACTORED v3] Checks for sell opportunities with combined post-TP1 logic.
-        - After TP1, it uses a hybrid trailing stop: the higher of (breakeven, simple % trail, dynamic Chandelier Exit).
-        - It also sells if a trend reversal (EMA cross-down) is detected.
-        - Includes full logic for stale volume checks on migrated tokens and detailed logging.
+        [REFACTORED v3] Checks for sell opportunities with combined post-TP1 logic. (Unchanged)
         """
         if self.state.shutdown_event.is_set():
             return
@@ -710,7 +729,6 @@ class TradingManager:
                         current_price_to_use = price_data.get('price')
                         current_market_cap_sol_for_log = price_data.get('market_cap')
                         
-                        # --- Stale Volume Check for Migrated Tokens (Restored) ---
                         if token_data_source == 'DEXSCREENER':
                             if current_price_to_use is None:
                                 min_mcap_threshold_usd = self.config['MIN_MARKETCAP_THRESHOLD']
@@ -748,12 +766,9 @@ class TradingManager:
                                 logger.info(f"✅ Token {mint} (ID: {pos_id}) has recovered volume. Resetting stale timer.")
                                 await conn.execute("UPDATE portfolio SET volume_stale_since = NULL WHERE id = $1", pos_id)
                         
-                        # --- Detailed Logging (Restored) ---
                         safe_price = format_price_for_log(current_price_to_use)
                         safe_mcap = f"{current_market_cap_sol_for_log:,.2f}" if current_market_cap_sol_for_log is not None else "N/A"
                         pnl_emoji, unrealized_pnl_str = "❓", "\tPnL: N/A"
-
-
 
                         if current_price_to_use is not None and current_price_to_use > 0:
                             try:
@@ -769,13 +784,12 @@ class TradingManager:
 
                         logger.debug(f":abacus: Checking sell for {mint:<44} (ID: {pos_id:<4}) {pnl_emoji} ({token_data_source[:4]}) - Price: {safe_price:<12} MCap: {safe_mcap:<10} SOL {unrealized_pnl_str}")
 
-                        # <<< AI ADVICE INTEGRATION START >>>
                         ai_advice_used = None
                         ai_decision = None
                         ai_confidence = 0
-                        is_ai_advice_valid = False # Flag if valid AI advice was found
+                        is_ai_advice_valid = False 
 
-                        if self.config.get('AI_DECISION_MAKING_ENABLED', False):
+                        if self.config.get('AI_DECISION_MAKING_ENABLED', False) and self.ai_decision_maker:
                             ai_decision_record = await self.db.get_latest_ai_decision(mint, conn)
                             if ai_decision_record:
                                 ai_timestamp = ai_decision_record['evaluation_timestamp']
@@ -786,18 +800,16 @@ class TradingManager:
                                     is_ai_advice_valid = True
                                     ai_decision = ai_decision_record['decision']
                                     ai_confidence = ai_decision_record['confidence']
-                                    ai_advice_used = {'decision': ai_decision, 'confidence': ai_confidence, 'timestamp': ai_timestamp.isoformat()} # Store for logging/portfolio
-                                    logger.debug(f"AI Advice ({mint}): {ai_decision} ({ai_confidence}%) - Age: {advice_age.total_seconds():.0f}s")
+                                    ai_advice_used = {'decision': ai_decision, 'confidence': ai_confidence, 'timestamp': ai_timestamp.isoformat()}
+                                    logger.debug(f"🤖 AI Advice ({mint}): {ai_decision} ({ai_confidence}%) - Age: {advice_age.total_seconds():.0f}s")
                                 else:
-                                    logger.debug(f"AI advice for {mint} is stale (Age: {advice_age.total_seconds():.0f}s > {max_staleness.total_seconds():.0f}s). Ignoring.")
+                                    logger.debug(f"🤖 AI advice for {mint} is stale (Age: {advice_age.total_seconds():.0f}s > {max_staleness.total_seconds():.0f}s). Ignoring.")
                             else:
-                                logger.debug(f"AI advice for {mint} sell check unavailable. Using rule-based logic only.")
-                        # <<< AI ADVICE INTEGRATION END >>>
-
+                                logger.debug(f"🤖 AI advice for {mint} sell check unavailable. Using rule-based logic only.")
+                        
                         if current_price_to_use is None or current_price_to_use <= 0:
                             continue
 
-                        # --- Variable Initialization (Unchanged) ---
                         buy_price = float(position['buy_price'])
                         initial_tokens = float(position['initial_tokens'])
                         active_stop_loss_price = float(position['stop_loss_price'])
@@ -813,26 +825,20 @@ class TradingManager:
                             await self.db.update_portfolio_highest_price(pos_id, current_price_to_use, conn)
 
                         sell_reason = None
-                        rule_based_sell_triggered = False # Flag if standard rules triggered sell
-                        rule_reason = None # Store the reason from rules
+                        rule_based_sell_triggered = False 
+                        rule_reason = None 
                         trigger_values_for_log = {}
 
-                        # --- PRE-TP1 LOGIC (Unchanged) ---
                         if not first_tp_hit:
-                            # <<< Set rule_based_sell_triggered = True and store rule_reason if triggered >>>
                             if current_price_to_use <= active_stop_loss_price: rule_based_sell_triggered=True; rule_reason="Stop Loss"; trigger_values_for_log = {"stop_loss_price_threshold": active_stop_loss_price}
                             elif current_price_to_use >= second_tp_price: rule_based_sell_triggered=True; rule_reason="Second TP"; trigger_values_for_log = {"second_tp_price_threshold": second_tp_price}
                             elif current_price_to_use >= initial_tp_price: rule_based_sell_triggered=True; rule_reason="First TP"; trigger_values_for_log = {"first_tp_price_threshold": initial_tp_price}
-                        
-                        # --- START REFACTORED SECTION ---
-                        # --- POST-TP1 LOGIC (Refactored) ---
                         else:
-                            # 1. Fetch indicator data once for all post-TP1 checks
                             lookback_hours = self.config.get('INDICATOR_LOOKBACK_HOURS', 2.0)
                             start_date = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
                             historical_data = await self.db.get_historical_data_for_backtesting([mint], start_date, None)
                             
-                            df_indicators = pd.DataFrame() # Default to empty
+                            df_indicators = pd.DataFrame() 
                             if historical_data and mint in historical_data:
                                 if len(historical_data[mint]) >= self.config.get('MIN_CANDLE_DATA_FOR_INDICATORS', 30):
                                     loop = asyncio.get_running_loop()
@@ -840,26 +846,18 @@ class TradingManager:
                                 else:
                                     logger.debug(f"Not enough historical data for {mint} ({len(historical_data[mint])} points) to calculate indicators for sell logic.")
 
-                            # 2. Check for Trend Reversal Signal (EMA Cross) first
                             if not df_indicators.empty and len(df_indicators) >= 2:
                                 latest = df_indicators.iloc[-1]
                                 previous = df_indicators.iloc[-2]
-                                # Check for a bearish crossover event
                                 if latest.get('EMA_fast') < latest.get('EMA_slow') and previous.get('EMA_fast') >= previous.get('EMA_slow'):
                                     rule_based_sell_triggered=True; rule_reason="Trend Reversal (EMA Cross)"; trigger_values_for_log = {"ema_fast": latest.get('EMA_fast'), "ema_slow": latest.get('EMA_slow')}
                                     logger.info(f" EMA cross-down detected for {mint}. Fast EMA: {latest.get('EMA_fast'):.9f}, Slow EMA: {latest.get('EMA_slow'):.9f}")
 
-
-                            # 3. If no trend reversal, then check the hybrid trailing stop-loss
                             if not rule_based_sell_triggered:
-                                # Start with the breakeven price as the minimum SL
                                 effective_sl_price = active_stop_loss_price
-                                
-                                # Calculate simple percentage-based trailing stop
                                 simple_trailing_sl = highest_price_since_buy * (1 - self.config['TRAILING_STOP_LOSS_PERCENT'] / 100.0)
                                 effective_sl_price = max(effective_sl_price, simple_trailing_sl)
                                 
-                                # If dynamic mode is on, calculate Chandelier Exit and see if it's an even higher (more protective) SL
                                 if self.config['USE_DYNAMIC_SECOND_TP'] and not df_indicators.empty:
                                     latest = df_indicators.iloc[-1]
                                     atr_col = f"ATRr_{self.config['ADAPTIVE_ATR_PERIOD']}"
@@ -869,10 +867,8 @@ class TradingManager:
                                         multiplier = self.get_adaptive_atr_multiplier(latest[rsi_col])
                                         chandelier_exit = highest_price_since_buy - (multiplier * latest[atr_col])
                                         effective_sl_price = max(effective_sl_price, chandelier_exit)
-                                        # Log for debugging which SL is being chosen
                                         logger.debug(f"Dynamic SL for {mint}: Breakeven={active_stop_loss_price:.9f}, SimpleTrail={simple_trailing_sl:.9f}, Chandelier={chandelier_exit:.9f} -> Effective SL={effective_sl_price:.9f}")
 
-                                # Check if the current price has breached the final effective stop-loss
                                 if current_price_to_use <= effective_sl_price:
                                     rule_based_sell_triggered=True
                                     rule_reason="Trailing SL Hybrid"
@@ -882,9 +878,7 @@ class TradingManager:
                                         "breakeven_price": active_stop_loss_price,
                                         "simple_trail_price": simple_trailing_sl
                                     }
-                        # --- END REFACTORED SECTION ---
-
-                        # --- EMERGENCY & FINAL SELL EXECUTION (Restored) ---
+                        
                         if not rule_based_sell_triggered:
                             if current_market_cap_sol_for_log is not None and current_market_cap_sol_for_log > 0 and \
                                (current_market_cap_sol_for_log * sol_price_usd) < self.config['MIN_MARKETCAP_THRESHOLD']:
@@ -892,48 +886,40 @@ class TradingManager:
                                 rule_reason="Emergency SL (MCap)"
                                 sell_trigger_values = {"current_market_cap_usd_at_trigger": (current_market_cap_sol_for_log * sol_price_usd), "min_mcap_threshold_config": self.config['MIN_MARKETCAP_THRESHOLD']}
 
-                        # --- Apply AI Decision Logic ---
                         if is_ai_advice_valid:
                             if rule_based_sell_triggered:
-                                # Rules say SELL
                                 if ai_decision == 'SELL':
-                                    logger.debug(f"AI confirmed rule-based SELL trigger ({rule_reason}) for {mint} (Confidence: {ai_confidence}).")
-                                    sell_reason = rule_reason # Use the rule reason
+                                    logger.debug(f"🤖 AI confirmed rule-based SELL trigger ({rule_reason}) for {mint} (Confidence: {ai_confidence}).")
+                                    sell_reason = rule_reason
                                 elif ai_decision == 'HOLD':
                                     override_threshold = self.config.get('AI_HOLD_OVERRIDE_CONFIDENCE_THRESHOLD', 85)
-                                    # Allow override only for non-critical reasons (e.g., TSL, maybe TP2, NOT initial SL or Emergency)
                                     can_override = rule_reason not in ["Stop Loss", "Emergency SL (MCap)", "Emergency SL (No Volume)"]
                                     if can_override and ai_confidence >= override_threshold:
-                                        logger.warning(f"AI advised HOLD (Confidence: {ai_confidence} >= {override_threshold}), overriding rule-based sell trigger ({rule_reason}) for {mint} this cycle.")
-                                        # DO NOT set sell_reason, skip sell execution for this cycle
-                                        continue # Move to next position
+                                        logger.warning(f"🤖 AI advised HOLD (Confidence: {ai_confidence} >= {override_threshold}), overriding rule-based sell trigger ({rule_reason}) for {mint} this cycle.")
+                                        continue 
                                     else:
-                                        logger.debug(f"AI advised HOLD (Confidence: {ai_confidence}) but rule ({rule_reason}) is critical or confidence too low. Proceeding with rule-based sell.")
-                                        sell_reason = rule_reason # Prioritize critical rule or low AI confidence
+                                        logger.debug(f"🤖 AI advised HOLD (Confidence: {ai_confidence}) but rule ({rule_reason}) is critical or confidence too low. Proceeding with rule-based sell.")
+                                        sell_reason = rule_reason
                             else:
-                                # Rules say HOLD
                                 if ai_decision == 'SELL':
                                     trigger_threshold = self.config.get('AI_SELL_TRIGGER_CONFIDENCE_THRESHOLD', 75)
                                     if ai_confidence >= trigger_threshold:
-                                        logger.info(f"AI advised SELL (Confidence: {ai_confidence} >= {trigger_threshold}) for {mint}, triggering early sell despite no rule match.")
-                                        sell_reason = "AI Triggered Sell" # Set AI as the reason
-                                        trigger_values_for_log = {"ai_confidence_threshold": trigger_threshold} # Log AI threshold
+                                        logger.info(f"🤖 AI advised SELL (Confidence: {ai_confidence} >= {trigger_threshold}) for {mint}, triggering early sell despite no rule match.")
+                                        sell_reason = "AI Triggered Sell"
+                                        trigger_values_for_log = {"ai_confidence_threshold": trigger_threshold}
                                     else:
-                                         logger.debug(f"AI advised SELL but confidence ({ai_confidence}) is below threshold ({trigger_threshold}). Holding based on rules.")
+                                         logger.debug(f"🤖 AI advised SELL but confidence ({ai_confidence}) is below threshold ({trigger_threshold}). Holding based on rules.")
                                 elif ai_decision == 'HOLD':
-                                    logger.debug(f"AI confirmed HOLD for {mint} (Confidence: {ai_confidence}), aligning with rules.")
-                                    # No action needed, sell_reason remains None
+                                    logger.debug(f"🤖 AI confirmed HOLD for {mint} (Confidence: {ai_confidence}), aligning with rules.")
                         elif rule_based_sell_triggered:
-                            # AI advice not valid, but rules triggered sell
                             sell_reason = rule_reason
 
 
                         if sell_reason:
-                            # Determine sell percentage based on reason
                             sell_percentage_of_initial = 0.0 
                             if sell_reason == "First TP":
                                 sell_percentage_of_initial = self.config['FIRST_SELL_PERCENT'] / 100.0
-                            else: # All other reasons sell 100% of remaining
+                            else:
                                 sell_percentage_of_initial = 1.0 
                             
                             log_message_sell_trigger = (f"Trigger for {mint} (ID: {pos_id}): Reason='{sell_reason}', PriceToUse={current_price_to_use:.9f}")
@@ -956,8 +942,7 @@ class TradingManager:
                     logger.error(f"❌ Error in check_sell_opportunities transaction block: {e}", exc_info=True)
     
     async def execute_manual_sell_all(self):
-        """Executes a manual sell for ALL active positions."""
-        # ... (full content of execute_manual_sell_all method) ...
+        """Executes a manual sell for ALL active positions. (Unchanged)"""
         trading_mode = self.config['TRADING_MODE'].lower()
         logger.info(f"[{trading_mode.upper()} MODE] Received command to sell ALL active positions.")
         
@@ -977,6 +962,7 @@ class TradingManager:
             mint = position['mint']
             pos_id = position['id']
             try:
+                # --- Must use a NEW connection for each sell's transaction ---
                 async with self.db.pool.acquire() as conn_sell:
                     price_data = await self.db.get_price_and_market_cap_for_decision(mint, self.config, conn_sell)
                     trigger_price = price_data.get('price')
@@ -987,6 +973,7 @@ class TradingManager:
                         continue
 
                     logger.info(f"[{trading_mode.upper()}] Selling {mint} (Pos ID: {pos_id}) at price {trigger_price:.9f}...")
+                    # --- Pass the new connection to execute_sell ---
                     await self.execute_sell(
                         conn=conn_sell,
                         mint=mint,
@@ -1004,8 +991,7 @@ class TradingManager:
         await send_telegram_message("✅ SELL ALL operation completed.")
         
     async def execute_manual_sell(self, mint: str):
-        """Executes a manual sell for all holdings of a specific token."""
-        # ... (full content of execute_manual_sell method) ...
+        """Executes a manual sell for all holdings of a specific token. (Unchanged)"""
         trading_mode = self.config['TRADING_MODE'].lower()
         logger.info(f"[{trading_mode.upper()} MODE] Attempting manual sell for all holdings of token: {mint}")
         
@@ -1041,6 +1027,7 @@ class TradingManager:
 
         logger.info(f"[{trading_mode.upper()} MODE] Proceeding with manual sell for {mint} (Pos ID: {position_id_to_sell}) at price {trigger_price_for_manual_sell:.9f}")
 
+        # --- This must also acquire its own connection for the transaction ---
         async with self.db.pool.acquire() as conn_for_execute_sell: 
              await self.execute_sell(
                 conn=conn_for_execute_sell, 

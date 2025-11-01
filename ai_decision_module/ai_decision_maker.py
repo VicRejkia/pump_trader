@@ -44,12 +44,12 @@ class AIDecisionMaker:
 
         try:
             self.embedder = SentenceTransformer(embedding_model_name)
-            logger.info(f"Sentence Transformer embedding model '{embedding_model_name}' loaded.")
+            logger.info(f"🤖 Sentence Transformer embedding model '{embedding_model_name}' loaded.")
         except Exception as e:
-            logger.critical(f"Failed to load Sentence Transformer model '{embedding_model_name}': {e}", exc_info=True)
+            logger.critical(f"🤖 Failed to load Sentence Transformer model '{embedding_model_name}': {e}", exc_info=True)
             raise
         
-        logger.info(f"AI Decision Maker initialized with Ollama model: {self.model} and pgvector backend.")
+        logger.info(f"🤖 AI Decision Maker initialized with Ollama model: {self.model} and pgvector backend.")
 
     def _load_prompts(self) -> Dict[str, Any]:
         """Loads prompt templates and configurations from YAML files (Unchanged)."""
@@ -68,14 +68,14 @@ class AIDecisionMaker:
                     if not specific_config: raise ValueError(f"{specific_path} is empty or invalid")
                     loaded_prompts[context_type] = {**base_config, **specific_config}
 
-            logger.info(f"Successfully loaded prompt configurations from '{self.prompts_dir}'.")
+            logger.info(f"🤖 Successfully loaded prompt configurations from '{self.prompts_dir}'.")
             return loaded_prompts
 
         except FileNotFoundError as e:
-            logger.critical(f"Prompt YAML file not found: {e}. Ensure '{self.prompts_dir}' contains base.yaml, buy.yaml, sell.yaml.", exc_info=True)
+            logger.critical(f"🤖 Prompt YAML file not found: {e}. Ensure '{self.prompts_dir}' contains base.yaml, buy.yaml, sell.yaml.", exc_info=True)
             raise
         except (yaml.YAMLError, Exception) as e:
-            logger.critical(f"Error loading or parsing prompts: {e}", exc_info=True)
+            logger.critical(f"🤖 Error loading or parsing prompts: {e}", exc_info=True)
             raise
 
     async def embed_text(self, text: str) -> Optional[list]:
@@ -84,15 +84,15 @@ class AIDecisionMaker:
         Wraps the blocking SentenceTransformer call in asyncio.to_thread().
         """
         if not text:
-            logger.warning("Attempted to embed empty text.")
+            logger.warning("🤖 Attempted to embed empty text.")
             return None
         try:
-            if self.log_verbose: logger.debug("AI Worker: Embedding text... (STARTING BLOCKING CALL)")
+            if self.log_verbose: logger.debug("🤖 AI Worker: Embedding text... (STARTING BLOCKING CALL)")
             embedding = await asyncio.to_thread(self.embedder.encode, text)
-            if self.log_verbose: logger.debug("AI Worker: Embedding text... (BLOCKING CALL COMPLETE)")
+            if self.log_verbose: logger.debug("🤖 AI Worker: Embedding text... (BLOCKING CALL COMPLETE)")
             return embedding.tolist()
         except Exception as e:
-            logger.error(f"Failed to embed text: '{text[:100]}...'. Error: {e}", exc_info=True)
+            logger.error(f"🤖 Failed to embed text: '{text[:100]}...'. Error: {e}", exc_info=True)
             return None
 
     async def add_decision_snapshot_to_memory(self, snapshot_data: dict, decision_info: dict):
@@ -137,7 +137,7 @@ class AIDecisionMaker:
         
         embedding = await self.embed_text(situation_summary)
         if not embedding:
-            logger.warning(f"Failed to create embedding for decision snapshot (Mint: {mint}). Skipping memory add.")
+            logger.warning(f"🤖 Failed to create embedding for decision snapshot (Mint: {mint}). Skipping memory add.")
             return
 
         snapshot_time_str = timestamp if isinstance(timestamp, str) else datetime.now(timezone.utc).isoformat()
@@ -173,9 +173,9 @@ class AIDecisionMaker:
                     str(embedding), # <-- This is the fix from last time
                     metadata_json
                 )
-            if self.log_verbose: logger.debug(f"Added decision snapshot to pgvector memory for {mint}")
+            if self.log_verbose: logger.debug(f"🤖 Added decision snapshot to pgvector memory for {mint}")
         except Exception as e:
-            logger.error(f"Failed to add decision snapshot to pgvector (Mint: {mint}): {e}", exc_info=True)
+            logger.error(f"🤖 Failed to add decision snapshot to pgvector (Mint: {mint}): {e}", exc_info=True)
 
     async def retrieve_context(self, situation_query: str, top_k: int = 5) -> str:
         """
@@ -183,12 +183,12 @@ class AIDecisionMaker:
         to the current situation query.
         """
         if not situation_query:
-            logger.warning("Retrieve context called with empty situation query.")
+            logger.warning("🤖 Retrieve context called with empty situation query.")
             return "No situation query provided for context retrieval."
 
         query_embedding = await self.embed_text(situation_query)
         if not query_embedding:
-            logger.warning("Failed to create embedding for RAG query. Cannot retrieve context.")
+            logger.warning("🤖 Failed to create embedding for RAG query. Cannot retrieve context.")
             return "Embedding failed for query. Cannot retrieve context."
 
         query = """
@@ -206,7 +206,7 @@ class AIDecisionMaker:
                 results = await conn.fetch(query, str(query_embedding), top_k) # <-- This is the fix from last time
 
             if not results:
-                if self.log_verbose: logger.debug("No relevant past decision snapshots found in memory for query.")
+                if self.log_verbose: logger.debug("🤖 No relevant past decision snapshots found in memory for query.")
                 return "No relevant past decision snapshots found."
 
             context_parts = ["--- Relevant Past Situations & Decisions ---"]
@@ -227,7 +227,7 @@ class AIDecisionMaker:
             return "\n".join(context_parts)
 
         except Exception as e:
-            logger.error(f"Error querying pgvector for RAG context: {e}", exc_info=True)
+            logger.error(f"🤖 Error querying pgvector for RAG context: {e}", exc_info=True)
             return "Error retrieving context from memory."
 
     async def query_llm(self, prompt: str) -> str:
@@ -235,26 +235,26 @@ class AIDecisionMaker:
         [REFACTORED] Sends the fully formatted prompt to the Ollama LLM asynchronously
         by wrapping the blocking 'ollama.chat' call in asyncio.to_thread().
         """
-        if self.log_verbose: logger.debug(f"Sending prompt to LLM '{self.model}' (approx {len(prompt)} chars)")
+        if self.log_verbose: logger.debug(f"🤖 Sending prompt to LLM '{self.model}' (approx {len(prompt)} chars)")
 
         try:
-            if self.log_verbose: logger.debug("AI Worker: Querying LLM... (STARTING BLOCKING CALL)")
+            if self.log_verbose: logger.debug("🤖 AI Worker: Querying LLM... (STARTING BLOCKING CALL)")
             response = await asyncio.to_thread(
                 ollama.chat,
                 model=self.model,
                 options={'temperature': 0.1},
                 messages=[{'role': 'user', 'content': prompt}]
             )
-            if self.log_verbose: logger.debug("AI Worker: Querying LLM... (BLOCKING CALL COMPLETE)")
+            if self.log_verbose: logger.debug("🤖 AI Worker: Querying LLM... (BLOCKING CALL COMPLETE)")
             
             result = response['message']['content'].strip()
             if self.log_verbose:
                 log_result_snippet = result[:11] + ('...' if len(result) > 11 else '')
-                logger.debug(f"LLM Response received:\n{log_result_snippet}")
+                logger.debug(f"🤖 LLM Response received:\n{log_result_snippet}")
             return result
 
         except Exception as e:
-            logger.error(f"Ollama query failed using model '{self.model}': {e}", exc_info=True)
+            logger.error(f"🤖 Ollama query failed using model '{self.model}': {e}", exc_info=True)
             return "HOLD:0\n---\nAI decision unavailable due to LLM query error."
 
     async def get_trade_advice(self, current_data: dict, include_explanation: bool = True) -> dict:
@@ -265,7 +265,7 @@ class AIDecisionMaker:
         required_keys = ['mint', 'source', 'price', 'market_cap', 'volatility', 'decision_context', 'token_age_minutes']
         missing_keys = [k for k in required_keys if k not in current_data or current_data[k] is None]
         if missing_keys:
-             logger.error(f"Missing essential keys for AI advice: {missing_keys}. Input data: {list(current_data.keys())}")
+             logger.error(f"🤖 Missing essential keys for AI advice: {missing_keys}. Input data: {list(current_data.keys())}")
              return {"decision": "HOLD", "confidence": 0, "explanation": f"Incomplete essential data: Missing {missing_keys}"}
 
         decision_context = current_data['decision_context']
@@ -279,7 +279,7 @@ class AIDecisionMaker:
         elif decision_context == "SELL/HOLD":
             prompt_config = self.prompts['sell']
         else:
-            logger.warning(f"Unknown decision context '{decision_context}'. Defaulting to SELL/HOLD logic.")
+            logger.warning(f"🤖 Unknown decision context '{decision_context}'. Defaulting to SELL/HOLD logic.")
             prompt_config = self.prompts['sell']
             decision_context = "SELL/HOLD"
 
@@ -307,7 +307,7 @@ class AIDecisionMaker:
             f"Creator Status: {creator_status_for_query}. URI Status: {uri_status_for_query}. "
             f"Price Momentum (recent): {price_momentum_query_part}"
         )
-        if self.log_verbose: logger.debug(f"RAG Situation Query: {situation_query}")
+        if self.log_verbose: logger.debug(f"🤖 RAG Situation Query: {situation_query}")
 
         rag_context = await self.retrieve_context(situation_query)
 
@@ -319,18 +319,18 @@ class AIDecisionMaker:
                 if all(k in current_data for k in pump_keys):
                     market_dynamics_formatted = prompt_config['market_dynamics_template_pump'].format(**current_data)
                 else:
-                    logger.warning(f"Missing required PUMP market dynamics keys in current_data. Keys: {list(current_data.keys())}")
+                    logger.warning(f"🤖 Missing required PUMP market dynamics keys in current_data. Keys: {list(current_data.keys())}")
             elif source == 'DEXSCREENER':
                 dex_keys = re.findall(r'\{(\w+)(?:[:\.].*)?\}', prompt_config['market_dynamics_template_dex'])
                 if all(k in current_data for k in dex_keys):
                     market_dynamics_formatted = prompt_config['market_dynamics_template_dex'].format(**current_data)
                 else:
-                    logger.warning(f"Missing required DEXSCREENER market dynamics keys in current_data. Keys: {list(current_data.keys())}")
+                    logger.warning(f"🤖 Missing required DEXSCREENER market dynamics keys in current_data. Keys: {list(current_data.keys())}")
         except KeyError as e:
-            logger.error(f"KeyError formatting market dynamics for {source}: Missing key '{e}'. Available data keys: {list(current_data.keys())}")
+            logger.error(f"🤖 KeyError formatting market dynamics for {source}: Missing key '{e}'. Available data keys: {list(current_data.keys())}")
             market_dynamics_formatted = f"Error formatting market dynamics for {source} (KeyError: {e})."
         except Exception as e:
-            logger.error(f"Unexpected error formatting market dynamics for {source}: {e}", exc_info=True)
+            logger.error(f"🤖 Unexpected error formatting market dynamics for {source}: {e}", exc_info=True)
             market_dynamics_formatted = f"Error formatting market dynamics for {source}."
 
         social_threshold = self.config.get('DEFAULT_SOCIAL_SCORE_THRESHOLD', 100)
@@ -385,10 +385,10 @@ class AIDecisionMaker:
                            f"{base_template_parts['final_reminder']}"
             final_prompt = final_prompt.format(**prompt_data)
         except KeyError as e:
-             logger.critical(f"CRITICAL: Missing key '{e}' during prompt final formatting.")
+             logger.critical(f"🤖 CRITICAL: Missing key '{e}' during prompt final formatting.")
              return {"decision": "HOLD", "confidence": 0, "explanation": f"Internal Error: Prompt generation failed on key '{e}'."}
         except Exception as e:
-             logger.critical(f"CRITICAL: Unexpected error during prompt final formatting: {e}", exc_info=True)
+             logger.critical(f"🤖 CRITICAL: Unexpected error during prompt final formatting: {e}", exc_info=True)
              return {"decision": "HOLD", "confidence": 0, "explanation": f"Internal Error: Prompt generation failed unexpectedly."}
 
         llm_response = await self.query_llm(final_prompt)
@@ -398,7 +398,7 @@ class AIDecisionMaker:
         # This verbose log will now only show if AI_LOG_VERBOSE is True
         if self.log_verbose:
             log_explanation_snippet = parsed_decision['explanation'][:200] + ('...' if len(parsed_decision['explanation']) > 200 else '') if include_explanation and parsed_decision.get('explanation') else "(Explanation Skipped or Missing)"
-            logger.debug(f"AI Advice for {current_data['mint']} ({decision_context}): {parsed_decision['decision']} "
+            logger.debug(f"🤖 AI Advice for {current_data['mint']} ({decision_context}): {parsed_decision['decision']} "
                         f"(Confidence: {parsed_decision['confidence']}) - Reasoning: {log_explanation_snippet}")
 
         await self.add_decision_snapshot_to_memory(current_data, parsed_decision)
@@ -411,7 +411,7 @@ class AIDecisionMaker:
         """
         decision, confidence, explanation = "HOLD", 0, "No explanation processed." if not parse_explanation else "Explanation not found or invalid format."
         if not llm_response:
-            logger.warning("LLM response parser received empty string.")
+            logger.warning("🤖 LLM response parser received empty string.")
             return {"decision": decision, "confidence": confidence, "explanation": explanation}
         
         lines = llm_response.strip().split('\n', 2)
@@ -421,25 +421,25 @@ class AIDecisionMaker:
             decision = strict_match.group(1).upper()
             try:
                 confidence = max(0, min(100, int(strict_match.group(2))))
-                if self.log_verbose: logger.debug(f"Parser: Matched strict format '{decision}:{confidence}' on first line.")
+                if self.log_verbose: logger.debug(f"🤖 Parser: Matched strict format '{decision}:{confidence}' on first line.")
                 if parse_explanation:
                     if len(lines) > 2 and lines[1].strip() == '---':
                         explanation = lines[2].strip()
-                        if self.log_verbose: logger.debug("Parser: Extracted explanation following strict format and separator.")
+                        if self.log_verbose: logger.debug("🤖 Parser: Extracted explanation following strict format and separator.")
                     elif len(lines) == 2 and lines[1].strip() == '---':
                         explanation = "(No explanation text provided after separator)"
-                        if self.log_verbose: logger.debug("Parser: Strict format OK, separator found, but no explanation text.")
+                        if self.log_verbose: logger.debug("🤖 Parser: Strict format OK, separator found, but no explanation text.")
                     elif len(lines) > 1:
                         explanation = "\n".join(lines[1:]).strip()
-                        logger.warning("Parser: Strict format OK, but separator '---' missing. Taking rest as explanation.")
+                        logger.warning("🤖 Parser: Strict format OK, but separator '---' missing. Taking rest as explanation.")
                     else: 
                         explanation = "(No explanation provided)"
-                        if self.log_verbose: logger.debug("Parser: Strict format OK, but no subsequent lines for explanation.")
+                        if self.log_verbose: logger.debug("🤖 Parser: Strict format OK, but no subsequent lines for explanation.")
                 return {"decision": decision, "confidence": confidence, "explanation": explanation}
             except ValueError:
-                logger.warning(f"Parser: Matched strict format, but failed to parse confidence '{strict_match.group(2)}'. Falling back.")
+                logger.warning(f"🤖 Parser: Matched strict format, but failed to parse confidence '{strict_match.group(2)}'. Falling back.")
         else:
-            logger.warning(f"Parser: Strict format 'DECISION:CONFIDENCE' not found on line 1: '{lines[0]}'. Falling back.")
+            logger.warning(f"🤖 Parser: Strict format 'DECISION:CONFIDENCE' not found on line 1: '{lines[0]}'. Falling back.")
 
         fallback_result = self._parse_llm_response_fallback(llm_response)
         if not parse_explanation:
@@ -456,46 +456,46 @@ class AIDecisionMaker:
         decision_match_strict_line = re.search(r"^\W*\*?\s*Decision\s*\*?\W*:\s*\**?(BUY|SELL|HOLD)\**?", llm_response, re.IGNORECASE | re.MULTILINE)
         if decision_match_strict_line:
             decision = decision_match_strict_line.group(1).upper()
-            if self.log_verbose: logger.debug(f"Fallback Parser: Found decision '{decision}' via strict line search.")
+            if self.log_verbose: logger.debug(f"🤖 Fallback Parser: Found decision '{decision}' via strict line search.")
         else:
             decision_match_lenient_line = re.search(r"^.*?\W*Decision\W*:\s*\**?(BUY|SELL|HOLD)\**?", llm_response, re.IGNORECASE | re.MULTILINE)
             if decision_match_lenient_line:
                 decision = decision_match_lenient_line.group(1).upper()
-                if self.log_verbose: logger.debug(f"Fallback Parser: Found decision '{decision}' via lenient line search.")
+                if self.log_verbose: logger.debug(f"🤖 Fallback Parser: Found decision '{decision}' via lenient line search.")
             elif re.search(r"^\s*SELL\s*$", llm_response, re.IGNORECASE | re.MULTILINE) or ("SELL" in response_upper and "BUY" not in response_upper and "HOLD" not in response_upper):
                 decision = "SELL"
-                if self.log_verbose: logger.debug("Fallback Parser: Deduced 'SELL' via keyword dominance.")
+                if self.log_verbose: logger.debug("🤖 Fallback Parser: Deduced 'SELL' via keyword dominance.")
             elif re.search(r"^\s*BUY\s*$", llm_response, re.IGNORECASE | re.MULTILINE) or ("BUY" in response_upper and "SELL" not in response_upper and "HOLD" not in response_upper):
                 decision = "BUY"
-                if self.log_verbose: logger.debug("Fallback Parser: Deduced 'BUY' via keyword dominance.")
+                if self.log_verbose: logger.debug("🤖 Fallback Parser: Deduced 'BUY' via keyword dominance.")
             elif re.search(r"^\s*HOLD\s*$", llm_response, re.IGNORECASE | re.MULTILINE):
                 decision = "HOLD"
-                if self.log_verbose: logger.debug("Fallback Parser: Found 'HOLD' on its own line.")
+                if self.log_verbose: logger.debug("🤖 Fallback Parser: Found 'HOLD' on its own line.")
             else:
-                 if self.log_verbose: logger.debug(f"Fallback Parser: No clear decision keyword found. Defaulting to '{decision}'.")
+                 if self.log_verbose: logger.debug(f"🤖 Fallback Parser: No clear decision keyword found. Defaulting to '{decision}'.")
 
         conf_match_strict_line = re.search(r"^\W*\*?\s*Confidence(?:\s*Score)?\s*\*?\W*:\s*(\d{1,3})\%?", llm_response, re.IGNORECASE | re.MULTILINE)
         if conf_match_strict_line:
             try: 
                 confidence = max(0, min(100, int(conf_match_strict_line.group(1))))
-                if self.log_verbose: logger.debug(f"Fallback Parser: Found confidence '{confidence}' via strict line search.")
-            except ValueError: logger.warning(f"Fallback Parser: Strict confidence line found, but failed to parse number '{conf_match_strict_line.group(1)}'.")
+                if self.log_verbose: logger.debug(f"🤖 Fallback Parser: Found confidence '{confidence}' via strict line search.")
+            except ValueError: logger.warning(f"🤖 Fallback Parser: Strict confidence line found, but failed to parse number '{conf_match_strict_line.group(1)}'.")
         else:
             conf_match_lenient_line = re.search(r"^.*?\W*Confidence(?:\s*Score)?\s*\*?\W*:\s*(\d{1,3})\%?", llm_response, re.IGNORECASE | re.MULTILINE)
             if conf_match_lenient_line:
                  try: 
                      confidence = max(0, min(100, int(conf_match_lenient_line.group(1))))
-                     if self.log_verbose: logger.debug(f"Fallback Parser: Found confidence '{confidence}' via lenient line search.")
-                 except ValueError: logger.warning(f"Fallback Parser: Lenient confidence line found, but failed to parse number '{conf_match_lenient_line.group(1)}'.")
+                     if self.log_verbose: logger.debug(f"🤖 Fallback Parser: Found confidence '{confidence}' via lenient line search.")
+                 except ValueError: logger.warning(f"🤖 Fallback Parser: Lenient confidence line found, but failed to parse number '{conf_match_lenient_line.group(1)}'.")
             else:
                  conf_fallback_anywhere = re.search(r"Confidence.*?[:\s](\d{1,3})", llm_response, re.IGNORECASE | re.DOTALL)
                  if conf_fallback_anywhere:
                      try: 
                          confidence = max(0, min(100, int(conf_fallback_anywhere.group(1))))
-                         if self.log_verbose: logger.debug(f"Fallback Parser: Found confidence '{confidence}' via general fallback search.")
-                     except ValueError: logger.warning(f"Fallback Parser: General confidence search found, but failed to parse number '{conf_fallback_anywhere.group(1)}'.")
+                         if self.log_verbose: logger.debug(f"🤖 Fallback Parser: Found confidence '{confidence}' via general fallback search.")
+                     except ValueError: logger.warning(f"🤖 Fallback Parser: General confidence search found, but failed to parse number '{conf_fallback_anywhere.group(1)}'.")
                  else:
-                     if self.log_verbose: logger.debug(f"Fallback Parser: No confidence value found. Defaulting to {confidence}.")
+                     if self.log_verbose: logger.debug(f"🤖 Fallback Parser: No confidence value found. Defaulting to {confidence}.")
 
         explanation_match = re.search(r"^\W*\*?\s*(?:Explanation|Reasoning|Justification)\s*\*?\W*:\s*(.*)", llm_response, re.IGNORECASE | re.MULTILINE | re.DOTALL)
         if explanation_match:
@@ -503,7 +503,7 @@ class AIDecisionMaker:
             explanation_text = re.sub(r"^\W*\*?\s*Decision\s*\*?\W*:.*?\n?", "", explanation_text, count=1, flags=re.IGNORECASE | re.MULTILINE).strip()
             explanation_text = re.sub(r"^\W*\*?\s*Confidence(?:\s*Score)?\s*\*?\W*:.*?\n?", "", explanation_text, count=1, flags=re.IGNORECASE | re.MULTILINE).strip()
             explanation = explanation_text
-            if self.log_verbose: logger.debug("Fallback Parser: Found explanation using header keyword.")
+            if self.log_verbose: logger.debug("🤖 Fallback Parser: Found explanation using header keyword.")
         else:
             lines = llm_response.splitlines()
             start_index, last_marker_line_index, found_marker = 0, -1, False
@@ -517,10 +517,10 @@ class AIDecisionMaker:
                     start_index += 1
                 if start_index < len(lines):
                     explanation = "\n".join(lines[start_index:]).strip()
-                    if self.log_verbose: logger.debug("Fallback Parser: Found explanation by splitting after last Decision/Confidence marker.")
+                    if self.log_verbose: logger.debug("🤖 Fallback Parser: Found explanation by splitting after last Decision/Confidence marker.")
                 else:
                     explanation = "" 
-                    if self.log_verbose: logger.debug("Fallback Parser: Decision/Confidence markers found, but no subsequent text for explanation.")
+                    if self.log_verbose: logger.debug("🤖 Fallback Parser: Decision/Confidence markers found, but no subsequent text for explanation.")
 
         explanation = re.sub(r'\n{3,}', '\n\n', explanation).strip()
         if not explanation: explanation = "(Explanation could not be extracted)"
