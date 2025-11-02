@@ -1,3 +1,5 @@
+-- path: sql/04_create_portfolio.sql
+
 -- Original portfolio table creation
 CREATE TABLE IF NOT EXISTS portfolio (
     id SERIAL PRIMARY KEY,
@@ -12,7 +14,8 @@ CREATE TABLE IF NOT EXISTS portfolio (
     tip NUMERIC,                      -- Tip associated with this tx
     profit NUMERIC,                   -- Profit/Loss for sell tx (net_sol_received - cost_basis)
     status TEXT,                      -- Status of the original buy position ('active', 'closed')
-    reason TEXT,                      -- Reason for sell ('Stop Loss', 'First TP', 'Second TP', 'Trailing SL', 'Breakeven SL', etc.)
+    reason TEXT,                      -- Reason for sell ('Stop Loss', 'First TP', etc.)
+    buy_reason TEXT,                  -- <<< ADD THIS LINE: Reason for buy ('Rule-Based', 'AI-Advised')
 
     -- Fields primarily relevant for the original 'buy' entry
     total_investment_sol NUMERIC,     -- Total SOL invested in this position (including fees)

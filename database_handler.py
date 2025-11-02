@@ -608,25 +608,25 @@ class DatabaseClient:
 
     # --- NEW METHODS for AI Integration ---
 
-    async def insert_ai_decision(self, mint: str, context: str, decision: str, confidence: int, explanation: Optional[str] = None, data_snapshot: Optional[dict] = None, prompt_hash: Optional[str] = None, conn=None):
-        """Inserts a new AI decision record."""
-        query = """
-            INSERT INTO ai_decisions
-            (mint, decision_context, decision, confidence, explanation, data_snapshot, prompt_hash)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-        """
-        connection = conn or await self.pool.acquire()
-        try:
-            # Convert data_snapshot dict to JSON string if provided
-            data_snapshot_json = json.dumps(data_snapshot, default=str) if data_snapshot else None
-            await connection.execute(query, mint, context, decision, confidence, explanation, data_snapshot_json, prompt_hash)
-            logger.debug(f"Stored AI decision for {mint}: {decision} ({confidence}%)")
-        except Exception as e:
-            logger.error(f":police_car_light: Error inserting AI decision for {mint}: {e}", exc_info=True)
-            if not conn: raise # Re-raise if we acquired the connection here
-        finally:
-            if not conn and connection:
-                await self.pool.release(connection)
+    # async def insert_ai_decision(self, mint: str, context: str, decision: str, confidence: int, explanation: Optional[str] = None, data_snapshot: Optional[dict] = None, prompt_hash: Optional[str] = None, conn=None):
+    #     """Inserts a new AI decision record."""
+    #     query = """
+    #         INSERT INTO ai_decisions
+    #         (mint, decision_context, decision, confidence, explanation, data_snapshot, prompt_hash)
+    #         VALUES ($1, $2, $3, $4, $5, $6, $7)
+    #     """
+    #     connection = conn or await self.pool.acquire()
+    #     try:
+    #         # Convert data_snapshot dict to JSON string if provided
+    #         data_snapshot_json = json.dumps(data_snapshot, default=str) if data_snapshot else None
+    #         await connection.execute(query, mint, context, decision, confidence, explanation, data_snapshot_json, prompt_hash)
+    #         logger.debug(f"Stored AI decision for {mint}: {decision} ({confidence}%)")
+    #     except Exception as e:
+    #         logger.error(f":police_car_light: Error inserting AI decision for {mint}: {e}", exc_info=True)
+    #         if not conn: raise # Re-raise if we acquired the connection here
+    #     finally:
+    #         if not conn and connection:
+    #             await self.pool.release(connection)
 
     async def update_token_ai_eval_timestamp(self, mint: str, timestamp: datetime, conn=None):
         """Updates the ai_last_evaluation_ts for a token."""
@@ -645,7 +645,7 @@ class DatabaseClient:
         """Fetches the most recent AI decision record for a given mint."""
         query = """
             SELECT decision, confidence, evaluation_timestamp
-            FROM ai_decisions
+            FROM ai_decision_memory  -- <--- THIS IS THE FIX
             WHERE mint = $1
             ORDER BY evaluation_timestamp DESC
             LIMIT 1;
@@ -938,15 +938,15 @@ class DatabaseClient:
             if not conn and connection:
                 await self.pool.release(connection)
 
-    async def insert_portfolio_buy_record(self, mint: str, current_price: float, market_cap_sol: float, sol_base_amount: float, sol_price_usd: float, total_sol_investment: float, tokens_bought: float, buy_fee: float, buy_tip: float, initial_stop_loss_price: float, initial_tp_price: float, second_tp_price: float, timestamp: datetime, settings: dict, ai_context: Optional[dict] = None, conn=None):
+    async def insert_portfolio_buy_record(self, mint: str, current_price: float, market_cap_sol: float, sol_base_amount: float, sol_price_usd: float, total_sol_investment: float, tokens_bought: float, buy_fee: float, buy_tip: float, initial_stop_loss_price: float, initial_tp_price: float, second_tp_price: float, timestamp: datetime, settings: dict, buy_reason: str, ai_context: Optional[dict] = None, conn=None): # <<< 1. ADD buy_reason: str
         """Inserts a buy transaction record into the portfolio, including settings."""
         query = """
             INSERT INTO portfolio
                 (mint, tx_type, price, market_cap, sol_amount, sol_price_usd, total_investment_sol, tokens,
                  fee, tip, remaining_tokens, stop_loss_price, highest_price,
                  initial_tp_price, second_tp_price, first_tp_hit,
-                 status, timestamp, initial_tokens, settings)
-            VALUES ($1, 'buy', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, FALSE, 'active', $15, $16, $17)
+                 status, timestamp, initial_tokens, settings, buy_reason) -- <<< 2. ADD buy_reason
+            VALUES ($1, 'buy', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, FALSE, 'active', $15, $16, $17, $18) -- <<< 3. ADD $18
         """
         connection = conn or await self.pool.acquire()
         try:
@@ -958,7 +958,7 @@ class DatabaseClient:
                                    initial_stop_loss_price, current_price, # highest_price = current_price
                                    initial_tp_price, second_tp_price,
                                    timestamp, tokens_bought, # initial_tokens
-                                   settings_json) # settings
+                                   settings_json, buy_reason) # <<< 4. PASS buy_reason
         finally:
             if not conn and connection:
                 await self.pool.release(connection)

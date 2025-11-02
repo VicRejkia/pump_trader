@@ -81,7 +81,7 @@ async def play_sell_tp_sound_async():
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, play_sell_tp_sound)
 
-def format_buy_order_log(state, name: str, mint: str, price_per_token: float, tokens_bought: float, market_cap: float, sol_price: float, total_investment: float, for_telegram: bool = False) -> str:
+def format_buy_order_log(state, name: str, mint: str, price_per_token: float, tokens_bought: float, market_cap: float, sol_price: float, total_investment: float, buy_reason: str, for_telegram: bool = False) -> str:
     """Formats the log message for a buy order with platform-specific links."""
     # URL construction
     base_url = "https://neo.bullx.io/terminal?chainId=1399811149&address="
@@ -98,6 +98,12 @@ def format_buy_order_log(state, name: str, mint: str, price_per_token: float, to
 
     # Handle name display with formatted mint
     token_display = f"{name} - {formatted_mint}" if name else formatted_mint
+
+    # <<< 2. ADD REASON LOGIC >>>
+    reason_emoji = "🧠" if buy_reason == "AI-Advised" else "⚙️"
+    reason_text = f"│ {reason_emoji} Reason: {buy_reason}\n"
+    # <<< END REASON LOGIC >>>
+    
     if sol_price:
         price_usd = price_per_token * sol_price
         market_cap_usd = market_cap * sol_price
@@ -105,6 +111,7 @@ def format_buy_order_log(state, name: str, mint: str, price_per_token: float, to
         return (
             f"★★★ 💲 BUY Order 💲 ★★★\n"
             f"│ Token: {token_display}\n"
+            f"{reason_text}"  # <<< 3. ADDED LINE
             f"│ Price: {price_per_token:.8f} SOL (${price_usd:.8f} USD)\n"
             f"│ Market Cap: {market_cap:,.2f} SOL (${market_cap_usd:,.2f} USD)\n"
             f"│ Tokens Bought: {tokens_bought}\n"
@@ -115,6 +122,7 @@ def format_buy_order_log(state, name: str, mint: str, price_per_token: float, to
         return (
             f"★★★ BUY Order ★★★\n"
             f"│ Token: {token_display}\n"
+            f"{reason_text}"  # <<< 3. ADDED LINE
             f"│ Price: {price_per_token:.8f} SOL\n"
             f"│ Market Cap: {market_cap:,.2f} SOL\n"
             f"│ Tokens Bought: {tokens_bought}\n"

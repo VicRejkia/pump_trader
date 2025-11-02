@@ -215,6 +215,8 @@ class TradingManager:
                     logger.warning(f"Skipping buy for {mint} due to invalid opportunity price: {opportunity_price}")
                     continue
 
+                buy_reason = "Rule-Based" # Default reason
+
                 ai_advice_used = None
                 if self.config.get('AI_DECISION_MAKING_ENABLED', False) and self.ai_decision_maker:
                     async with self.db.pool.acquire() as conn_ai:
@@ -229,31 +231,32 @@ class TradingManager:
 
                         if advice_age <= max_staleness:
                             ai_advice_used = {'decision': ai_decision, 'confidence': ai_confidence, 'timestamp': ai_timestamp.isoformat()}
-                            logger.debug(f"🤖 AI Advice ({mint}): {ai_decision} ({ai_confidence}%) - Age: {advice_age.total_seconds():.0f}s")
+                            logger.debug(f"🧠 AI Advice ({mint}): {ai_decision} ({ai_confidence}%) - Age: {advice_age.total_seconds():.0f}s")
                             hold_veto_threshold = self.config.get('AI_BUY_HOLD_CONFIDENCE_THRESHOLD', 60)
                             if ai_decision == 'HOLD' and ai_confidence >= hold_veto_threshold:
-                                logger.info(f"🤖 AI advised HOLD (Confidence: {ai_confidence} >= {hold_veto_threshold}) for potential buy of {mint}. Deferring purchase.")
+                                logger.info(f"🧠 AI advised HOLD (Confidence: {ai_confidence} >= {hold_veto_threshold}) for potential buy of {mint}. Deferring purchase.")
                                 continue 
-                            if ai_decision == 'BUY':
-                                logger.debug(f"🤖 AI confirmed potential BUY for {mint} (Confidence: {ai_confidence}).")
+                            if ai_decision.upper() in ['BUY', 'REBUY']:
+                                logger.debug(f"🧠 AI confirmed potential BUY for {mint} (Confidence: {ai_confidence}).")
+                                buy_reason = "AI-Advised"
                         else:
-                            logger.debug(f"🤖 AI advice for {mint} is stale (Age: {advice_age.total_seconds():.0f}s > {max_staleness.total_seconds():.0f}s). Ignoring.")
+                            logger.debug(f"🧠 AI advice for {mint} is stale (Age: {advice_age.total_seconds():.0f}s > {max_staleness.total_seconds():.0f}s). Ignoring.")
                     else:
-                        logger.debug(f"🤖 AI advice for {mint} buy check unavailable. Using rule-based logic only.")
+                        logger.debug(f"🧠 AI advice for {mint} buy check unavailable. Using rule-based logic only.")
                 
                 if self.config.get('USE_TREND_REVERSAL_CONFIRMATION', False):
                     if not await self._is_trend_reversal_confirmed(mint):
                         logger.debug(f"Trend reversal not confirmed for {mint}. Skipping buy opportunity.")
                         continue
                 
-                await self.execute_buy(mint, opportunity_price, opportunity_market_cap_sol, ai_advice_used)
+                await self.execute_buy(mint, opportunity_price, opportunity_market_cap_sol, buy_reason, ai_advice_used)
                 await asyncio.sleep(0.1) 
 
         except Exception as e:
             logger.error(f"❌ Error in check_trading_opportunities: {e}", exc_info=True)
             await asyncio.sleep(5) 
 
-    async def execute_buy(self, mint: str, trigger_price: float, market_cap_sol_at_trigger: float, ai_context: Optional[dict] = None):
+    async def execute_buy(self, mint: str, trigger_price: float, market_cap_sol_at_trigger: float, buy_reason: str, ai_context: Optional[dict] = None):
         """🛒 Dispatches buy execution based on TRADING_MODE. (Unchanged)"""
         trading_mode = self.config['TRADING_MODE'].lower()
 
@@ -317,6 +320,7 @@ class TradingManager:
                         
                         sim_buy_settings = {
                             "mode": "simulate", "simulated_price": trigger_price,
+                            "buy_reason": buy_reason,
                             "sol_to_buy_config": self.config['SOL_TO_BUY'],
                             "initial_stop_loss_percent_config": self.config['INITIAL_STOP_LOSS_PERCENT'],
                             "first_sell_percent_config": self.config['FIRST_SELL_PERCENT'],
@@ -335,7 +339,7 @@ class TradingManager:
                             buy_fee=sim_buy_fee, buy_tip=sim_buy_tip,
                             initial_stop_loss_price=initial_sl_price_calc,
                             initial_tp_price=initial_tp1_price_calc, second_tp_price=second_tp_price_calc,
-                            timestamp=datetime.now(timezone.utc), settings=sim_buy_settings, ai_context=ai_context, conn=conn_sim
+                            timestamp=datetime.now(timezone.utc), settings=sim_buy_settings, buy_reason=buy_reason, ai_context=ai_context, conn=conn_sim
                         )
                         await self.db.log_completed_trade(
                             token_address=mint,
@@ -353,11 +357,12 @@ class TradingManager:
                         
                         token_name_row = await self.db.get_token_name(mint, conn_sim)
                         token_name = token_name_row['name'] if token_name_row else mint
-                        log_msg = format_buy_order_log(self.state, name=token_name, mint=mint, price_per_token=trigger_price, tokens_bought=tokens_bought_calculated, market_cap=market_cap_sol_at_trigger, sol_price=sol_price_usd, total_investment=sim_total_investment)
+
+                        log_msg = format_buy_order_log(self.state, name=token_name, mint=mint, price_per_token=trigger_price, tokens_bought=tokens_bought_calculated, market_cap=market_cap_sol_at_trigger, sol_price=sol_price_usd, total_investment=sim_total_investment, buy_reason=buy_reason)
                         logger.info(log_msg)
                         if self.config.get('PLAY_BUY_SOUND'): asyncio.create_task(play_buy_opportunity_sound())
                         if self.config.get('TELEGRAM_INTERACTION'):
-                            telegram_msg  = format_buy_order_log(self.state, name=token_name, mint=mint, price_per_token=trigger_price, tokens_bought=tokens_bought_calculated, market_cap=market_cap_sol_at_trigger, sol_price=sol_price_usd, total_investment=sim_total_investment, for_telegram=True)
+                            telegram_msg  = format_buy_order_log(self.state, name=token_name, mint=mint, price_per_token=trigger_price, tokens_bought=tokens_bought_calculated, market_cap=market_cap_sol_at_trigger, sol_price=sol_price_usd, total_investment=sim_total_investment, buy_reason=buy_reason, for_telegram=True)
                             asyncio.create_task(send_telegram_message(telegram_msg))
                     except Exception as e_sim:
                         logger.error(f"[SIMULATE MODE] Buy DB operation failed for {mint}: {e_sim}", exc_info=True)
@@ -403,6 +408,7 @@ class TradingManager:
                         second_tp_price_live = executed_price * (1 + float(self.config['SECOND_TAKE_PROFIT_PERCENT']) / 100.0)
                         live_buy_settings = {
                             "mode": trading_mode, "signature": signature,
+                            "buy_reason": buy_reason,
                             "api_executed_price": executed_price, "api_tokens_bought": tokens_bought_actual,
                             "api_priority_fee_sent": api_priority_fee, "api_slippage_sent": api_slippage,
                             "sol_to_buy_config": self.config['SOL_TO_BUY'],
@@ -424,7 +430,7 @@ class TradingManager:
                             buy_fee=0, buy_tip=api_priority_fee, 
                             initial_stop_loss_price=initial_sl_price_live,
                             initial_tp_price=initial_tp1_price_live, second_tp_price=second_tp_price_live,
-                            timestamp=datetime.now(timezone.utc), settings=live_buy_settings, ai_context=ai_context, conn=conn_live
+                            timestamp=datetime.now(timezone.utc), settings=live_buy_settings, buy_reason=buy_reason, ai_context=ai_context, conn=conn_live
                         )
                         await self.db.log_completed_trade(
                             token_address=mint,
@@ -441,11 +447,11 @@ class TradingManager:
                         await self.state.update_sol_balance(-total_sol_outflow_for_pnl)
                         token_name_row = await self.db.get_token_name(mint, conn_live)
                         token_name = token_name_row['name'] if token_name_row else mint
-                        log_msg = format_buy_order_log(self.state, name=token_name, mint=mint, price_per_token=executed_price, tokens_bought=tokens_bought_actual, market_cap=market_cap_sol_at_trigger, sol_price=sol_price_usd, total_investment=sol_to_spend_on_tokens)
+                        log_msg = format_buy_order_log(self.state, name=token_name, mint=mint, price_per_token=executed_price, tokens_bought=tokens_bought_actual, market_cap=market_cap_sol_at_trigger, sol_price=sol_price_usd, total_investment=sol_to_spend_on_tokens, buy_reason=buy_reason)
                         logger.info(f"[{trading_mode.upper()}] {log_msg}")
                         if self.config.get('PLAY_BUY_SOUND'): asyncio.create_task(play_buy_opportunity_sound())
                         if self.config.get('TELEGRAM_INTERACTION'):
-                            telegram_msg  = format_buy_order_log(self.state, name=token_name, mint=mint, price_per_token=executed_price, tokens_bought=tokens_bought_actual, market_cap=market_cap_sol_at_trigger, sol_price=sol_price_usd, total_investment=sol_to_spend_on_tokens, for_telegram=True)
+                            telegram_msg  = format_buy_order_log(self.state, name=token_name, mint=mint, price_per_token=executed_price, tokens_bought=tokens_bought_actual, market_cap=market_cap_sol_at_trigger, sol_price=sol_price_usd, total_investment=sol_to_spend_on_tokens, buy_reason=buy_reason, for_telegram=True)
                             telegram_msg += f"\nMode: {trading_mode.upper()}\nSignature: {signature}"
                             asyncio.create_task(send_telegram_message(telegram_msg))
             else:
@@ -676,7 +682,7 @@ class TradingManager:
                     asyncio.create_task(
                         self.ai_decision_maker.add_decision_snapshot_to_memory(sell_snapshot_data, sell_decision_info)
                     )
-                    logger.debug(f"🤖 AI Feedback: Queued sell outcome for {mint} (Reason: {reason}) to RAG memory.")
+                    logger.debug(f"🧠 AI Feedback: Queued sell outcome for {mint} (Reason: {reason}) to RAG memory.")
                 # --- END RAG FEEDBACK LOOP ---
 
                 if self.config.get('PLAY_SELL_SOUND'):
@@ -782,12 +788,13 @@ class TradingManager:
                             except (TypeError, ValueError, ZeroDivisionError):
                                 unrealized_pnl_str, pnl_emoji = "\tPnL: [bold yellow]error[/bold yellow]", "⚠️"
 
-                        logger.debug(f":abacus: Checking sell for {mint:<44} (ID: {pos_id:<4}) {pnl_emoji} ({token_data_source[:4]}) - Price: {safe_price:<12} MCap: {safe_mcap:<10} SOL {unrealized_pnl_str}")
+                        #logger.debug(f":abacus: Checking sell for {mint:<44} (ID: {pos_id:<4}) {pnl_emoji} ({token_data_source[:4]}) - Price: {safe_price:<12} MCap: {safe_mcap:<10} SOL {unrealized_pnl_str}")
 
                         ai_advice_used = None
                         ai_decision = None
                         ai_confidence = 0
                         is_ai_advice_valid = False 
+                        ai_log_part = "AI: N/A" # Default if no record
 
                         if self.config.get('AI_DECISION_MAKING_ENABLED', False) and self.ai_decision_maker:
                             ai_decision_record = await self.db.get_latest_ai_decision(mint, conn)
@@ -801,12 +808,15 @@ class TradingManager:
                                     ai_decision = ai_decision_record['decision']
                                     ai_confidence = ai_decision_record['confidence']
                                     ai_advice_used = {'decision': ai_decision, 'confidence': ai_confidence, 'timestamp': ai_timestamp.isoformat()}
-                                    logger.debug(f"🤖 AI Advice ({mint}): {ai_decision} ({ai_confidence}%) - Age: {advice_age.total_seconds():.0f}s")
+                                    ai_log_part = f"AI: {ai_decision} ({ai_confidence}%) {advice_age.total_seconds():.0f}s"
                                 else:
-                                    logger.debug(f"🤖 AI advice for {mint} is stale (Age: {advice_age.total_seconds():.0f}s > {max_staleness.total_seconds():.0f}s). Ignoring.")
-                            else:
-                                logger.debug(f"🤖 AI advice for {mint} sell check unavailable. Using rule-based logic only.")
+                                    ai_log_part = f"AI: Stale ({advice_age.total_seconds():.0f}s)"
                         
+                        logger.debug(
+                            f":abacus: Sell check {mint:<44} (ID: {pos_id:<4}) {pnl_emoji} ({token_data_source[:4]}) "
+                            f"Price: {safe_price:<12} MCap: {safe_mcap:<10} SOL {unrealized_pnl_str} | "
+                            f"{ai_log_part}"
+                        )   
                         if current_price_to_use is None or current_price_to_use <= 0:
                             continue
 
@@ -889,28 +899,28 @@ class TradingManager:
                         if is_ai_advice_valid:
                             if rule_based_sell_triggered:
                                 if ai_decision == 'SELL':
-                                    logger.debug(f"🤖 AI confirmed rule-based SELL trigger ({rule_reason}) for {mint} (Confidence: {ai_confidence}).")
+                                    logger.debug(f"🧠 AI confirmed rule-based SELL trigger ({rule_reason}) for {mint} (Confidence: {ai_confidence}).")
                                     sell_reason = rule_reason
                                 elif ai_decision == 'HOLD':
                                     override_threshold = self.config.get('AI_HOLD_OVERRIDE_CONFIDENCE_THRESHOLD', 85)
                                     can_override = rule_reason not in ["Stop Loss", "Emergency SL (MCap)", "Emergency SL (No Volume)"]
                                     if can_override and ai_confidence >= override_threshold:
-                                        logger.warning(f"🤖 AI advised HOLD (Confidence: {ai_confidence} >= {override_threshold}), overriding rule-based sell trigger ({rule_reason}) for {mint} this cycle.")
+                                        logger.warning(f"🧠 AI advised HOLD (Confidence: {ai_confidence} >= {override_threshold}), overriding rule-based sell trigger ({rule_reason}) for {mint} this cycle.")
                                         continue 
                                     else:
-                                        logger.debug(f"🤖 AI advised HOLD (Confidence: {ai_confidence}) but rule ({rule_reason}) is critical or confidence too low. Proceeding with rule-based sell.")
+                                        logger.debug(f"🧠 AI advised HOLD (Confidence: {ai_confidence}) but rule ({rule_reason}) is critical or confidence too low. Proceeding with rule-based sell.")
                                         sell_reason = rule_reason
                             else:
                                 if ai_decision == 'SELL':
                                     trigger_threshold = self.config.get('AI_SELL_TRIGGER_CONFIDENCE_THRESHOLD', 75)
                                     if ai_confidence >= trigger_threshold:
-                                        logger.info(f"🤖 AI advised SELL (Confidence: {ai_confidence} >= {trigger_threshold}) for {mint}, triggering early sell despite no rule match.")
+                                        logger.info(f"🧠 AI advised SELL (Confidence: {ai_confidence} >= {trigger_threshold}) for {mint}, triggering early sell despite no rule match.")
                                         sell_reason = "AI Triggered Sell"
                                         trigger_values_for_log = {"ai_confidence_threshold": trigger_threshold}
-                                    else:
-                                         logger.debug(f"🤖 AI advised SELL but confidence ({ai_confidence}) is below threshold ({trigger_threshold}). Holding based on rules.")
-                                elif ai_decision == 'HOLD':
-                                    logger.debug(f"🤖 AI confirmed HOLD for {mint} (Confidence: {ai_confidence}), aligning with rules.")
+                                    #else:
+                                         #logger.debug(f"🧠 AI advised SELL but confidence ({ai_confidence}) is below threshold ({trigger_threshold}). Holding based on rules.")
+                                #elif ai_decision == 'HOLD':
+                                    #logger.debug(f"🧠 AI confirmed HOLD for {mint} (Confidence: {ai_confidence}), aligning with rules.")
                         elif rule_based_sell_triggered:
                             sell_reason = rule_reason
 

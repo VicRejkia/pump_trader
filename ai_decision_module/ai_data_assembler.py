@@ -43,7 +43,7 @@ def safe_pct_change(old, new) -> float:
         if old_f == 0: return 0.0
         return ((new_f / old_f) - 1) * 100.0
     except (ValueError, TypeError, ZeroDivisionError) as e:
-        logger.warning(f"🤖 safe_pct_change error: old={old}, new={new}, error={e}")
+        logger.warning(f"🧠 safe_pct_change error: old={old}, new={new}, error={e}")
         return 0.0
 
 async def check_uri_status(uri: str | None) -> str:
@@ -57,9 +57,9 @@ async def check_uri_status(uri: str | None) -> str:
             else: return f"Error (HTTP {response.status_code})"
     except httpx.TimeoutException: return "Error (Timeout)"
     except httpx.RequestError as e:
-        logger.debug(f"🤖 URI check request error for {uri}: {e}"); return "Error (Request Failed)"
+        logger.debug(f"🧠 URI check request error for {uri}: {e}"); return "Error (Request Failed)"
     except Exception as e:
-        logger.warning(f"🤖 Unexpected error checking URI {uri}: {e}", exc_info=True); return "Error (Unknown)"
+        logger.warning(f"🧠 Unexpected error checking URI {uri}: {e}", exc_info=True); return "Error (Unknown)"
 
 def summarize_score_history(history_records: list, score_field: str, time_field: str, lookback_hours: float = 1.0) -> dict:
     """Summarizes score history (Rugcheck or Social) (Unchanged)."""
@@ -145,7 +145,7 @@ def summarize_score_history(history_records: list, score_field: str, time_field:
         }
         return final_result
     except Exception as e:
-        logger.error(f"🤖 Error in summarize_score_history for {score_field}: {e}", exc_info=True)
+        logger.error(f"🧠 Error in summarize_score_history for {score_field}: {e}", exc_info=True)
         return default_result
 
 def summarize_market_dynamics(history_records: list, source: str, lookback_mins: int = 15) -> dict:
@@ -163,7 +163,7 @@ def summarize_market_dynamics(history_records: list, source: str, lookback_mins:
             required_cols = ['price_change_m5', 'volume_m5', 'liquidity_usd', 'buys_m5', 'sells_m5']
             numeric_cols = ['price_change_m5', 'volume_m5', 'liquidity_usd', 'buys_m5', 'sells_m5']
         else:
-            logger.warning(f"🤖 Market Dynamics: Unknown source '{source}'."); return default_summary
+            logger.warning(f"🧠 Market Dynamics: Unknown source '{source}'."); return default_summary
         
         for col in required_cols:
             if col not in df.columns: df[col] = np.nan
@@ -239,7 +239,7 @@ def summarize_market_dynamics(history_records: list, source: str, lookback_mins:
         summary['market_dynamics_summary'] = ", ".join(market_dynamics_parts) if market_dynamics_parts else "N/A"
         return summary
     except Exception as e:
-        logger.error(f"🤖 Error summarizing market dynamics for {source}: {e}", exc_info=True)
+        logger.error(f"🧠 Error summarizing market dynamics for {source}: {e}", exc_info=True)
         return {'market_dynamics_summary': "Error calculating dynamics"}
 
 def summarize_trade_history(history_records: list, max_events: int = 5) -> str:
@@ -272,7 +272,7 @@ def summarize_trade_history(history_records: list, max_events: int = 5) -> str:
             summary_parts.append(f"- ... (truncated, showing last {max_events} of {len(df)} total events)")
         return "\n".join(summary_parts)
     except Exception as e:
-        logger.error(f"🤖 Error summarizing trade history: {e}", exc_info=True)
+        logger.error(f"🧠 Error summarizing trade history: {e}", exc_info=True)
         return "Error generating trade history summary."
 
 # --- Main Data Fetching Function ---
@@ -280,7 +280,7 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
     """
     Fetches and processes all necessary data for a given token mint (Unchanged).
     """
-    logger.info(f"🤖 Fetching comprehensive data for token {mint}...")
+    logger.info(f"🧠 Fetching comprehensive data for token {mint}...")
     async with db.pool.acquire() as conn:
         # 1. Basic Token Info & Context
         token_info = await conn.fetchrow(
@@ -291,10 +291,10 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
                  "SELECT name, symbol, 'PUMP' as data_source, traderpublickey, timestamp, uri FROM tokens_backup WHERE mint = $1", mint
             )
             if not token_info:
-                logger.error(f"🤖 Token {mint} not found in 'tokens' or 'tokens_backup' table.")
-                raise ValueError(f"🤖 Token {mint} not found in 'tokens' or 'tokens_backup' table.")
+                logger.error(f"🧠 Token {mint} not found in 'tokens' or 'tokens_backup' table.")
+                raise ValueError(f"🧠 Token {mint} not found in 'tokens' or 'tokens_backup' table.")
             else:
-                 logger.warning(f"🤖  {mint} found in backup table. Proceeding with backup data.")
+                 logger.warning(f"🧠  {mint} found in backup table. Proceeding with backup data.")
 
         source, name, symbol, creator_wallet = token_info['data_source'], token_info['name'], token_info['symbol'], token_info['traderpublickey']
         token_creation_ts = ensure_datetime(token_info['timestamp'])
@@ -321,7 +321,7 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
         if current_mcap_sol and sol_price and sol_price > 0:
             current_mcap_usd = float(current_mcap_sol) * sol_price
         elif current_price_sol is None or current_price_sol <= 0:
-            logger.warning(f"🤖 Both Price and Market Cap in SOL missing or invalid for {mint}. Setting USD Market Cap to 0.")
+            logger.warning(f"🧠 Both Price and Market Cap in SOL missing or invalid for {mint}. Setting USD Market Cap to 0.")
         
         # 4. Fetch Score Histories
         rugcheck_hist_raw = await conn.fetch(
@@ -384,7 +384,7 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
                               volatility_series = calculate_volatility(price_series, window=vol_window)
                               if not volatility_series.empty: volatility = volatility_series.iloc[-1]
         else:
-            logger.warning(f"🤖 No unified market history available for {mint} to calculate volatility.")
+            logger.warning(f"🧠 No unified market history available for {mint} to calculate volatility.")
 
         # 8. Assemble Final Data Dictionary
         current_data = {
@@ -433,7 +433,7 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
             current_data['dex_volume_trend_15m'] = market_summary.get('dex_volume_trend_15m', "N/A")
             current_data['dex_liquidity_trend_30m'] = market_summary.get('dex_liquidity_trend_30m', "N/A")
 
-        logger.info(f"🤖 Successfully assembled comprehensive data package for {mint}.")
+        logger.info(f"🧠 Successfully assembled comprehensive data package for {mint}.")
         return current_data
 
 # --- Helper Function to Load Config Module to Dict ---
@@ -455,7 +455,7 @@ async def main(mint: str, include_explanation_in_output: bool = True):
     [MODIFIED] Main async function to run the data assembly and AI decision test.
     Now passes db_client to AIDecisionMaker and awaits get_trade_advice.
     """
-    setup_logging()
+    setup_logging('ai_data_assembler_test')
     logger.info(f"--- Starting AI Data Assembler Test for Mint: {mint} ---")
     state = GlobalState.get_instance()
     loaded_config = {}

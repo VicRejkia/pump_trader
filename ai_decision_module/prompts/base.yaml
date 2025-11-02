@@ -7,7 +7,7 @@ task_definition: |
   Based on the data below, determine the correct `DECISION:CONFIDENCE` value for the first line of your response, followed by the separator and your reasoning.
 
   **Current Decision Context:** {decision_context}
-  {context_specific_guidance} # Placeholder for BUY/SELL specific guidance
+  {context_specific_guidance}
 
 # --- LLM OUTPUT FORMAT INSTRUCTIONS ---
 output_format_instructions: |
@@ -30,7 +30,7 @@ trade_history_section: |
   - **Interpretation Guide for Trade History:**
     - Analyze the sequence and outcomes carefully. The `reason` for sells is critical.
     - **Tokens Still Held?** If the history shows only `BUY` or ends with `SELL` Reason: 'First TP', you *still hold tokens*. The context is `SELL/HOLD`. Evaluate if it's time to take further profit or cut losses based on current data.
-    - **All Tokens Sold?** If the last `SELL` event has a Reason like 'Stop Loss', 'Emergency SL (MCap)', 'Emergency SL (No Volume)', 'Trailing SL', 'Breakeven SL', 'Second TP', 'Trend Reversal (EMA Cross)', 'manual_override', or 'manual_override_all', then *all tokens have been sold*. The current context is likely `REBUY` (or potentially avoiding the token). Evaluate if conditions are favorable for re-entry.
+    - **All Tokens Sold?** If the last `SELL` event has a Reason like 'Stop Loss', 'Emergency SL (MCap)', 'Emergency SL (No Volume)', 'Trailing SL', 'Breakeven SL', 'Second TP', 'Trailing SL Hybrid', 'manual_override', or 'manual_override_all', then *all tokens have been sold*. The current context is likely `REBUY` (or potentially avoiding the token). Evaluate if conditions are favorable for re-entry.
     - Repeated 'Stop Loss' or negative profit sells suggest weakness or poor entry timing.
     - 'Take Profit' sells indicate past strength, but check if momentum continues.
     - 'Manual Override' sells mean external factors influenced the exit; consider if those factors might still apply.
