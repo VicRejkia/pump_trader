@@ -1,4 +1,4 @@
-# ai_data_assembler.py (formerly test_ai_decision_maker.py)
+# ai_data_assembler.py
 import sys
 import os
 import asyncio
@@ -24,9 +24,9 @@ from bot_logger import logger, setup_logging
 from database_handler import DatabaseClient
 from state_manager import GlobalState
 from utils import calculate_volatility, ensure_datetime
-from ai_decision_module.ai_decision_maker import AIDecisionMaker # <-- No change
+from ai_decision_module.ai_decision_maker import AIDecisionMaker 
 from config import config as config_module
-from config.config import MAX_TOKEN_COUNT_PER_CREATOR
+# (Removed MAX_TOKEN_COUNT_PER_CREATOR import)
 
 # --- Calculation Helper Functions ---
 # (safe_pct_change, check_uri_status, summarize_score_history,
@@ -278,7 +278,9 @@ def summarize_trade_history(history_records: list, max_events: int = 5) -> str:
 # --- Main Data Fetching Function ---
 async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
     """
-    Fetches and processes all necessary data for a given token mint (Unchanged).
+    [MODIFIED]
+    Fetches and processes all necessary data for a given token mint.
+    Now uses `get_creator_history_summary` instead of the old binary flag.
     """
     logger.info(f"🧠 Fetching comprehensive data for token {mint}...")
     async with db.pool.acquire() as conn:
@@ -300,9 +302,13 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
         token_creation_ts = ensure_datetime(token_info['timestamp'])
         uri = token_info['uri']
         token_age_minutes = (dt.datetime.now(dt.timezone.utc) - token_creation_ts).total_seconds() / 60 if token_creation_ts else None
-        creator_token_count = await conn.fetchval("SELECT token_count FROM creator_wallets WHERE wallet_address = $1", creator_wallet) or 0
-        max_creator_tokens = db.config.get('MAX_TOKEN_COUNT_PER_CREATOR', 50)
-        is_prolific_creator = creator_token_count > max_creator_tokens
+        
+        # --- MODIFICATION START ---
+        # Get the new rich creator summary from the database
+        # We pass 'conn' so it uses the existing connection/transaction
+        creator_summary_string = await db.get_creator_history_summary(creator_wallet, mint)
+        # --- MODIFICATION END ---
+        
         uri_status = await check_uri_status(uri)
 
         # 2. Determine Current Decision Context
@@ -392,7 +398,12 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
             'timestamp': dt.datetime.now(dt.timezone.utc).isoformat(),
             'decision_context': decision_context,
             'token_age_minutes': round(token_age_minutes, 1) if token_age_minutes is not None else None,
-            'is_prolific_creator': is_prolific_creator, 'uri_status': uri_status,
+            
+            # --- MODIFICATION START ---
+            'creator_history_summary': creator_summary_string, # ADD this
+            # --- MODIFICATION END ---
+            
+            'uri_status': uri_status,
             'price': float(current_price_sol) if current_price_sol is not None else 0.0,
             'market_cap': current_mcap_usd, 'volatility': volatility,
             **rugcheck_summary, **socials_summary,
@@ -452,8 +463,7 @@ def _config_module_to_dict(module) -> dict:
 # --- Main Test Execution ---
 async def main(mint: str, include_explanation_in_output: bool = True):
     """
-    [MODIFIED] Main async function to run the data assembly and AI decision test.
-    Now passes db_client to AIDecisionMaker and awaits get_trade_advice.
+    (Unchanged) Main async function to run the data assembly and AI decision test.
     """
     setup_logging('ai_data_assembler_test')
     logger.info(f"--- Starting AI Data Assembler Test for Mint: {mint} ---")
@@ -483,9 +493,8 @@ async def main(mint: str, include_explanation_in_output: bool = True):
             logger.warning("Could not pre-fetch SOL price from DB. Setting to 0.0.")
             await state.set_sol_price(0.0)
 
-        # --- MODIFICATION: Pass db_client to AIDecisionMaker ---
         ai = AIDecisionMaker(config=loaded_config, db_client=db)
-        # --- END MODIFICATION ---
+        ai._set_log_verbose(True)
 
         current_data = await fetch_comprehensive_token_data(db, mint)
         
@@ -493,9 +502,7 @@ async def main(mint: str, include_explanation_in_output: bool = True):
         # logger.info("\n" + json.dumps(current_data, indent=2, default=str))
         # logger.info(f"--- End Comprehensive Data ---")
 
-        # --- MODIFICATION: `await` the async call ---
         advice = await ai.get_trade_advice(current_data, include_explanation=include_explanation_in_output)
-        # --- END MODIFICATION ---
 
         logger.info(f"--- AI Advice Received for {mint} ---")
         logger.info(f"Decision:   {advice['decision']}")

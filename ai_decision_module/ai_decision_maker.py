@@ -36,9 +36,7 @@ class AIDecisionMaker:
         self.prompts_dir = self.config.get('_AI_PROMPTS_DIR', 'ai_decision_module/prompts')
         self.prompts = self._load_prompts()
         
-        # --- NEW: Verbose Logging Flag ---
         self.log_verbose = self.config.get('AI_LOG_VERBOSE', False)
-        # --- END NEW ---
         
         embedding_model_name = self.config.get('_AI_EMBEDDING_MODEL', 'all-MiniLM-L6-v2')
 
@@ -66,9 +64,7 @@ class AIDecisionMaker:
             """
             lines = []
             for line in content.splitlines():
-                # Remove end-of-line comments
                 line = line.split('#')[0]
-                # Only keep the line if it's not empty after removing comments
                 if line.strip():
                     lines.append(line)
             return '\n'.join(lines)
@@ -99,6 +95,11 @@ class AIDecisionMaker:
             logger.critical(f"🧠 Error loading or parsing prompts: {e}", exc_info=True)
             raise
 
+    def _set_log_verbose(self, verbose: bool):
+        """Sets the verbosity of AI logging."""
+        self.log_verbose = verbose
+        logger.info(f"🧠 AI Decision Maker log verbosity set to: {self.log_verbose}")
+
     async def embed_text(self, text: str) -> Optional[list]:
         """
         [REFACTORED] Generates sentence embeddings for the given text asynchronously.
@@ -118,10 +119,9 @@ class AIDecisionMaker:
 
     async def add_decision_snapshot_to_memory(self, snapshot_data: dict, decision_info: dict):
         """
-        [REFACTORED] Stores a snapshot of the market data, context, AI decision, and reasoning
+        [MODIFIED] Stores a snapshot of the market data, context, AI decision, and reasoning
         into the PostgreSQL `ai_decision_memory` table for future RAG retrieval.
         """
-        # (Data assembly section is unchanged)
         mcap_usd = snapshot_data.get('market_cap', 0)
         volatility = snapshot_data.get('volatility', 0)
         rug_score = snapshot_data.get('rugcheck_latest', 'N/A')
@@ -133,7 +133,11 @@ class AIDecisionMaker:
         mint = snapshot_data.get('mint', 'N/A')
         context = snapshot_data.get('decision_context', 'N/A')
         source = snapshot_data.get('source', 'N/A')
-        creator_prolific = snapshot_data.get('is_prolific_creator', False)
+        
+        # --- MODIFICATION START ---
+        creator_history = snapshot_data.get('creator_history_summary', 'N/A') # Use new summary
+        # --- MODIFICATION END ---
+        
         uri_status = snapshot_data.get('uri_status', 'N/A')
         market_summary = snapshot_data.get('market_dynamics_summary_str', 'N/A')
         trade_history = snapshot_data.get('trade_history_summary', 'N/A')
@@ -144,10 +148,14 @@ class AIDecisionMaker:
             explanation_snippet = full_explanation[:150] + ('...' if len(full_explanation) > 150 else '')
         else:
             full_explanation = None
+            
+        # --- MODIFICATION START ---
+        # Update situation_summary to use new creator history
         situation_summary = (
             f"Situation Snapshot at {timestamp} for {mint} ({context} context):\n"
             f"Source: {source}, MCap (USD): ${mcap_usd:,.0f}, Volatility: {volatility:.3f}\n"
-            f"Token Age: {token_age} mins, Creator: {'Prolific' if creator_prolific else 'Normal'}, URI: {uri_status}\n"
+            f"Token Age: {token_age} mins, URI: {uri_status}\n"
+            f"Creator History: {creator_history}\n" # MODIFIED
             f"Rug Score: {rug_score} (Trend: {rug_trend})\n"
             f"Social Score: {social_score} (Trend: {social_trend})\n"
             f"Market Dynamics Summary: {market_summary}\n"
@@ -155,6 +163,7 @@ class AIDecisionMaker:
             f"AI Decision: {decision_info.get('decision', 'N/A')} (Confidence: {decision_info.get('confidence', 'N/A')})\n"
             f"Reasoning Snippet: {explanation_snippet}\n"
         )
+        # --- MODIFICATION END ---
         
         embedding = await self.embed_text(situation_summary)
         if not embedding:
@@ -163,16 +172,21 @@ class AIDecisionMaker:
 
         snapshot_time_str = timestamp if isinstance(timestamp, str) else datetime.now(timezone.utc).isoformat()
         
+        # --- MODIFICATION START ---
+        # Update metadata_to_store to use new creator history
         metadata_to_store = {
             "mint": mint, "timestamp": snapshot_time_str, "decision_context": context, "source": source,
             "market_cap": float(mcap_usd) if mcap_usd is not None and not np.isnan(mcap_usd) else None,
             "volatility": float(volatility) if volatility is not None and not np.isnan(volatility) else None,
             "token_age_minutes": float(token_age) if token_age is not None and not np.isnan(token_age) else None,
-            "is_prolific_creator": bool(creator_prolific), "uri_status": str(uri_status),
+            "creator_history_summary": str(creator_history), # MODIFIED
+            "uri_status": str(uri_status),
             "rugcheck_score": str(rug_score), "social_score": str(social_score), "rugcheck_trend": str(rug_trend),
             "social_score_trend": str(social_trend), "decision": decision_info.get('decision'),
             "confidence": int(decision_info.get('confidence', 0)),
         }
+        # --- MODIFICATION END ---
+        
         metadata_to_store = {k: v for k, v in metadata_to_store.items() if v is not None}
         metadata_json = json.dumps(metadata_to_store)
 
@@ -191,7 +205,7 @@ class AIDecisionMaker:
                     mint, datetime.fromisoformat(snapshot_time_str), context,
                     decision_info.get('decision'), int(decision_info.get('confidence', 0)),
                     full_explanation, situation_summary, 
-                    str(embedding), # <-- This is the fix from last time
+                    str(embedding), 
                     metadata_json
                 )
             if self.log_verbose: logger.debug(f"🧠 Added decision snapshot to pgvector memory for {mint}")
@@ -224,7 +238,7 @@ class AIDecisionMaker:
         
         try:
             async with self.db_client.pool.acquire() as conn:
-                results = await conn.fetch(query, str(query_embedding), top_k) # <-- This is the fix from last time
+                results = await conn.fetch(query, str(query_embedding), top_k) 
 
             if not results:
                 if self.log_verbose: logger.debug("🧠 No relevant past decision snapshots found in memory for query.")
@@ -261,7 +275,7 @@ class AIDecisionMaker:
         try:
             if self.log_verbose: 
                 logger.debug("🧠 AI Worker: Querying LLM... (STARTING BLOCKING CALL)")
-                logger.debug(f"🧠 LLM Prompt Preview:\n{prompt[:11000]}{'...' if len(prompt) > 11000 else ''}")
+                #logger.debug(f"🧠 LLM Prompt Preview:\n{prompt[:11000]}{'...' if len(prompt) > 11000 else ''}")
             response = await asyncio.to_thread(
                 ollama.chat,
                 model=self.model,
@@ -282,8 +296,8 @@ class AIDecisionMaker:
 
     async def get_trade_advice(self, current_data: dict, include_explanation: bool = True) -> dict:
         """
-        [REFACTORED] Orchestrates the process of getting trade advice from the LLM.
-        This function is now fully asynchronous.
+        [MODIFIED] Orchestrates the process of getting trade advice from the LLM.
+        This function is now fully asynchronous and uses `creator_history_summary`.
         """
         required_keys = ['mint', 'source', 'price', 'market_cap', 'volatility', 'decision_context', 'token_age_minutes']
         missing_keys = [k for k in required_keys if k not in current_data or current_data[k] is None]
@@ -313,7 +327,11 @@ class AIDecisionMaker:
         social_score_for_query = current_data.get('social_latest', 'N/A')
         social_trend_for_query = current_data.get('social_score_trend', 'N/A')
         age_for_query = current_data.get('token_age_minutes', 'N/A')
-        creator_status_for_query = 'Prolific' if current_data.get('is_prolific_creator') else 'Normal'
+        
+        # --- MODIFICATION START ---
+        creator_summary_for_query = current_data.get('creator_history_summary', 'N/A') # Use new field
+        # --- MODIFICATION END ---
+        
         uri_status_for_query = current_data.get('uri_status', 'N/A')
         price_momentum_query_part = "N/A"
         if current_data['source'] == 'PUMP' and 'pump_price_change_1m' in current_data:
@@ -321,15 +339,19 @@ class AIDecisionMaker:
         elif current_data['source'] == 'DEXSCREENER' and 'dex_price_change_m5' in current_data:
             price_momentum_query_part = f"{current_data['dex_price_change_m5']}%"
 
+        # --- MODIFICATION START ---
+        # Update situation_query to use creator_history_summary
         situation_query = (
             f"Analyze similar Solana meme coin situations: Context={decision_context}, "
             f"Source={current_data['source']}, MCap approx ${mcap_for_query:,.0f}, "
             f"Volatility level {volatility_for_query:.3f}, Token Age: {age_for_query} mins. "
             f"Rugcheck score {rug_score_for_query} trending {rug_trend_for_query}, "
             f"Social score {social_score_for_query} trending {social_trend_for_query}. "
-            f"Creator Status: {creator_status_for_query}. URI Status: {uri_status_for_query}. "
+            f"Creator History: {creator_summary_for_query}. URI Status: {uri_status_for_query}. " # MODIFIED
             f"Price Momentum (recent): {price_momentum_query_part}"
         )
+        # --- MODIFICATION END ---
+        
         if self.log_verbose: logger.debug(f"🧠 RAG Situation Query: {situation_query}")
 
         rag_context = await self.retrieve_context(situation_query)
@@ -361,6 +383,8 @@ class AIDecisionMaker:
         default_mcap_threshold = self.config.get('DEFAULT_MARKETCAP_THRESHOLD', 14000)
         min_mcap_threshold = self.config.get('MIN_MARKETCAP_THRESHOLD', 4000)
         
+        # --- MODIFICATION START ---
+        # Update prompt_data to use creator_history_summary
         prompt_data = {
             'decision_context': decision_context,
             'trade_history_summary': current_data.get('trade_history_summary', 'N/A'),
@@ -368,7 +392,7 @@ class AIDecisionMaker:
             'rag_context': rag_context, 'name': current_data.get('name', 'Unknown'),
             'mint': current_data.get('mint', 'N/A'),
             'token_age_minutes': current_data.get('token_age_minutes', 'N/A'),
-            'creator_status': 'Prolific/Suspicious' if current_data.get('is_prolific_creator') else 'Normal/Unknown',
+            'creator_history_summary': current_data.get('creator_history_summary', 'Error: History not found.'), # MODIFIED
             'uri_status': current_data.get('uri_status', 'N/A'),
             'price': current_data.get('price', 0.0), 'market_cap': current_data.get('market_cap', 0.0),
             'volatility': current_data.get('volatility', 0.0),
@@ -393,20 +417,23 @@ class AIDecisionMaker:
             'default_marketcap_threshold': default_mcap_threshold,
             'min_marketcap_threshold': min_mcap_threshold,
         }
+        # --- MODIFICATION END ---
 
         try:
             base_template_parts = self.prompts['base']
             final_prompt = f"{base_template_parts['task_definition']}\n\n" \
-                           f"{base_template_parts['output_format_instructions']}\n\n" \
-                           f"{base_template_parts['trade_history_section']}\n\n" \
-                           f"{base_template_parts['key_decision_rules_section']}\n\n" \
-                           f"{base_template_parts['current_token_data_header']}\n\n" \
-                           f"{base_template_parts['metadata_context_section']}\n\n" \
-                           f"{base_template_parts['core_metrics_section']}\n\n" \
-                           f"{base_template_parts['risk_assessment_section']}\n\n" \
-                           f"{base_template_parts['market_dynamics_header']}\n\n" \
-                           f"{base_template_parts['final_reminder']}"
+                        f"{base_template_parts['current_token_data_header']}\n\n" \
+                        f"{base_template_parts['metadata_context_section']}\n\n" \
+                        f"{base_template_parts['core_metrics_section']}\n\n" \
+                        f"{base_template_parts['risk_assessment_section']}\n\n" \
+                        f"{base_template_parts['market_dynamics_header']}\n\n" \
+                        f"{base_template_parts['output_format_instructions']}\n\n" \
+                        f"{base_template_parts['trade_history_section']}\n\n" \
+                        f"{base_template_parts['key_decision_rules_section']}\n\n" \
+                        f"{base_template_parts['final_reminder']}"
             final_prompt = final_prompt.format(**prompt_data)
+            if self.log_verbose:
+                logger.debug(f"🧠 Final prompt: {final_prompt}.")
         except KeyError as e:
              logger.critical(f"🧠 CRITICAL: Missing key '{e}' during prompt final formatting.")
              return {"decision": "HOLD", "confidence": 0, "explanation": f"Internal Error: Prompt generation failed on key '{e}'."}
@@ -416,9 +443,11 @@ class AIDecisionMaker:
 
         llm_response = await self.query_llm(final_prompt)
 
+        if self.log_verbose:
+            logger.debug(f"🧠 LLM Raw Response for {current_data['mint']} ({decision_context}): {llm_response}")
+
         parsed_decision = self._parse_llm_response_structured(llm_response, include_explanation)
 
-        # This verbose log will now only show if AI_LOG_VERBOSE is True
         if self.log_verbose:
             log_explanation_snippet = parsed_decision['explanation'][:200] + ('...' if len(parsed_decision['explanation']) > 200 else '') if include_explanation and parsed_decision.get('explanation') else "(Explanation Skipped or Missing)"
             logger.debug(f"🧠 AI Advice for {current_data['mint']} ({decision_context}): {parsed_decision['decision']} "

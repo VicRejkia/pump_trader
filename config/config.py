@@ -71,7 +71,7 @@ MIN_MARKETCAP_THRESHOLD = 4000              # Minimum market cap threshold in US
 DEFAULT_MARKETCAP_THRESHOLD = 14000         # Minimum market cap threshold in USD to search for buy opportunities
 MIN_VOLATILITY = 0.11                       # Minimum volatility threshold in % to search for buy opportunities
 DEFAULT_TIME_INTERVAL = 10                 # Time interval for checking volatility, volume and marketcap in minutes
-MAX_TOKEN_COUNT_PER_CREATOR = 50            # Maximum number of tokens per creator to consider token as safe
+MAX_TOKEN_COUNT_PER_CREATOR = 100           # Maximum number of tokens per creator to consider token as safe
 
 # --- Re-Buy Logic Configuration ---
 USE_TREND_REVERSAL_CONFIRMATION = True      # Master switch to enable/disable this feature
@@ -148,7 +148,7 @@ _DRPC_ENDPOINT = "https://lb.drpc.org/ogrpc?network=solana"
 
 # --- AI Decision Maker Configuration ---
 AI_DECISION_MAKING_ENABLED = True           # Master switch to enable/disable AI evaluation
-AI_MODEL_NAME = 'llama3.2:latest'             # Ollama model to use (e.g., 'llama3', 'mistral')
+AI_MODEL_NAME = 'deepseek-r1:8b'             # Ollama model to use (e.g., 'llama3', 'mistral')
 AI_LOG_VERBOSE = False                      # Set to True for full AI debug spam, False for concise logs
 _AI_EMBEDDNG_MODEL = 'all-MiniLM-L6-v2'     # Sentence Transformer model for RAG embeddings
 _AI_PROMPTS_DIR = 'ai_decision_module/prompts' # Path to the YAML prompt files

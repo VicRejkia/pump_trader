@@ -1,38 +1,42 @@
-# Prompts - BUY/REBUY Context Configuration
+# Prompts - BUY/REBUY Context Configuration (FINETUNED V3)
 
-# Decision options relevant to this context
-decision_options: "BUY or HOLD" # HOLD means 'do not buy yet'
+# --- TASK DEFINITION ---
+task_definition: |
+  You are an expert Solana meme coin trading analyst AI. Your goal is to evaluate an **ENTRY POINT** for a trading bot.
+  Based on the **Current Token Data** provided at the top, determine if this is a good opportunity to enter.
 
-# Specific guidance text to insert into the main prompt
-context_specific_guidance: |
-  - Focus on ENTRY signals, risk assessment, momentum, and potential upside.
-  - If Context is INITIAL BUY: Is this a good *first* entry point? Assess initial risk vs. reward.
-  - If Context is REBUY: Analyze the *reason* for the previous exit (from trade history). Has the situation improved significantly? Is there confirmed trend reversal if the exit was due to stop loss? Re-entry needs stronger signals than initial buy.
-  - Is this a good time to enter/re-enter based on current data and trends?
+  **Current Decision Context:** {decision_context}
+  
+  **YOUR VALID DECISIONS ARE `BUY` or `HOLD`:**
+  - **`BUY`**: Use this if you are confident this is a good entry point. The confidence score (1-100) reflects *how strongly* you recommend buying.
+  - **`HOLD`**: Use this if you are confident this is a **BAD entry point** (due to VETO signals, high risk, or stagnation). The confidence score (1-100) reflects *how strongly* you recommend **NOT buying**.
+  
+  **Confidence Interpretation:**
+  - A `BUY` decision with confidence < 50 is a weak signal and will be ignored.
+  - If you identify any VETO signals (Bad Creator, Dead Token), you MUST output `HOLD` with high confidence (e.g., `HOLD:95`).
 
-# Explanation of data sources
-source_explanation: "PUMP = High-frequency individual trades, DEXSCREENER = Periodic aggregate snapshots"
-
-# Guidance regarding market cap for buys
-market_cap_guidance: "Avoid buys below ${default_marketcap_threshold:,.0f} unless other signals (momentum, risk scores) are exceptionally strong. Very low MC indicates high risk."
-
-# Specific rules for the BUY/REBUY context
+# --- CONTEXT-SPECIFIC RULES ---
 context_specific_rules: |
-  - Look for positive momentum (Price Change, Volume Velocity/Trend), improving risk scores (decreasing Rugcheck/Social), and reasonable volatility (not too low, not excessively high).
-  - Consider Token Age: Very young tokens need caution. Older tokens need clear signs of renewed interest.
-  - Creator/URI Status: 'Prolific/Suspicious' creator or 'Error'/'Missing' URI increases entry risk significantly. Require stronger positive signals to compensate.
+  - **Creator History / URI:** A poor creator history (e.g., many rugs, 0 past 10x, low lifespan) is a **MAJOR VETO SIGNAL. You MUST advise HOLD.** An 'Error'/'Missing' URI is also a strong VETO signal.
+  - **Market Activity:** If Market Dynamics are 'N/A' or volatility is 0.000, it means **ZERO activity**. This is a **MAJOR VETO SIGNAL. You MUST advise HOLD.**
+  - Look for *positive* momentum, *improving* risk scores, and *reasonable* volatility (not 0.0) to justify a `BUY` decision.
+  - **Rebuy Context:** If this is a `REBUY`, your signals for `BUY` must be *stronger* than an initial buy. The reason for the previous exit (in trade history) must be resolved.
 
-# Template for formatting PUMP market dynamics data
+# --- (in this context) ---
+context_specific_guidance: "" # This is now part of the new task_definition
+
+source_explanation: "PUMP = High-frequency individual trades, DEXSCREENER = Periodic aggregate snapshots"
+market_cap_guidance: "Avoid buys below ${default_marketcap_threshold:,.0f} unless other signals are exceptionally strong. Very low MC indicates high risk."
+
 market_dynamics_template_pump: |
   - Price Change (1min): {pump_price_change_1m}
   - Volume Velocity (1min): {pump_volume_velocity_1m}
-  - Tick Frequency (1min): {pump_tick_frequency_1m} trades/min
+  - Tick Frequency (1min): {pump_tick_frequency_m1} trades/min
 
-# Template for formatting DEXSCREENER market dynamics data
 market_dynamics_template_dex: |
   - Price Change (5min snap): {dex_price_change_m5:.2f}%
   - Volume (5min snap): ${dex_volume_m5:,.0f}
-  - Buys/Sells (5min snap): {dex_buys_m5} / {dex_sells_m5} (Higher Buy ratio is positive)
-  - Price Trend (15min): {dex_price_trend_15m} (Compare recent snapshots)
-  - Volume Trend (15min): {dex_volume_trend_15m} (Compare recent snapshots)
-  - Liquidity Trend (30min): {dex_liquidity_trend_30m} (Compare recent snapshots - Increasing is generally good for stability)
+  - Buys/Sells (5min snap): {dex_buys_m5} / {dex_sells_m5}
+  - Price Trend (15min): {dex_price_trend_15m}
+  - Volume Trend (15min): {dex_volume_trend_15m}
+  - Liquidity Trend (30min): {dex_liquidity_trend_30m}

@@ -209,8 +209,8 @@ class DatabaseClient:
                             creator, token_count, now
                         )
 
-                    if token_count > self.config.get('MAX_TOKEN_COUNT_PER_CREATOR', 10):
-                            logger.debug(f"🤬 [bold red]Suspicious creator[/bold red] %s for token %s with %s tokens in 7 days", creator, data['mint'], token_count)
+                    if token_count > self.config.get('MAX_TOKEN_COUNT_PER_CREATOR', 100):
+                            logger.debug(f"🤬 [bold red]Suspicious creator[/bold red] %s for token %s with %s tokens. Skipping.", creator, data['mint'], token_count)
                             return False
 
                     sol_price = await self.state.get_sol_price()
@@ -1179,6 +1179,77 @@ class DatabaseClient:
             except Exception as e:
                 logger.error(f":police_car_light: Error fetching portfolio transactions for mints {mints}: {e}", exc_info=True)
                 return {} # Return empty dict on error
+            
+    async def get_creator_history_summary(self, creator_wallet: str, current_mint: str) -> str:
+        """
+        Analyzes a creator's past tokens and generates a summary string for the AI.
+        """
+        if not creator_wallet:
+            return "Creator wallet not specified."
+
+        query = """
+        WITH PastTokens AS (
+            SELECT
+                t.mint,
+                t.marketCapSol AS creation_mcap,
+                (SELECT MAX(tr.marketCapSol) FROM v_trades tr WHERE tr.mint = t.mint) AS max_mcap,
+                ( (SELECT MAX(tr.timestamp) FROM v_trades tr WHERE tr.mint = t.mint) -
+                  (SELECT MIN(tr.timestamp) FROM v_trades tr WHERE tr.mint = t.mint) ) AS lifespan,
+                tb.backup_reason
+            FROM v_tokens t
+            LEFT JOIN tokens_backup tb ON t.mint = tb.mint
+            WHERE t.traderPublicKey = $1 AND t.mint != $2
+        )
+        SELECT * FROM PastTokens WHERE max_mcap IS NOT NULL OR backup_reason IS NOT NULL;
+        """
+        
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(query, creator_wallet, current_mint)
+
+            if not rows:
+                return "This is the creator's first token."
+
+            total_tokens = len(rows)
+            rugged_count = 0
+            good_runs_count = 0
+            total_lifespan_minutes = 0
+            lifespan_count = 0
+
+            # Define "rugged"
+            rug_reasons = {'high_rugcheckscore', 'dead_token'}
+
+            for row in rows:
+                if row['backup_reason'] in rug_reasons:
+                    rugged_count += 1
+                
+                # Define "good run" (e.g., > 10x MCap from creation)
+                if row['max_mcap'] and row['creation_mcap'] and row['max_mcap'] > (row['creation_mcap'] * 10):
+                    good_runs_count += 1
+                
+                if row['lifespan']:
+                    total_lifespan_minutes += row['lifespan'].total_seconds() / 60
+                    lifespan_count += 1
+
+            avg_lifespan_str = "N/A"
+            if lifespan_count > 0:
+                avg_lifespan_minutes = total_lifespan_minutes / lifespan_count
+                if avg_lifespan_minutes < 120:
+                    avg_lifespan_str = f"{avg_lifespan_minutes:.0f} minutes"
+                else:
+                    avg_lifespan_str = f"{avg_lifespan_minutes / 60:.1f} hours"
+
+            summary = (
+                f"Creator has {total_tokens} past tokens. "
+                f"{rugged_count} were rugged. "
+                f"{good_runs_count} achieved >10x MCap. "
+                f"Average lifespan: {avg_lifespan_str}."
+            )
+            return summary
+
+        except Exception as e:
+            logger.error(f"Error generating creator history summary for {creator_wallet}: {e}", exc_info=True)
+            return "Error generating creator history."
 
     async def backup_and_delete_token(self, mint: str, archived_at: datetime, reason: str=None):
         """Backup core table data to a corresponding backup table."""
