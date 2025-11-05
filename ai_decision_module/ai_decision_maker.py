@@ -117,7 +117,7 @@ class AIDecisionMaker:
             logger.error(f"🧠 Failed to embed text: '{text[:100]}...'. Error: {e}", exc_info=True)
             return None
 
-    async def add_decision_snapshot_to_memory(self, snapshot_data: dict, decision_info: dict):
+    async def add_decision_snapshot_to_memory(self, snapshot_data: dict, decision_info: dict, raw_llm_response: Optional[str] = None):
         """
         [MODIFIED] Stores a snapshot of the market data, context, AI decision, and reasoning
         into the PostgreSQL `ai_decision_memory` table for future RAG retrieval.
@@ -141,13 +141,24 @@ class AIDecisionMaker:
         uri_status = snapshot_data.get('uri_status', 'N/A')
         market_summary = snapshot_data.get('market_dynamics_summary_str', 'N/A')
         trade_history = snapshot_data.get('trade_history_summary', 'N/A')
+        # Prioritize saving the raw response if provided.
+        # The 'explanation' column will now store the RAW response for debugging.
+        # The 'parsed_explanation' is still used for the summary snippet.
+        parsed_explanation = decision_info.get('explanation')
+        full_response_to_store = raw_llm_response if raw_llm_response else parsed_explanation # <-- Use raw_llm_response
+        
         explanation_snippet = "N/A"
-        full_explanation = decision_info.get('explanation')
         placeholder_explanations = ["Explanation not found or invalid format.", "No explanation processed."]
-        if full_explanation and full_explanation not in placeholder_explanations:
-            explanation_snippet = full_explanation[:150] + ('...' if len(full_explanation) > 150 else '')
-        else:
-            full_explanation = None
+        
+        # Use the *parsed* explanation for the snippet
+        if parsed_explanation and parsed_explanation not in placeholder_explanations:
+            explanation_snippet = parsed_explanation[:150] + ('...' if len(parsed_explanation) > 150 else '')
+        elif raw_llm_response:
+             # Fallback for snippet if parsing failed but we have a raw response
+            explanation_snippet = raw_llm_response.split('---', 1)[-1].strip()[:150] + '...'
+        
+        if not full_response_to_store or full_response_to_store in placeholder_explanations:
+            full_response_to_store = None # Ensure we store NULL if it's empty/placeholder
             
         # --- MODIFICATION START ---
         # Update situation_summary to use new creator history
@@ -204,7 +215,7 @@ class AIDecisionMaker:
                     query,
                     mint, datetime.fromisoformat(snapshot_time_str), context,
                     decision_info.get('decision'), int(decision_info.get('confidence', 0)),
-                    full_explanation, situation_summary, 
+                    full_response_to_store, situation_summary, 
                     str(embedding), 
                     metadata_json
                 )
@@ -453,7 +464,7 @@ class AIDecisionMaker:
             logger.debug(f"🧠 AI Advice for {current_data['mint']} ({decision_context}): {parsed_decision['decision']} "
                         f"(Confidence: {parsed_decision['confidence']}) - Reasoning: {log_explanation_snippet}")
 
-        await self.add_decision_snapshot_to_memory(current_data, parsed_decision)
+        await self.add_decision_snapshot_to_memory(current_data, parsed_decision, raw_llm_response=llm_response)
 
         return parsed_decision
 
@@ -467,7 +478,8 @@ class AIDecisionMaker:
             return {"decision": decision, "confidence": confidence, "explanation": explanation}
         
         lines = llm_response.strip().split('\n', 2)
-        strict_match = re.match(r"^\s*(BUY|SELL|HOLD|REBUY)\s*:\s*(\d{1,3})\s*$", lines[0], re.IGNORECASE)
+        #strict_match = re.match(r"^\s*(BUY|SELL|HOLD|REBUY)\s*:\s*(\d{1,3})\s*$", lines[0], re.IGNORECASE)
+        strict_match = re.match(r"^\s*(?:\*\*)?\s*(BUY|SELL|HOLD|REBUY)\s*:\s*(\d{1,3})\s*(?:\*\*)?\s*$", lines[0], re.IGNORECASE)
 
         if strict_match:
             decision = strict_match.group(1).upper()

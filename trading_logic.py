@@ -179,8 +179,100 @@ class TradingManager:
             logger.warning(f":triangular_flag: Unknown data_source '{data_source}' for {mint} in trend reversal check.")
             return False
 
+    async def _get_valid_ai_advice(self, mint: str) -> (Optional[str], int, Optional[dict]):
+        """
+        Fetches the latest, non-stale, actionable AI advice for a mint.
+
+        Returns:
+            Tuple[Optional[str], int, Optional[dict]]:
+                - decision (e.g., 'BUY', 'SELL', 'HOLD') or None if no valid advice
+                - confidence (0-100)
+                - ai_context_for_log (a dict for logging) or None
+        """
+        if not self.config.get('AI_DECISION_MAKING_ENABLED', False) or not self.ai_decision_maker:
+            return None, 0, None
+
+        async with self.db.pool.acquire() as conn_ai:
+            # This function now correctly fetches only actionable advice
+            ai_decision_record = await self.db.get_latest_ai_decision(mint, conn_ai)
+
+        if not ai_decision_record:
+            logger.debug(f"🧠 AI advice for {mint} buy check unavailable. Using rule-based logic only.")
+            return None, 0, None
+
+        ai_decision = ai_decision_record['decision']
+        ai_confidence = ai_decision_record['confidence']
+        ai_timestamp = ai_decision_record['evaluation_timestamp']
+        advice_age = datetime.now(timezone.utc) - ai_timestamp
+        max_staleness = timedelta(minutes=self.config.get('AI_ADVICE_MAX_STALENESS_MINUTES', 20))
+
+        if advice_age > max_staleness:
+            logger.debug(f"🧠 AI advice for {mint} is stale (Age: {advice_age.total_seconds():.0f}s > {max_staleness.total_seconds():.0f}s). Ignoring.")
+            return None, 0, None
+
+        # Valid, non-stale advice found
+        ai_context_for_log = {'decision': ai_decision, 'confidence': ai_confidence, 'timestamp': ai_timestamp.isoformat()}
+        logger.debug(f"🧠 AI Advice ({mint}): {ai_decision} ({ai_confidence}%) - Age: {advice_age.total_seconds():.0f}s")
+        
+        return ai_decision, ai_confidence, ai_context_for_log
+
+    async def _evaluate_buy_opportunity(self, row: dict) -> (Optional[str], Optional[dict]):
+        """
+        Evaluates a single potential buy opportunity, checking all vetos.
+
+        Args:
+            row (dict): The data row from find_trading_opportunities.
+
+        Returns:
+            Tuple[Optional[str], Optional[dict]]:
+                - buy_reason (str) or None if vetoed
+                - ai_context (dict) or None
+        """
+        mint = row['mint']
+        opportunity_price = float(row['latest_price'])
+
+        if opportunity_price <= 0:
+            logger.warning(f"Skipping buy for {mint} due to invalid opportunity price: {opportunity_price}")
+            return None, None
+
+        buy_reason = "Rule-Based"  # Default reason
+        ai_decision, ai_confidence, ai_context_for_log = await self._get_valid_ai_advice(mint)
+
+        if ai_decision:
+            # --- AI VETO LOGIC ---
+            
+            # Veto 1: Check for a confident HOLD decision
+            hold_veto_threshold = self.config.get('AI_BUY_HOLD_CONFIDENCE_THRESHOLD', 60)
+            if ai_decision == 'HOLD' and ai_confidence >= hold_veto_threshold:
+                logger.info(f"🧠 AI advised HOLD (Confidence: {ai_confidence} >= {hold_veto_threshold}) for potential buy of {mint}. Deferring purchase.")
+                return None, None
+
+            # Veto 2: Check for a confident SELL decision (Fixes the instant sell-after-buy bug)
+            sell_veto_threshold = self.config.get('AI_CONFIDENCE_THRESHOLD_VETO', 75)
+            if ai_decision == 'SELL' and ai_confidence >= sell_veto_threshold:
+                logger.info(f"🧠 AI advised SELL (Confidence: {ai_confidence} >= {sell_veto_threshold}) for potential buy of {mint}. Vetoing purchase.")
+                return None, None
+            
+            # --- AI CONFIRMATION LOGIC ---
+            if ai_decision.upper() in ['BUY', 'REBUY']:
+                logger.debug(f"🧠 AI confirmed potential BUY for {mint} (Confidence: {ai_confidence}).")
+                buy_reason = "AI-Advised"
+
+        # --- TREND REVERSAL VETO LOGIC ---
+        if self.config.get('USE_TREND_REVERSAL_CONFIRMATION', False):
+            if not await self._is_trend_reversal_confirmed(mint):
+                logger.debug(f"Trend reversal not confirmed for {mint}. Skipping buy opportunity.")
+                return None, None
+        
+        # All checks passed
+        return buy_reason, ai_context_for_log
+
     async def check_trading_opportunities(self):
-        """✅ Check for new trading opportunities, incorporating AI advice. (Unchanged)"""
+        """
+        ✅ [REFACTORED]
+        Checks for new trading opportunities by getting rule-based candidates
+        and then evaluating each one.
+        """
         if self.state.shutdown_event.is_set():
             return
 
@@ -194,6 +286,7 @@ class TradingManager:
                 logger.warning(f"⚠️ Invalid SOL_PRICE_USD ({sol_price_usd}); skipping buy check.")
                 return
 
+            # 1. Get all rule-based opportunities
             rows = await self.db.find_trading_opportunities(
                 sol_price=sol_price_usd,
                 volume_threshold=self.config['DEFAULT_VOLUME_THRESHOLD'],
@@ -204,57 +297,32 @@ class TradingManager:
                 min_volatility=self.config['MIN_VOLATILITY']
             )
 
-            logger.debug(f":magnifying_glass_tilted_right: Found {len(rows)} potential trading opportunities after initial DB filter.")
+            if rows:
+                logger.debug(f":magnifying_glass_tilted_right: Found {len(rows)} potential trading opportunities after initial DB filter.")
 
+            # 2. Evaluate each opportunity one by one
             for row in rows:
                 mint = row['mint']
                 opportunity_price = float(row['latest_price'])
                 opportunity_market_cap_sol = float(row['latest_market_cap_sol'])
 
-                if opportunity_price <= 0:
-                    logger.warning(f"Skipping buy for {mint} due to invalid opportunity price: {opportunity_price}")
-                    continue
-
-                buy_reason = "Rule-Based" # Default reason
-
-                ai_advice_used = None
-                if self.config.get('AI_DECISION_MAKING_ENABLED', False) and self.ai_decision_maker:
-                    async with self.db.pool.acquire() as conn_ai:
-                        ai_decision_record = await self.db.get_latest_ai_decision(mint, conn_ai)
-
-                    if ai_decision_record:
-                        ai_decision = ai_decision_record['decision']
-                        ai_confidence = ai_decision_record['confidence']
-                        ai_timestamp = ai_decision_record['evaluation_timestamp']
-                        advice_age = datetime.now(timezone.utc) - ai_timestamp
-                        max_staleness = timedelta(minutes=self.config.get('AI_ADVICE_MAX_STALENESS_MINUTES', 20))
-
-                        if advice_age <= max_staleness:
-                            ai_advice_used = {'decision': ai_decision, 'confidence': ai_confidence, 'timestamp': ai_timestamp.isoformat()}
-                            logger.debug(f"🧠 AI Advice ({mint}): {ai_decision} ({ai_confidence}%) - Age: {advice_age.total_seconds():.0f}s")
-                            hold_veto_threshold = self.config.get('AI_BUY_HOLD_CONFIDENCE_THRESHOLD', 60)
-                            if ai_decision == 'HOLD' and ai_confidence >= hold_veto_threshold:
-                                logger.info(f"🧠 AI advised HOLD (Confidence: {ai_confidence} >= {hold_veto_threshold}) for potential buy of {mint}. Deferring purchase.")
-                                continue 
-                            if ai_decision.upper() in ['BUY', 'REBUY']:
-                                logger.debug(f"🧠 AI confirmed potential BUY for {mint} (Confidence: {ai_confidence}).")
-                                buy_reason = "AI-Advised"
-                        else:
-                            logger.debug(f"🧠 AI advice for {mint} is stale (Age: {advice_age.total_seconds():.0f}s > {max_staleness.total_seconds():.0f}s). Ignoring.")
-                    else:
-                        logger.debug(f"🧠 AI advice for {mint} buy check unavailable. Using rule-based logic only.")
+                # 3. Check all vetos (AI, Trend, etc.)
+                buy_reason, ai_context = await self._evaluate_buy_opportunity(row)
                 
-                if self.config.get('USE_TREND_REVERSAL_CONFIRMATION', False):
-                    if not await self._is_trend_reversal_confirmed(mint):
-                        logger.debug(f"Trend reversal not confirmed for {mint}. Skipping buy opportunity.")
-                        continue
-                
-                await self.execute_buy(mint, opportunity_price, opportunity_market_cap_sol, buy_reason, ai_advice_used)
-                await asyncio.sleep(0.1) 
+                # 4. If all checks pass (buy_reason is not None), then execute the buy
+                if buy_reason:
+                    await self.execute_buy(
+                        mint, 
+                        opportunity_price, 
+                        opportunity_market_cap_sol, 
+                        buy_reason, 
+                        ai_context
+                    )
+                    await asyncio.sleep(0.1) # Brief pause between buys
 
         except Exception as e:
             logger.error(f"❌ Error in check_trading_opportunities: {e}", exc_info=True)
-            await asyncio.sleep(5) 
+            await asyncio.sleep(5)
 
     async def execute_buy(self, mint: str, trigger_price: float, market_cap_sol_at_trigger: float, buy_reason: str, ai_context: Optional[dict] = None):
         """🛒 Dispatches buy execution based on TRADING_MODE. (Unchanged)"""
@@ -364,6 +432,15 @@ class TradingManager:
                         if self.config.get('TELEGRAM_INTERACTION'):
                             telegram_msg  = format_buy_order_log(self.state, name=token_name, mint=mint, price_per_token=trigger_price, tokens_bought=tokens_bought_calculated, market_cap=market_cap_sol_at_trigger, sol_price=sol_price_usd, total_investment=sim_total_investment, buy_reason=buy_reason, for_telegram=True)
                             asyncio.create_task(send_telegram_message(telegram_msg))
+
+                        if self.config.get('AI_DECISION_MAKING_ENABLED', False) and self.ai_decision_maker:
+                            ai_q = self.state.get_ai_evaluation_queue()
+                            if not ai_q.full():
+                                # Put with high priority (-100) to be checked next
+                                await ai_q.put((-100, (mint, 'SELL/HOLD'))) 
+                                logger.debug(f"🧠 AI Queue: Immediately queued {mint} for SELL/HOLD re-evaluation after buy.")
+                            else:
+                                logger.warning(f"AI Queue is full, could not add {mint} for immediate re-evaluation.")
                     except Exception as e_sim:
                         logger.error(f"[SIMULATE MODE] Buy DB operation failed for {mint}: {e_sim}", exc_info=True)
 

@@ -36,7 +36,7 @@ market_dynamics_header: |
 # --- 2. LLM OUTPUT FORMAT (With Mandatory Risk Block) ---
 output_format_instructions: |
   **CRITICAL: YOUR OUTPUT MUST FOLLOW THIS FORMAT EXACTLY.**
-  1.  **FIRST LINE ONLY:** `DECISION:CONFIDENCE` (e.g., `BUY:85`, `SELL:60`, `HOLD:70`). Replace DECISION with the valid action for this context. Replace CONFIDENCE with a number between 0 and 100.
+  1.  **FIRST LINE ONLY:** The action and confidence score (e.g., `BUY:85`, `SELL:60`, `HOLD:70`). **Do NOT** write the literal words "DECISION" or "CONFIDENCE".
   2.  **SECOND LINE ONLY:** `---` (three hyphens)
   3.  **FOLLOWING LINES:** Your detailed reasoning, **starting with this mandatory CRITICAL RISK ASSESSMENT block:**
   

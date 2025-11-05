@@ -390,49 +390,81 @@ class TradingBot:
                     # 3. Fetch data
                     comprehensive_data = await fetch_comprehensive_token_data(self.db_client, mint)
                     
-                    # 4. Get AI Advice (this now *also* saves to ai_decision_memory)
-                    advice = await self.ai_decision_maker.get_trade_advice(comprehensive_data) 
+                    # --- NEW LOGIC ---
+                    # 4. Check if the token was backed up (race condition)
+                    if comprehensive_data.get("status") == "INACTIVE_BACKED_UP":
+                        log_info(f"🧠 AI Worker: Logging 'Dodged Bullet' for rugged/dead token {mint}.")
+                        
+                        # We don't need to call the LLM. Just format the outcome for RAG.
+                        outcome_snapshot = {
+                            "mint": mint, "source": "PUMP", # Source is unknown, but irrelevant
+                            "timestamp": comprehensive_data['backup_timestamp'].isoformat(),
+                            "decision_context": "NON_TRADE_OUTCOME",
+                            "market_cap": 0, "volatility": 0, "token_age_minutes": 0,
+                            "creator_history_summary": comprehensive_data.get('creator_history_summary', 'N/A'),
+                            "uri_status": "N/A",
+                            "market_dynamics_summary_str": f"Token rugged/dead. Reason: {comprehensive_data['backup_reason']}",
+                            "trade_history_summary": "No trades by bot."
+                        }
+                        outcome_decision = {
+                            "decision": "DODGED_BULLET (RUGGED)", "confidence": 100,
+                            "explanation": f"Bot detected a rule-based buy opportunity, but the token was backed up (reason: {comprehensive_data['backup_reason']}) "
+                                         f"before the AI could evaluate it. This log confirms the token was a bad buy."
+                        }
+                        
+                        # Directly add this outcome to the RAG memory
+                        await self.ai_decision_maker.add_decision_snapshot_to_memory(outcome_snapshot, outcome_decision)
+                        
+                        # We don't update the 'ai_last_evaluation_ts' on the (now deleted) token
+                        # We just mark the queue task as done.
                     
-                    eval_ts = datetime.now(timezone.utc)
-
-                    # 5. Update the token's last evaluation timestamp
-                    async with self.db_client.pool.acquire() as conn:
-                        await self.db_client.update_token_ai_eval_timestamp(mint, eval_ts, conn=conn)
-
-                    # Only act if it was an 'INITIAL BUY' check and the AI said to buy
-                    if (comprehensive_data.get('decision_context') == 'INITIAL BUY' and 
-                        advice['decision'] in ['BUY', 'REBUY']):
+                    else:
+                        # --- ORIGINAL LOGIC (for active tokens) ---
                         
-                        buy_threshold = self.config.get('AI_CONFIDENCE_THRESHOLD_INITIAL_BUY', 90)
+                        # 4b. Get AI Advice (this now *also* saves to ai_decision_memory)
+                        advice = await self.ai_decision_maker.get_trade_advice(comprehensive_data) 
                         
-                        if advice['confidence'] >= buy_threshold:
-                            log_info(f"🧠 [bold green]AI-First Buy Triggered[/bold green] for {mint} (Confidence: {advice['confidence']} >= {buy_threshold}).")
+                        eval_ts = datetime.now(timezone.utc)
+
+                        # 5. Update the token's last evaluation timestamp
+                        async with self.db_client.pool.acquire() as conn:
+                            await self.db_client.update_token_ai_eval_timestamp(mint, eval_ts, conn=conn)
+
+                        # Only act if it was an 'INITIAL BUY' check and the AI said to buy
+                        if (comprehensive_data.get('decision_context') == 'INITIAL BUY' and 
+                            advice['decision'] in ['BUY', 'REBUY']):
                             
-                            # Get price and market cap from the data we just fetched
-                            price_to_buy = comprehensive_data.get('price')
-                            # execute_buy expects market_cap in SOL
-                            mcap_to_buy = (comprehensive_data.get('market_cap', 0) / (await self.state.get_sol_price())) if await self.state.get_sol_price() else 0.0
+                            buy_threshold = self.config.get('AI_CONFIDENCE_THRESHOLD_INITIAL_BUY', 90)
+                            
+                            if advice['confidence'] >= buy_threshold:
+                                log_info(f"🧠 [bold green]AI-First Buy Triggered[/bold green] for {mint} (Confidence: {advice['confidence']} >= {buy_threshold}).")
+                                
+                                price_to_buy = comprehensive_data.get('price')
+                                # execute_buy expects market_cap in SOL
+                                mcap_to_buy = (comprehensive_data.get('market_cap', 0) / (await self.state.get_sol_price())) if await self.state.get_sol_price() else 0.0
 
-                            if price_to_buy and mcap_to_buy and price_to_buy > 0 and mcap_to_buy > 0:
-                                if not self.state.is_buying_enabled:
-                                    log_info(f"🧠 AI-First Buy for {mint} skipped: Buying is globally disabled.")
+                                if price_to_buy and mcap_to_buy and price_to_buy > 0 and mcap_to_buy > 0:
+                                    if not self.state.is_buying_enabled:
+                                        log_info(f"🧠 AI-First Buy for {mint} skipped: Buying is globally disabled.")
+                                    else:
+                                        # Call execute_buy from the trading_manager
+                                        await self.trading_manager.execute_buy(
+                                            mint=mint,
+                                            trigger_price=price_to_buy,
+                                            market_cap_sol_at_trigger=mcap_to_buy,
+                                            buy_reason="AI-First (New Token)",
+                                            ai_context=advice # Pass the full advice dict
+                                        )
                                 else:
-                                    # Call execute_buy from the trading_manager
-                                    await self.trading_manager.execute_buy(
-                                        mint=mint,
-                                        trigger_price=price_to_buy,
-                                        market_cap_sol_at_trigger=mcap_to_buy,
-                                        buy_reason="AI-First (New Token)",
-                                        ai_context=advice # Pass the full advice dict
-                                    )
+                                    log_warning(f"🧠 AI-First Buy for {mint} skipped: Invalid price ({price_to_buy}) or mcap ({mcap_to_buy}).")
                             else:
-                                log_warning(f"🧠 AI-First Buy for {mint} skipped: Invalid price ({price_to_buy}) or mcap ({mcap_to_buy}).")
-                        else:
-                            log_debug(f"🧠 AI-First Buy: AI advised {advice['decision']} for {mint}, but confidence ({advice['confidence']}) was below threshold ({buy_threshold}).")
+                                log_debug(f"🧠 AI-First Buy: AI advised {advice['decision']} for {mint}, but confidence ({advice['confidence']}) was below threshold ({buy_threshold}).")
 
-                    evaluation_duration = time.monotonic() - evaluation_start_time
+                        evaluation_duration = time.monotonic() - evaluation_start_time
+                        
+                        log_info(f"🧠 AI eval complete for {mint} ({decision_context}) -> {advice['decision']} ({advice['confidence']}%) in {evaluation_duration:.2f}s")
                     
-                    log_info(f"🧠 AI eval complete for {mint} ({decision_context}) -> {advice['decision']} ({advice['confidence']}%) in {evaluation_duration:.2f}s")
+                    # --- END OF LOGIC ---
                 
                 self.state.get_ai_evaluation_queue().task_done()
                 mint = None # Clear mint on success

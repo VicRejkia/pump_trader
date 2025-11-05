@@ -289,15 +289,38 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
             "SELECT name, symbol, data_source, traderpublickey, timestamp, uri FROM tokens WHERE mint = $1", mint
         )
         if not token_info:
-            token_info = await conn.fetchrow(
-                 "SELECT name, symbol, 'PUMP' as data_source, traderpublickey, timestamp, uri FROM tokens_backup WHERE mint = $1", mint
+            # Token is not in the active 'tokens' table.
+            # Check if it's in the backup table to detect the race condition.
+            backup_info = await conn.fetchrow(
+                 "SELECT backup_reason, timestamp, traderPublicKey FROM tokens_backup WHERE mint = $1 LIMIT 1", mint
             )
-            if not token_info:
-                logger.error(f"🧠 Token {mint} not found in 'tokens' or 'tokens_backup' table.")
-                raise ValueError(f"🧠 Token {mint} not found in 'tokens' or 'tokens_backup' table.")
-            else:
-                 logger.warning(f"🧠  {mint} found in backup table. Proceeding with backup data.")
+            if backup_info:
+                # This is the race condition. The token was just backed up.
+                # We should not evaluate it, but we *should* log this outcome.
+                logger.warning(f"🧠 Token {mint} is no longer active (found in backup). Returning minimal outcome packet.")
+                
+                # --- NEW: Fetch the creator summary properly ---
+                creator_wallet = backup_info['traderpublickey']
+                creator_summary_string = "N/A"
+                if creator_wallet:
+                     creator_summary_string = await db.get_creator_history_summary(creator_wallet, mint)
+                # --- END NEW ---
 
+                # Return a special dictionary that the AI worker can use to log this outcome
+                return {
+                    "status": "INACTIVE_BACKED_UP", # Special key to be checked by the worker
+                    "mint": mint,
+                    "backup_reason": backup_info['backup_reason'],
+                    "backup_timestamp": backup_info['timestamp'],
+                    "creator_history_summary": creator_summary_string, # <-- THIS IS THE FIX
+                    "decision_context": "NON_TRADE_OUTCOME" # Use the outcome context
+                }
+            else:
+                # The token doesn't exist anywhere.
+                logger.error(f"🧠 Token {mint} not found in 'tokens' or 'tokens_backup' table.")
+                raise ValueError(f"Token {mint} not found in 'tokens' or 'tokens_backup' table.")
+
+        # If we are here, token_info is valid and from the active 'tokens' table.
         source, name, symbol, creator_wallet = token_info['data_source'], token_info['name'], token_info['symbol'], token_info['traderpublickey']
         token_creation_ts = ensure_datetime(token_info['timestamp'])
         uri = token_info['uri']

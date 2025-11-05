@@ -442,7 +442,7 @@ class WebSocketHandler:
         and unsubscribes from their trade streams.
         """
         # Check at half the inactivity period to be proactive.
-        interval = 5 * 60
+        interval = 60
         logger.info(f"🗑️ Dead token monitor started. Check interval: {interval / 60:.1f} minutes.")
         
         while self._status == ConnectionStatus.CONNECTED:

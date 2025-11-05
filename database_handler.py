@@ -645,8 +645,9 @@ class DatabaseClient:
         """Fetches the most recent AI decision record for a given mint."""
         query = """
             SELECT decision, confidence, evaluation_timestamp
-            FROM ai_decision_memory  -- <--- THIS IS THE FIX
+            FROM ai_decision_memory
             WHERE mint = $1
+                AND decision_context IN ('INITIAL BUY', 'SELL/HOLD', 'REBUY') -- Only get actionable contexts
             ORDER BY evaluation_timestamp DESC
             LIMIT 1;
         """

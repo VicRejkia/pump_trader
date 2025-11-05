@@ -29,9 +29,9 @@ source_explanation: "PUMP = High-frequency individual trades, DEXSCREENER = Peri
 market_cap_guidance: "Consider selling if Market Cap drops significantly, especially below ${min_marketcap_threshold:,.0f} (emergency threshold). Stagnant or decreasing MC over time is negative for holds."
 
 market_dynamics_template_pump: |
-  - Price Change (1min): {pump_price_change_m1}
-  - Volume Velocity (1min): {pump_volume_velocity_m1}
-  - Tick Frequency (1min): {pump_tick_frequency_m1} trades/min
+  - Price Change (1min): {pump_price_change_1m}
+  - Volume Velocity (1min): {pump_volume_velocity_1m}
+  - Tick Frequency (1min): {pump_tick_frequency_1m} trades/min
 
 market_dynamics_template_dex: |
   - Price Change (5min snap): {dex_price_change_m5:.2f}%
