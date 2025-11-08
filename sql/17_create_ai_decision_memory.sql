@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS ai_decision_memory (
     decision_context TEXT,
     decision TEXT,
     confidence INTEGER,
+    model_name TEXT, -- <-- ADDED THIS COLUMN
     explanation TEXT,
     
     -- This is the document that gets queried (the text summary)

@@ -1,12 +1,5 @@
-# Prompts - Base Template (FINETUNED V3 - Generic)
-# This file contains the main structure and common elements.
-# The 'task_definition' will be OVERRIDDEN by buy.yaml or sell.yaml.
-
-# --- GENERIC TASK & ROLE (TO BE OVERRIDDEN) ---
-task_definition: |
-  You are an expert Solana meme coin trading analyst AI. Your goal is to maximize profit while managing risk.
-  Based on the data below, determine the correct `DECISION:CONFIDENCE` value for the first line of your response.
-  **Your decision context and valid actions are defined by the specific scenario.**
+# Prompts - Base Template (FINETUNED V5 - JSON Mode)
+# This file contains REUSABLE SNIPPETS for the dynamic prompt builder.
 
 # --- 1. CURRENT TOKEN DATA (Data-First Structure) ---
 current_token_data_header: |
@@ -23,66 +16,76 @@ core_metrics_section: |
   - Price (SOL): {price:.9f}
   - Market Cap (USD): ${market_cap:,.0f}
   - Volatility (Recent): {volatility:.3f}
+  - TA (5s Candle): RSI: {latest_rsi} | EMA Fast: {latest_ema_fast} | EMA Slow: {latest_ema_slow}
 
 risk_assessment_section: |
   **Risk Assessment:**
-  - Rugcheck: Latest: {rugcheck_latest}, Initial: {rugcheck_initial}, Trend(1h): {rugcheck_trend}, Stability: {rugcheck_stability}
-  - Social Score: Latest: {social_latest}, Initial: {social_initial}, Trend(1h): {social_score_trend}, Stability: {social_stability}, TG Members Trend(1h): {telegram_members_trend}, TG Online Ratio Trend(1h): {telegram_online_ratio_trend}
+  - Rugcheck: Latest: {rugcheck_latest}, Initial: {rugcheck_initial}, Trend(1h): {rugcheck_trend}
+  - Social Score: Latest: {social_latest}, Initial: {social_initial}, Trend(1h): {social_score_trend}
+  - Telegram Stats: {latest_telegram_members} members ({latest_telegram_online} online)
+  - TG Trends(1h): Members: {telegram_members_trend}, Online Ratio: {telegram_online_ratio_trend}
 
 market_dynamics_header: |
   **Market Dynamics (Source: {source}):**
   {market_dynamics_formatted} # Placeholder filled dynamically
 
-# --- 2. LLM OUTPUT FORMAT (With Mandatory Risk Block) ---
-output_format_instructions: |
-  **CRITICAL: YOUR OUTPUT MUST FOLLOW THIS FORMAT EXACTLY.**
-  1.  **FIRST LINE ONLY:** The action and confidence score (e.g., `BUY:85`, `SELL:60`, `HOLD:70`). **Do NOT** write the literal words "DECISION" or "CONFIDENCE".
-  2.  **SECOND LINE ONLY:** `---` (three hyphens)
-  3.  **FOLLOWING LINES:** Your detailed reasoning, **starting with this mandatory CRITICAL RISK ASSESSMENT block:**
-  
-  **Critical Risk Assessment:**
-  - **Creator:** (Your analysis of the creator history. Is it a red flag? Is it a VETO signal?)
-  - **Market Activity:** (Your analysis of the Market Dynamics. Is it active, or is it 'N/A' / dead? Is this a VETO signal?)
-  - **Token Age/Risk:** (Your analysis of the token's age vs. its MCap and activity.)
-  --- (Your main reasoning starts *after* this separator)
-  1. (Main reasoning...)
-
-# --- 3. TRADE HISTORY ---
+# --- 2. TRADE HISTORY ---
 trade_history_section: |
   **Past Trade History Summary:**
   {trade_history_summary}
-  - **Interpretation Guide for Trade History:**
-    - Analyze the sequence and outcomes carefully...
 
-# --- 4. DECISION RULES (VETO-Focused) ---
+# --- 3. DECISION RULES (VETO-Focused) ---
 key_decision_rules_section: |
   **Key Decision Rules & Interpretation Guide:**
   - **Data Source:** Interpret '{source}' data correctly ({source_explanation}).
   
   - **CRITICAL VETO SIGNALS (Read First):**
-    - **Bad Creator:** A creator history with many rugged tokens ("rugged_count") is a **MAJOR VETO SIGNAL (DO NOT BUY)**.
+    - **Bad Creator:** A creator history with many rugged tokens is a **MAJOR VETO SIGNAL (DO NOT BUY)**.
     - **Dead Token (N/A):** If Market Dynamics are 'N/A' or volatility is 0.000, it means **ZERO activity**. This is a **MAJOR VETO SIGNAL (DO NOT BUY)**. For SELL/HOLD, this is a strong EXIT signal.
 
-  - **Risk Scores (Lower is Better):** Focus on TRENDS (recent changes).
-      - **Rugcheck Score:** Scale: <50 (Very Low), <300 (Low), <600 (Moderate), <900 (High), 900+ (Very High).
+  - **Risk Scores (Lower is Better):**
+      - **Rugcheck Score:** Scale: <50 (Low), <600 (Moderate), 900+ (Very High).
       - **Social Score (0-100):** Scale: <10 (Excellent), <30 (Good), <50 (Moderate), 70+ (Very Poor).
   
   - **Market Cap (USD):** {market_cap_guidance}
-  - **Volatility:** Moderate ({min_volatility}+) preferred for momentum. Very low (near 0.0) indicates stagnation (VETO SIGNAL for buys).
-  - **Token Age:** Very young tokens (< 15 mins) are risky. Very old tokens (> 12 hours) with low MCap and no volume are dead (VETO SIGNAL for buys).
-  
-  - **Creator History (Interpretation):** Analyze the creator's track record (provided in 'Current Token Data'). "First token" is neutral. A history of past 10x tokens is positive. A history of many rugs is a VETO.
-  
-  - **URI Status:** 'Missing', 'Invalid Format', or 'Error' increases risk and is a potential VETO for buys.
-  {context_specific_rules} # Placeholder for BUY/SELL specific rules
+  - **Creator History:** A history of past 10x tokens is positive. A history of many rugs is a VETO.
+  - **URI Status:** 'Missing', 'Invalid Format', or 'Error' is a potential VETO for buys.
+  {context_specific_rules} # Placeholder for BUY/SELL/REBUY specific rules
 
   - **CRITICAL - Past Situations (RAG) Warning:**
     - Learn from relevant past scenarios provided below, but **PRIORITIZE CURRENT TOKEN DATA**.
-    - Past situations are *examples*, not commands. A past 'BUY' decision may have been wrong. If current data and past examples conflict, **TRUST THE CURRENT DATA AND RULES.**
-    {rag_context}
+    - You *must* consider why the current token is similar to or different from the past cases.
+    
+  --- Relevant Past Situations (Your Actions) ---
+  {rag_context_actions}
 
-# --- 5. FINAL REMINDER (NO DATA HERE) ---
-final_reminder: |
-  --- [END OF DATA] ---
+  --- Relevant Market Examples (Other Tokens) ---
+  {rag_context_market}
+  
+  **Overall Market Context:** The current Solana market regime is **{market_regime}**.
+  - In 'BULLISH' regimes, you can be more tolerant of risk for high momentum.
+  - In 'BEARISH' regimes, you must be extremely risk-averse and prioritize capital preservation.
 
-  **REMINDER:** Start your response *immediately* with the `DECISION:CONFIDENCE` line, followed by `---`, then your **Critical Risk Assessment** block.
+# --- 4. NEW: JSON OUTPUT FORMAT INSTRUCTIONS (Simplified) ---
+json_output_format: |
+  **CRITICAL: YOUR TASK IS TO RETURN A VALID JSON OBJECT.**
+  - Your *entire* response must be a single JSON object.
+  - **DO NOT** include any text, titles, markdown (like `###`), or explanations before or after the JSON.
+  - Perform a step-by-step analysis *internally* using the 7 steps below, then provide your final output in the specified JSON format.
+
+  **Internal Reasoning Steps (Do not include these steps in the final output):**
+  1.  **VETO Check**: Check for Critical Veto Signals (Bad Creator, Dead Token, Bad URI).
+  2.  **Risk Analysis**: Evaluate creator, rug, and social scores.
+  3.  **Momentum Analysis**: Evaluate market dynamics, RSI, and EMAs.
+  4.  **Hype Analysis**: Evaluate Telegram stats.
+  5.  **RAG Synthesis**: Compare to past cases and market examples.
+  6.  **Data Quality**: Check completeness: {data_completeness_score}% - {data_completeness_notes}.
+  7.  **Final Synthesis**: Weigh all factors to make a final decision.
+
+  **REQUIRED JSON OUTPUT SCHEMA:**
+  Make 100% sure your output matches this schema exactly:
+  {{
+    "decision": "string (Valid values: 'BUY', 'SELL', 'HOLD')",
+    "confidence": "integer [0-100]",
+    "full_reasoning": "string (A concise, one-paragraph summary of your final synthesis, justifying the decision and confidence based on your internal step-by-step analysis.)"
+  }}

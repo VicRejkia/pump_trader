@@ -19,7 +19,7 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any, Tuple
 from rich.table import Table
 from rich.console import Console
-from rl_agent.utils.hardware_advisor import get_hardware_recommendations
+from rl_agent_module.utils.hardware_advisor import get_hardware_recommendations
 
 import inquirer
 from rich.console import Console
@@ -28,7 +28,7 @@ import mlflow
 from mlflow.tracking import MlflowClient
 from mlflow.exceptions import MlflowException
 
-from rl_agent.utils.mlflow_utils import (
+from rl_agent_module.utils.mlflow_utils import (
     start_mlflow_server,
     find_artifact_in_run,
     fetch_mlflow_parent_runs,
@@ -207,7 +207,7 @@ def generate_dataset() -> None:
     
     command = [
         "python", 
-        "rl_agent/etl/prepare_rl_dataset.py", 
+        "rl_agent_module/etl/prepare_rl_dataset.py", 
         "--start-date", answers['start_date'], 
         "--end-date", answers['end_date']
     ]
@@ -228,7 +228,7 @@ def start_tuning() -> None:
         return
 
     command = [
-        "python", "rl_agent/training/train.py", "tune", 
+        "python", "rl_agent_module/training/train.py", "tune", 
         "--dataset-run-id", dataset_run_id,
         "--device", hw_settings['DEVICE'],
         "--n-cpu", str(hw_settings['N_CPU'])
@@ -279,7 +279,7 @@ def start_training() -> None:
         
         model_name = answers['name']
         command = [
-            "python", "rl_agent/training/train.py", "train", 
+            "python", "rl_agent_module/training/train.py", "train", 
             "--params-path", params_path, 
             "--name", model_name, 
             "--dataset-run-id", dataset_run_id,
@@ -350,7 +350,7 @@ def continue_or_finetune_training(action: str) -> None:
             return
         
         command = [
-            "python", "rl_agent/training/train.py", action, 
+            "python", "rl_agent_module/training/train.py", action, 
             "--model-path", model_path, 
             "--parent-run-id", run_id, 
             "--name", answers['name'], 
@@ -405,7 +405,7 @@ def start_feature_analysis() -> None:
         
         command = [
             "python", 
-            "rl_agent/evaluation/feature_importance.py", 
+            "rl_agent_module/evaluation/feature_importance.py", 
             "--model-run-id", run_id, 
             "--model-path", model_path, 
             "--dataset-run-id", dataset_run_id
@@ -453,7 +453,7 @@ def start_backtesting() -> None:
 
         # 4. Construct and run the evaluation command
         command = [
-            "python", "rl_agent/evaluation/evaluate.py",
+            "python", "rl_agent_module/evaluation/evaluate.py",
             "--model-path", model_path,
             "--dataset-run-id", dataset_run_id
         ]

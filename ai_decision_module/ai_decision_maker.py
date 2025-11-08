@@ -77,8 +77,15 @@ class AIDecisionMaker:
                 if not base_config: raise ValueError(f"{base_path} is empty or invalid")
                 loaded_prompts['base'] = base_config
 
-            for context_type in ['buy', 'sell']:
+            for context_type in ['buy', 'sell', 'rebuy']: # <-- Add 'rebuy'
                 specific_path = os.path.join(self.prompts_dir, f'{context_type}.yaml')
+                if not os.path.exists(specific_path):
+                    if context_type == 'rebuy':
+                        logger.info(f"Optional prompt '{specific_path}' not found. Skipping.")
+                        continue # It's okay if rebuy.yaml doesn't exist
+                    else:
+                         # Keep original error for required files
+                         raise FileNotFoundError(f"{specific_path} is missing and required.")
                 with open(specific_path, 'r', encoding='utf-8') as f:
                     content = remove_comments(f.read())
                     specific_config = yaml.safe_load(content)
@@ -195,6 +202,7 @@ class AIDecisionMaker:
             "rugcheck_score": str(rug_score), "social_score": str(social_score), "rugcheck_trend": str(rug_trend),
             "social_score_trend": str(social_trend), "decision": decision_info.get('decision'),
             "confidence": int(decision_info.get('confidence', 0)),
+            "model_name": self.model # <-- ADDED MODEL NAME
         }
         # --- MODIFICATION END ---
         
@@ -204,9 +212,9 @@ class AIDecisionMaker:
         query = """
             INSERT INTO ai_decision_memory (
                 mint, evaluation_timestamp, decision_context, decision, confidence,
-                explanation, situation_summary, embedding, metadata
+                model_name, explanation, situation_summary, embedding, metadata
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
             );
         """
         try:
@@ -215,6 +223,7 @@ class AIDecisionMaker:
                     query,
                     mint, datetime.fromisoformat(snapshot_time_str), context,
                     decision_info.get('decision'), int(decision_info.get('confidence', 0)),
+                    self.model, # <-- ADDED MODEL NAME
                     full_response_to_store, situation_summary, 
                     str(embedding), 
                     metadata_json
@@ -223,21 +232,39 @@ class AIDecisionMaker:
         except Exception as e:
             logger.error(f"🧠 Failed to add decision snapshot to pgvector (Mint: {mint}): {e}", exc_info=True)
 
-    async def retrieve_context(self, situation_query: str, top_k: int = 5) -> str:
+    async def retrieve_context(self, situation_query: str, top_k: int = 3) -> dict:
         """
-        [REFACTORED] Retrieves relevant past decision snapshots from pgvector based on semantic similarity
-        to the current situation query.
+        [REFACTORED V2] Retrieves relevant past contexts from pgvector.
+        Queries BOTH the bot's own 'ai_decision_memory' (past actions) AND
+        the 'market_knowledge_base' (market-wide examples).
+        
+        Args:
+            situation_query: The text description of the current situation to embed.
+            top_k: The number of results to retrieve from EACH table.
+
+        Returns:
+            A dictionary containing two strings:
+            {
+                "actions": "Formatted string of past actions.",
+                "market_examples": "Formatted string of market examples."
+            }
         """
+        default_return = {
+            "actions": "No relevant past actions found in memory.",
+            "market_examples": "No relevant market examples found in memory."
+        }
+        
         if not situation_query:
             logger.warning("🧠 Retrieve context called with empty situation query.")
-            return "No situation query provided for context retrieval."
+            return default_return
 
         query_embedding = await self.embed_text(situation_query)
         if not query_embedding:
             logger.warning("🧠 Failed to create embedding for RAG query. Cannot retrieve context.")
-            return "Embedding failed for query. Cannot retrieve context."
+            return default_return
 
-        query = """
+        # Query 1: The bot's own past actions from 'ai_decision_memory'
+        query_actions = """
             SELECT
                 situation_summary,
                 metadata,
@@ -247,34 +274,74 @@ class AIDecisionMaker:
             LIMIT $2;
         """
         
+        # Query 2: Market-wide case studies from 'market_knowledge_base'
+        query_market = """
+            SELECT
+                summary,
+                metadata,
+                embedding <=> $1 AS distance
+            FROM market_knowledge_base
+            ORDER BY embedding <=> $1
+            LIMIT $2;
+        """
+        
         try:
-            async with self.db_client.pool.acquire() as conn:
-                results = await conn.fetch(query, str(query_embedding), top_k) 
+            # --- START FIX ---
+            # Run both queries concurrently directly on the pool.
+            # The pool will manage acquiring and releasing connections for each task.
+            # We remove the 'async with self.db_client.pool.acquire() as conn:' wrapper.
+            results_actions, results_market = await asyncio.gather(
+                self.db_client.pool.fetch(query_actions, str(query_embedding), top_k),
+                self.db_client.pool.fetch(query_market, str(query_embedding), top_k)
+            )
+            # --- END FIX ---
 
-            if not results:
-                if self.log_verbose: logger.debug("🧠 No relevant past decision snapshots found in memory for query.")
-                return "No relevant past decision snapshots found."
+            # --- Process Past Actions ---
+            if not results_actions:
+                if self.log_verbose: logger.debug("🧠 No relevant past actions found in 'ai_decision_memory'.")
+            else:
+                context_parts = ["--- Relevant Past Situations (Your Actions) ---"]
+                for i, record in enumerate(results_actions):
+                    context_parts.append(f"Past Case {i+1} (Similarity Distance: {record['distance']:.4f}):")
+                    context_parts.append(record['situation_summary'].strip()) 
+                    metadata = json.loads(record['metadata']) if isinstance(record['metadata'], str) else record['metadata']
+                    if metadata:
+                        mcap_display = f"${metadata.get('market_cap', 0):,.0f}" if metadata.get('market_cap') else "N/A"
+                        context_parts.append(
+                            f"  (Metadata: Decision={metadata.get('decision', '?')}, "
+                            f"Conf={metadata.get('confidence', '?')}, Context={metadata.get('decision_context', '?')}, "
+                            f"MCap={mcap_display})"
+                        )
+                    context_parts.append("---")
+                default_return["actions"] = "\n".join(context_parts)
 
-            context_parts = ["--- Relevant Past Situations & Decisions ---"]
-            for i, record in enumerate(results):
-                context_parts.append(f"Past Case {i+1} (Similarity Distance: {record['distance']:.4f}):")
-                context_parts.append(record['situation_summary'].strip()) 
-                metadata = json.loads(record['metadata']) if isinstance(record['metadata'], str) else record['metadata']
-                if metadata:
-                    mcap_display = f"${metadata.get('market_cap', 0):,.0f}" if metadata.get('market_cap') else "N/A"
-                    outcome_info = "" 
-                    context_parts.append(
-                        f"  (Metadata: Decision={metadata.get('decision', '?')}, "
-                        f"Conf={metadata.get('confidence', '?')}, Context={metadata.get('decision_context', '?')}, "
-                        f"MCap={mcap_display}{outcome_info})"
-                    )
-                context_parts.append("---")
+            # --- Process Market Examples ---
+            if not results_market:
+                if self.log_verbose: logger.debug("🧠 No relevant market examples found in 'market_knowledge_base'.")
+            else:
+                context_parts = ["--- Relevant Market Examples (Other Tokens) ---"]
+                for i, record in enumerate(results_market):
+                    context_parts.append(f"Market Example {i+1} (Similarity Distance: {record['distance']:.4f}):")
+                    context_parts.append(record['summary'].strip()) # 'summary' is the column name in the new table
+                    metadata = json.loads(record['metadata']) if isinstance(record['metadata'], str) else record['metadata']
+                    if metadata:
+                        context_parts.append(
+                            f"  (Metadata: Outcome={metadata.get('reason', '?')}, "
+                            f"Creator={metadata.get('creator', '?')}, "
+                            f"MaxMCap={metadata.get('max_mcap', 'N/A')} SOL)"
+                        )
+                    context_parts.append("---")
+                default_return["market_examples"] = "\n".join(context_parts)
 
-            return "\n".join(context_parts)
+            return default_return
 
         except Exception as e:
+            # This will now catch errors from the pool.fetch or asyncio.gather
             logger.error(f"🧠 Error querying pgvector for RAG context: {e}", exc_info=True)
-            return "Error retrieving context from memory."
+            return {
+                "actions": "Error retrieving past actions from memory.",
+                "market_examples": "Error retrieving market examples from memory."
+            }
 
     async def query_llm(self, prompt: str) -> str:
         """
@@ -291,24 +358,33 @@ class AIDecisionMaker:
                 ollama.chat,
                 model=self.model,
                 options={'temperature': 0.1},
-                messages=[{'role': 'user', 'content': prompt}]
+                messages=[{'role': 'user', 'content': prompt}],
+                format="json"  # <-- ENFORCE JSON OUTPUT
             )
             if self.log_verbose: logger.debug("🧠 AI Worker: Querying LLM... (BLOCKING CALL COMPLETE)")
             
+            # The result is now a JSON string
             result = response['message']['content'].strip()
+            
             if self.log_verbose:
                 log_result_snippet = result[:11000] + ('...' if len(result) > 11000 else '')
-                logger.debug(f"🧠 LLM Response received:\n{log_result_snippet}")
+                logger.debug(f"🧠 LLM JSON Response received:\n{log_result_snippet}")
             return result
 
         except Exception as e:
             logger.error(f"🧠 Ollama query failed using model '{self.model}': {e}", exc_info=True)
-            return "HOLD:0\n---\nAI decision unavailable due to LLM query error."
+            # Return a fallback JSON error string
+            return json.dumps({
+                "decision": "HOLD",
+                "confidence": 0,
+                "reasoning": { "final_conclusion": f"AI decision unavailable due to LLM query error: {e}" }
+            })
 
     async def get_trade_advice(self, current_data: dict, include_explanation: bool = True) -> dict:
         """
-        [MODIFIED] Orchestrates the process of getting trade advice from the LLM.
-        This function is now fully asynchronous and uses `creator_history_summary`.
+        [REFACTORED V5 - JSON Mode]
+        Orchestrates the process of getting trade advice from the LLM using a
+        dynamically built, JSON-enforced prompt.
         """
         required_keys = ['mint', 'source', 'price', 'market_cap', 'volatility', 'decision_context', 'token_age_minutes']
         missing_keys = [k for k in required_keys if k not in current_data or current_data[k] is None]
@@ -316,135 +392,100 @@ class AIDecisionMaker:
              logger.error(f"🧠 Missing essential keys for AI advice: {missing_keys}. Input data: {list(current_data.keys())}")
              return {"decision": "HOLD", "confidence": 0, "explanation": f"Incomplete essential data: Missing {missing_keys}"}
 
+        # --- 1. Determine Context and Load Prompt Snippets ---
         decision_context = current_data['decision_context']
-        if decision_context in ["INITIAL BUY", "REBUY"]:
-            prompt_config = self.prompts['buy']
-            if decision_context == "INITIAL BUY":
-                specific_guidance_addon = "\n- This is the *first* potential buy. Assess initial risk carefully."
-            else: # REBUY
-                specific_guidance_addon = "\n- This is a *rebuy* opportunity. Check trade history for previous exit reason. Confirm trend reversal if needed."
-            prompt_config['context_specific_guidance'] += specific_guidance_addon
+
+        if decision_context == "INITIAL BUY":
+            context_key = 'buy'
+        elif decision_context == "REBUY":
+            context_key = 'rebuy'
         elif decision_context == "SELL/HOLD":
-            prompt_config = self.prompts['sell']
+            context_key = 'sell'
         else:
             logger.warning(f"🧠 Unknown decision context '{decision_context}'. Defaulting to SELL/HOLD logic.")
-            prompt_config = self.prompts['sell']
-            decision_context = "SELL/HOLD"
+            context_key = 'sell'
+            decision_context = "SELL/HOLD" # Normalize
 
-        mcap_for_query = current_data.get('market_cap', 0)
-        volatility_for_query = current_data.get('volatility', 0)
-        rug_score_for_query = current_data.get('rugcheck_latest', 'N/A')
-        rug_trend_for_query = current_data.get('rugcheck_trend', 'N/A')
-        social_score_for_query = current_data.get('social_latest', 'N/A')
-        social_trend_for_query = current_data.get('social_score_trend', 'N/A')
-        age_for_query = current_data.get('token_age_minutes', 'N/A')
-        
-        # --- MODIFICATION START ---
-        creator_summary_for_query = current_data.get('creator_history_summary', 'N/A') # Use new field
-        # --- MODIFICATION END ---
-        
-        uri_status_for_query = current_data.get('uri_status', 'N/A')
-        price_momentum_query_part = "N/A"
-        if current_data['source'] == 'PUMP' and 'pump_price_change_1m' in current_data:
-            price_momentum_query_part = current_data['pump_price_change_1m']
-        elif current_data['source'] == 'DEXSCREENER' and 'dex_price_change_m5' in current_data:
-            price_momentum_query_part = f"{current_data['dex_price_change_m5']}%"
+        # Fallback: If rebuy.yaml wasn't loaded, use buy.yaml for REBUY context
+        if context_key == 'rebuy' and 'rebuy' not in self.prompts:
+            logger.warning("🧠 'rebuy.yaml' not loaded. Falling back to 'buy.yaml' for REBUY context.")
+            context_key = 'buy'
+            
+        prompt_config = self.prompts.get(context_key, self.prompts['sell']) # Fallback to 'sell'
+        base_prompts = self.prompts.get('base')
+        if not base_prompts:
+            logger.critical("🧠 CRITICAL: 'base.yaml' prompt snippets not found. Cannot build prompt.")
+            return {"decision": "HOLD", "confidence": 0, "explanation": "Internal Error: Base prompts missing."}
 
-        # --- MODIFICATION START ---
-        # Update situation_query to use creator_history_summary
+        # --- 2. Generate RAG Context ---
         situation_query = (
             f"Analyze similar Solana meme coin situations: Context={decision_context}, "
-            f"Source={current_data['source']}, MCap approx ${mcap_for_query:,.0f}, "
-            f"Volatility level {volatility_for_query:.3f}, Token Age: {age_for_query} mins. "
-            f"Rugcheck score {rug_score_for_query} trending {rug_trend_for_query}, "
-            f"Social score {social_score_for_query} trending {social_trend_for_query}. "
-            f"Creator History: {creator_summary_for_query}. URI Status: {uri_status_for_query}. " # MODIFIED
-            f"Price Momentum (recent): {price_momentum_query_part}"
+            f"Source={current_data['source']}, MCap approx ${current_data.get('market_cap', 0):,.0f}, "
+            f"Volatility level {current_data.get('volatility', 0):.3f}, Token Age: {current_data.get('token_age_minutes', 'N/A')} mins. "
+            f"Rugcheck score {current_data.get('rugcheck_latest', 'N/A')}, "
+            f"Social score {current_data.get('social_latest', 'N/A')}. "
+            f"Creator History: {current_data.get('creator_history_summary', 'N/A')}. "
+            f"Telegram: {current_data.get('latest_telegram_members', 'N/A')} members. "
+            f"RSI: {current_data.get('latest_rsi', 'N/A')}."
         )
-        # --- MODIFICATION END ---
         
         if self.log_verbose: logger.debug(f"🧠 RAG Situation Query: {situation_query}")
-
         rag_context = await self.retrieve_context(situation_query)
 
+        # --- 3. Format Dynamic Data Blocks ---
         market_dynamics_formatted = "Market dynamics data not available or source unknown."
         source = current_data['source']
         try:
             if source == 'PUMP':
-                pump_keys = re.findall(r'\{(\w+)\}', prompt_config['market_dynamics_template_pump'])
-                if all(k in current_data for k in pump_keys):
-                    market_dynamics_formatted = prompt_config['market_dynamics_template_pump'].format(**current_data)
-                else:
-                    logger.warning(f"🧠 Missing required PUMP market dynamics keys in current_data. Keys: {list(current_data.keys())}")
+                market_dynamics_formatted = prompt_config['market_dynamics_template_pump'].format(**current_data)
             elif source == 'DEXSCREENER':
-                dex_keys = re.findall(r'\{(\w+)(?:[:\.].*)?\}', prompt_config['market_dynamics_template_dex'])
-                if all(k in current_data for k in dex_keys):
-                    market_dynamics_formatted = prompt_config['market_dynamics_template_dex'].format(**current_data)
-                else:
-                    logger.warning(f"🧠 Missing required DEXSCREENER market dynamics keys in current_data. Keys: {list(current_data.keys())}")
+                market_dynamics_formatted = prompt_config['market_dynamics_template_dex'].format(**current_data)
         except KeyError as e:
-            logger.error(f"🧠 KeyError formatting market dynamics for {source}: Missing key '{e}'. Available data keys: {list(current_data.keys())}")
+            logger.error(f"🧠 KeyError formatting market dynamics for {source}: Missing key '{e}'.")
             market_dynamics_formatted = f"Error formatting market dynamics for {source} (KeyError: {e})."
-        except Exception as e:
-            logger.error(f"🧠 Unexpected error formatting market dynamics for {source}: {e}", exc_info=True)
-            market_dynamics_formatted = f"Error formatting market dynamics for {source}."
-
-        social_threshold = self.config.get('DEFAULT_SOCIAL_SCORE_THRESHOLD', 100)
-        min_volatility_threshold = self.config.get('MIN_VOLATILITY', 0.1)
-        default_mcap_threshold = self.config.get('DEFAULT_MARKETCAP_THRESHOLD', 14000)
-        min_mcap_threshold = self.config.get('MIN_MARKETCAP_THRESHOLD', 4000)
         
-        # --- MODIFICATION START ---
-        # Update prompt_data to use creator_history_summary
-        prompt_data = {
-            'decision_context': decision_context,
-            'trade_history_summary': current_data.get('trade_history_summary', 'N/A'),
-            'social_threshold': social_threshold, 'min_volatility': min_volatility_threshold,
-            'rag_context': rag_context, 'name': current_data.get('name', 'Unknown'),
-            'mint': current_data.get('mint', 'N/A'),
-            'token_age_minutes': current_data.get('token_age_minutes', 'N/A'),
-            'creator_history_summary': current_data.get('creator_history_summary', 'Error: History not found.'), # MODIFIED
-            'uri_status': current_data.get('uri_status', 'N/A'),
-            'price': current_data.get('price', 0.0), 'market_cap': current_data.get('market_cap', 0.0),
-            'volatility': current_data.get('volatility', 0.0),
-            'rugcheck_latest': current_data.get('rugcheck_latest', 'N/A'),
-            'rugcheck_initial': current_data.get('rugcheck_initial', 'N/A'),
-            'rugcheck_trend': current_data.get('rugcheck_trend', 'N/A'),
-            'rugcheck_stability': current_data.get('rugcheck_stability', 'N/A'),
-            'social_latest': current_data.get('social_latest', 'N/A'),
-            'social_initial': current_data.get('social_initial', 'N/A'),
-            'social_score_trend': current_data.get('social_score_trend', 'N/A'),
-            'social_stability': current_data.get('social_stability', 'N/A'),
-            'telegram_members_trend': current_data.get('telegram_members_trend', 'N/A'),
-            'telegram_online_ratio_trend': current_data.get('telegram_online_ratio_trend', 'N/A'),
-            'source': source, 'market_dynamics_formatted': market_dynamics_formatted,
-            'context_specific_guidance': prompt_config.get('context_specific_guidance', ''),
+        # --- 4. Assemble Full Prompt Data ---
+        prompt_data = {**current_data} 
+        prompt_data.update({
+            'rag_context_actions': rag_context['actions'],
+            'rag_context_market': rag_context['market_examples'],
+            'market_dynamics_formatted': market_dynamics_formatted,
             'source_explanation': prompt_config.get('source_explanation', ''),
             'market_cap_guidance': prompt_config.get('market_cap_guidance', '').format(
-                default_marketcap_threshold=default_mcap_threshold,
-                min_marketcap_threshold=min_mcap_threshold
+                default_marketcap_threshold=self.config.get('DEFAULT_MARKETCAP_THRESHOLD', 14000),
+                min_marketcap_threshold=self.config.get('MIN_MARKETCAP_THRESHOLD', 4000)
             ),
             'context_specific_rules': prompt_config.get('context_specific_rules', ''),
-            'default_marketcap_threshold': default_mcap_threshold,
-            'min_marketcap_threshold': min_mcap_threshold,
-        }
-        # --- MODIFICATION END ---
+            'default_marketcap_threshold': self.config.get('DEFAULT_MARKETCAP_THRESHOLD', 14000),
+            'min_marketcap_threshold': self.config.get('MIN_MARKETCAP_THRESHOLD', 4000),
+        })
 
+        # --- 5. Dynamically Build the Final Prompt (Context -> Data -> Rules -> JSON Format) ---
         try:
-            base_template_parts = self.prompts['base']
-            final_prompt = f"{base_template_parts['task_definition']}\n\n" \
-                        f"{base_template_parts['current_token_data_header']}\n\n" \
-                        f"{base_template_parts['metadata_context_section']}\n\n" \
-                        f"{base_template_parts['core_metrics_section']}\n\n" \
-                        f"{base_template_parts['risk_assessment_section']}\n\n" \
-                        f"{base_template_parts['market_dynamics_header']}\n\n" \
-                        f"{base_template_parts['output_format_instructions']}\n\n" \
-                        f"{base_template_parts['trade_history_section']}\n\n" \
-                        f"{base_template_parts['key_decision_rules_section']}\n\n" \
-                        f"{base_template_parts['final_reminder']}"
-            final_prompt = final_prompt.format(**prompt_data)
+            prompt_sections = []
+            
+            # 1. Task Definition (from buy.yaml, etc.)
+            prompt_sections.append(prompt_config['task_definition'].format(**prompt_data))
+            
+            # 2. Data Blocks (from base.yaml)
+            prompt_sections.append(base_prompts['current_token_data_header'].format(**prompt_data))
+            prompt_sections.append(base_prompts['metadata_context_section'].format(**prompt_data))
+            prompt_sections.append(base_prompts['core_metrics_section'].format(**prompt_data))
+            prompt_sections.append(base_prompts['risk_assessment_section'].format(**prompt_data))
+            prompt_sections.append(base_prompts['market_dynamics_header'].format(**prompt_data))
+            prompt_sections.append(base_prompts['trade_history_section'].format(**prompt_data))
+            
+            # 3. Rules & RAG Context (from base.yaml)
+            prompt_sections.append(base_prompts['key_decision_rules_section'].format(**prompt_data))
+            
+            # 4. FINAL INSTRUCTION: The JSON format (from base.yaml)
+            prompt_sections.append(base_prompts['json_output_format'].format(**prompt_data))
+            
+            final_prompt = "\n\n".join(prompt_sections)
+            
             if self.log_verbose:
-                logger.debug(f"🧠 Final prompt: {final_prompt}.")
+                logger.debug(f"🧠 Final dynamic prompt for {current_data['mint']}:\n{final_prompt}")
+                
         except KeyError as e:
              logger.critical(f"🧠 CRITICAL: Missing key '{e}' during prompt final formatting.")
              return {"decision": "HOLD", "confidence": 0, "explanation": f"Internal Error: Prompt generation failed on key '{e}'."}
@@ -452,21 +493,133 @@ class AIDecisionMaker:
              logger.critical(f"🧠 CRITICAL: Unexpected error during prompt final formatting: {e}", exc_info=True)
              return {"decision": "HOLD", "confidence": 0, "explanation": f"Internal Error: Prompt generation failed unexpectedly."}
 
-        llm_response = await self.query_llm(final_prompt)
+        # --- 6. Query LLM and Process Response ---
+        llm_response_string = await self.query_llm(final_prompt) # This is now a JSON string
 
         if self.log_verbose:
-            logger.debug(f"🧠 LLM Raw Response for {current_data['mint']} ({decision_context}): {llm_response}")
+            logger.debug(f"🧠 LLM Raw JSON Response for {current_data['mint']} ({decision_context}): {llm_response_string}")
 
-        parsed_decision = self._parse_llm_response_structured(llm_response, include_explanation)
+        # Parse the JSON response
+        parsed_decision = self._parse_llm_json_response(llm_response_string, include_explanation)
 
         if self.log_verbose:
             log_explanation_snippet = parsed_decision['explanation'][:200] + ('...' if len(parsed_decision['explanation']) > 200 else '') if include_explanation and parsed_decision.get('explanation') else "(Explanation Skipped or Missing)"
             logger.debug(f"🧠 AI Advice for {current_data['mint']} ({decision_context}): {parsed_decision['decision']} "
                         f"(Confidence: {parsed_decision['confidence']}) - Reasoning: {log_explanation_snippet}")
 
-        await self.add_decision_snapshot_to_memory(current_data, parsed_decision, raw_llm_response=llm_response)
+        # Save the new decision (and its rich explanation) to RAG memory
+        await self.add_decision_snapshot_to_memory(current_data, parsed_decision, raw_llm_response=llm_response_string)
 
         return parsed_decision
+
+    def _parse_llm_json_response(self, llm_response_string: str, parse_explanation: bool = True) -> dict:
+        """
+        Parses the simplified 3-key JSON response from the LLM.
+        [MODIFIED] Now handles string-based confidence values (e.g., "Low", "High").
+        """
+        
+        # Map for string-based confidence values to integers
+        CONFIDENCE_STRING_MAP = {
+            "very low": 10,
+            "low": 25,
+            "moderate": 50,
+            "medium": 50,
+            "average": 50,
+            "reasonable": 60,
+            "good": 75,
+            "strong": 85,
+            "high": 90,
+            "very high": 95,
+            "extreme": 100,
+            "certain": 100,
+            "none": 0,
+            "zero": 0,
+        }
+
+        default_reasoning = "Explanation not found or invalid JSON format."
+        default_output = {
+            "decision": "HOLD", 
+            "confidence": 0, 
+            "explanation": "No explanation processed." if not parse_explanation else default_reasoning
+        }
+
+        try:
+            # --- FIX: Replaced re.sub with simple string methods ---
+            llm_response_string = llm_response_string.strip()
+            if llm_response_string.startswith("```json"):
+                llm_response_string = llm_response_string[7:]
+            if llm_response_string.endswith("```"):
+                llm_response_string = llm_response_string[:-3]
+            llm_response_string = llm_response_string.strip()
+            # --- END FIX ---
+
+            data = json.loads(llm_response_string)
+            if not isinstance(data, dict):
+                raise TypeError("LLM returned valid JSON, but it was not a dictionary.")
+
+            # --- [ NEW SCHEMA PARSING ] ---
+            decision = str(data.get("decision", "HOLD")).upper()
+            
+            # --- [ MODIFIED CONFIDENCE PARSING ] ---
+            raw_confidence = data.get("confidence")
+            confidence = 0 # Default
+
+            if isinstance(raw_confidence, int):
+                confidence = raw_confidence
+            elif isinstance(raw_confidence, float):
+                confidence = int(raw_confidence)
+            elif isinstance(raw_confidence, str):
+                confidence_str_low = raw_confidence.strip().lower()
+                if confidence_str_low in CONFIDENCE_STRING_MAP:
+                    confidence = CONFIDENCE_STRING_MAP[confidence_str_low]
+                    logger.debug(f"🧠 Parser: Mapped confidence string '{raw_confidence}' to {confidence}.")
+                else:
+                    try:
+                        # Try to cast string-as-number (e.g., "80")
+                        confidence = int(float(confidence_str_low.strip('% '))) # Handle "80", "80.0", "80%", " 80 "
+                    except (ValueError, TypeError):
+                        logger.warning(f"🧠 Parser: Could not parse string confidence '{raw_confidence}'. Defaulting to 0.")
+                        confidence = 0
+            elif raw_confidence is None:
+                 logger.warning(f"🧠 Parser: Confidence was 'null' in JSON response. Defaulting to 0.")
+                 confidence = 0
+            else:
+                 logger.warning(f"🧠 Parser: Confidence was of an unexpected type '{type(raw_confidence)}'. Defaulting to 0.")
+                 confidence = 0
+            # --- [ END MODIFIED CONFIDENCE PARSING ] ---
+
+            explanation = default_reasoning
+
+            if parse_explanation:
+                # Get the single reasoning string
+                reasoning_str = data.get("full_reasoning")
+                if reasoning_str and isinstance(reasoning_str, str):
+                    explanation = reasoning_str
+                # Fallback if it's still in the old format (just in case)
+                elif data.get("reasoning") and isinstance(data.get("reasoning"), dict):
+                    explanation = data["reasoning"].get("step7_final_conclusion", default_reasoning)
+                elif data.get("reasoning") and isinstance(data.get("reasoning"), str):
+                    explanation = data.get("reasoning")
+            # --- [ END NEW SCHEMA PARSING ] ---
+
+            # Ensure values are sane
+            if decision not in ["BUY", "SELL", "HOLD", "REBUY"]:
+                logger.warning(f"🧠 Parser: LLM returned invalid decision '{decision}'. Defaulting to HOLD.")
+                decision = "HOLD"
+            confidence = max(0, min(100, confidence)) # Clamp final value
+
+            return {"decision": decision, "confidence": confidence, "explanation": explanation}
+
+        except json.JSONDecodeError as e:
+            logger.error(f"🧠 Parser: Failed to decode LLM JSON response. Error: {e}. Response: {llm_response_string[:500]}...")
+            return default_output
+        except (TypeError, ValueError) as e:
+            logger.error(f"🧠 Parser: Error parsing fields from LLM JSON. Error: {e}. Data: {llm_response_string[:500]}...")
+            return default_output
+    
+    # --- [ DELETE THE OLD PARSERS ] ---
+    # def _parse_llm_response_structured(self, ...):
+    # def _parse_llm_response_fallback(self, ...):
 
     def _parse_llm_response_structured(self, llm_response: str, parse_explanation: bool = True) -> dict:
         """
@@ -478,8 +631,13 @@ class AIDecisionMaker:
             return {"decision": decision, "confidence": confidence, "explanation": explanation}
         
         lines = llm_response.strip().split('\n', 2)
-        #strict_match = re.match(r"^\s*(BUY|SELL|HOLD|REBUY)\s*:\s*(\d{1,3})\s*$", lines[0], re.IGNORECASE)
-        strict_match = re.match(r"^\s*(?:\*\*)?\s*(BUY|SELL|HOLD|REBUY)\s*:\s*(\d{1,3})\s*(?:\*\*)?\s*$", lines[0], re.IGNORECASE)
+        # This new regex is more robust. It ignores any combination of whitespace,
+        # asterisks (*), or brackets ([]) around the core components.
+        strict_match = re.match(
+            r"^\s*[\*\[\]]*\s*(BUY|SELL|HOLD|REBUY)\s*[\*\[\]]*\s*:\s*[\*\[\]]*\s*(\d{1,3})\s*[\*\[\]]*\s*$",
+            lines[0],
+            re.IGNORECASE
+        )
 
         if strict_match:
             decision = strict_match.group(1).upper()
@@ -545,7 +703,7 @@ class AIDecisionMaker:
                 if self.log_verbose: logger.debug(f"🧠 Fallback Parser: Found confidence '{confidence}' via strict line search.")
             except ValueError: logger.warning(f"🧠 Fallback Parser: Strict confidence line found, but failed to parse number '{conf_match_strict_line.group(1)}'.")
         else:
-            conf_match_lenient_line = re.search(r"^.*?\W*Confidence(?:\s*Score)?\s*\*?\W*:\s*(\d{1,3})\%?", llm_response, re.IGNORECASE | re.MULTILINE)
+            conf_match_lenient_line = re.search(r"^.*?\W*Confidence(?:\s*Score)?\s*\*?\W*:\s*(\d{1.3})\%?", llm_response, re.IGNORECASE | re.MULTILINE)
             if conf_match_lenient_line:
                  try: 
                      confidence = max(0, min(100, int(conf_match_lenient_line.group(1))))

@@ -288,8 +288,13 @@ class WebSocketHandler:
                         if random.random() < sample_rate:
                             ai_q = self.state.get_ai_evaluation_queue()
                             if not ai_q.full():
-                                await ai_q.put((0, (mint, 'INITIAL BUY'))) # Priority 0
-                                logger.debug(f"AI Queue: Added new token {mint} via sampling.")
+                                # --- [START SOLUTION 2: DUPLICATE CHECK] ---
+                                async with self.state.ai_queue_lock:
+                                    if mint not in self.state.ai_queue_mints:
+                                        await ai_q.put((0, (mint, 'INITIAL BUY'))) # Priority 0
+                                        self.state.ai_queue_mints.add(mint)
+                                        logger.debug(f"AI Queue: Added new token {mint} via sampling.")
+                                # --- [END SOLUTION 2] ---
                             else:
                                 logger.warning(f"AI Queue is full, could not add sampled new token {mint}.")
                     # <<< END AI QUEUE ADDITION >>>

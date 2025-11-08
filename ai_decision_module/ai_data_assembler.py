@@ -23,7 +23,7 @@ if __name__ == "__main__":
 from bot_logger import logger, setup_logging
 from database_handler import DatabaseClient
 from state_manager import GlobalState
-from utils import calculate_volatility, ensure_datetime
+from utils import calculate_volatility, ensure_datetime, calculate_trend_indicators
 from ai_decision_module.ai_decision_maker import AIDecisionMaker 
 from config import config as config_module
 # (Removed MAX_TOKEN_COUNT_PER_CREATOR import)
@@ -67,7 +67,8 @@ def summarize_score_history(history_records: list, score_field: str, time_field:
     default_result = {
         f"{result_prefix}_initial": None, f"{result_prefix}_latest": None,
         f"{result_prefix}_trend": "N/A", f"{result_prefix}_stability": "N/A",
-        "telegram_members_trend": "N/A", "telegram_online_ratio_trend": "N/A"
+        "telegram_members_trend": "N/A", "telegram_online_ratio_trend": "N/A",
+        "latest_telegram_members": None, "latest_telegram_online": None # <-- ADD THESE DEFAULTS
     }
     if not history_records: return default_result
     try:
@@ -108,6 +109,8 @@ def summarize_score_history(history_records: list, score_field: str, time_field:
              stability_description = "Stable (1 data point)"
 
         tg_members_trend_str, tg_online_ratio_trend_str = "N/A", "N/A"
+        latest_telegram_members, latest_telegram_online = None, None
+
         if score_field == 'score_value' and 'details' in df.columns:
             recent_details_df = df[df[time_field] >= recent_cutoff].copy()
             def safe_json_loads(x):
@@ -133,6 +136,13 @@ def summarize_score_history(history_records: list, score_field: str, time_field:
             if len(valid_members_series) > 1:
                 member_change = valid_members_series.iloc[-1] - valid_members_series.iloc[0]
                 tg_members_trend_str = f"{member_change:+.0f}"
+            
+            if not valid_members_series.empty:
+                latest_telegram_members = valid_members_series.iloc[-1]
+            valid_online_series = recent_details_df['online'].dropna()
+            if not valid_online_series.empty:
+                latest_telegram_online = valid_online_series.iloc[-1]
+            
             valid_ratios_series = recent_details_df['online_ratio'].dropna()
             if len(valid_ratios_series) > 1:
                 ratio_change_pct = (valid_ratios_series.iloc[-1] - valid_ratios_series.iloc[0]) * 100
@@ -141,7 +151,9 @@ def summarize_score_history(history_records: list, score_field: str, time_field:
         final_result = {
             f"{result_prefix}_initial": initial_score, f"{result_prefix}_latest": latest_score,
             f"{result_prefix}_trend": trend_description, f"{result_prefix}_stability": stability_description,
-            "telegram_members_trend": tg_members_trend_str, "telegram_online_ratio_trend": tg_online_ratio_trend_str
+            "telegram_members_trend": tg_members_trend_str, "telegram_online_ratio_trend": tg_online_ratio_trend_str,
+            "latest_telegram_members": latest_telegram_members, # <-- ADD THIS
+            "latest_telegram_online": latest_telegram_online   # <-- ADD THIS
         }
         return final_result
     except Exception as e:
@@ -398,6 +410,9 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
         socials_summary = summarize_score_history([dict(r) for r in socials_hist_raw], 'score_value', 'timestamp', lookback_hours=1.0)
         market_summary = summarize_market_dynamics([dict(r) for r in market_hist_raw_source_specific], source, lookback_mins=market_hist_lookback_mins)
         volatility = 0.0
+        latest_rsi = 'N/A'
+        latest_ema_fast = 'N/A'
+        latest_ema_slow = 'N/A'
         if market_hist_raw_unified:
             market_hist_df = pd.DataFrame([dict(r) for r in market_hist_raw_unified])
             if not market_hist_df.empty:
@@ -405,15 +420,81 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
                 market_hist_df['price_sol_decimal'] = market_hist_df['price_sol'].apply(lambda x: Decimal(str(x)) if pd.notna(x) else pd.NA)
                 market_hist_df = market_hist_df.dropna(subset=['timestamp', 'price_sol_decimal'])
                 if not market_hist_df.empty:
-                     market_hist_df = market_hist_df.set_index('timestamp').sort_index()
-                     price_series = pd.to_numeric(market_hist_df['price_sol_decimal'])
-                     if not price_series.empty and len(price_series) > 1:
-                         vol_window = min(len(price_series), 120)
-                         if vol_window >= 2:
-                              volatility_series = calculate_volatility(price_series, window=vol_window)
-                              if not volatility_series.empty: volatility = volatility_series.iloc[-1]
+                    market_hist_df = market_hist_df.set_index('timestamp').sort_index()
+                    price_series = pd.to_numeric(market_hist_df['price_sol_decimal'])
+                    
+                    if not price_series.empty and len(price_series) > 1:
+                        vol_window = min(len(price_series), 120)
+                        if vol_window >= 2:
+                            volatility_series = calculate_volatility(price_series, window=vol_window)
+                            if not volatility_series.empty: volatility = volatility_series.iloc[-1]
+
+                        # Resample price to OHLC
+                        ohlc = price_series.resample('5s').ohlc()
+                        # Resample volume
+                        if 'volume_usd' in market_hist_df.columns:
+                            volume_series = pd.to_numeric(market_hist_df['volume_usd'])
+                            vol = volume_series.resample('5s').sum()
+                            ohlc['Volume'] = vol
+                        else:
+                            ohlc['Volume'] = 0 # No volume data
+
+                        # Forward-fill gaps from resampling and drop any remaining NaNs
+                        ohlc = ohlc.ffill().dropna()
+
+                        min_candles = db.config.get('MIN_CANDLE_DATA_FOR_INDICATORS', 30)
+                        if len(ohlc) >= min_candles:
+                            # Rename columns to what calculate_trend_indicators expects
+                            ohlc.rename(columns={
+                                'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close'
+                            }, inplace=True)
+
+                            # Run the existing TA function
+                            df_with_indicators = calculate_trend_indicators(ohlc, db.config)
+                            
+                            if not df_with_indicators.empty:
+                                latest_row = df_with_indicators.iloc[-1]
+                                
+                                # Get the column names from config
+                                rsi_col = f"RSI_{db.config['RSI_PERIOD']}"
+                                ema_fast_col = 'EMA_fast'
+                                ema_slow_col = 'EMA_slow'
+                                
+                                # Safely extract values and format them
+                                if rsi_col in latest_row and pd.notna(latest_row[rsi_col]):
+                                    latest_rsi = f"{latest_row[rsi_col]:.2f}"
+                                if ema_fast_col in latest_row and pd.notna(latest_row[ema_fast_col]):
+                                    latest_ema_fast = f"{latest_row[ema_fast_col]:.9f}"
+                                if ema_slow_col in latest_row and pd.notna(latest_row[ema_slow_col]):
+                                    latest_ema_slow = f"{latest_row[ema_slow_col]:.9f}"
+                                
+                                logger.debug(f"🧠 TA Indicators for {mint}: RSI={latest_rsi}, EMA_F={latest_ema_fast}, EMA_S={latest_ema_slow}")
+                        else:
+                            logger.debug(f"🧠 Not enough resampled candles for TA ({len(ohlc)} < {min_candles})")
         else:
             logger.warning(f"🧠 No unified market history available for {mint} to calculate volatility.")
+
+        # --- 7b. Calculate Data Completeness ---
+        data_completeness_score = 100
+        completeness_notes = []
+        if rugcheck_summary.get('rugcheck_latest') is None or str(rugcheck_summary.get('rugcheck_latest')).lower() == 'none':
+            data_completeness_score -= 30
+            completeness_notes.append("Missing Rugcheck Score")
+        if socials_summary.get('social_score_latest') is None or str(socials_summary.get('social_score_latest')).lower() == 'none':
+            data_completeness_score -= 20
+            completeness_notes.append("Missing Social Score")
+        if socials_summary.get('latest_telegram_members') is None: # Use the field we just added
+            data_completeness_score -= 10 # Less penalty than core social score
+            completeness_notes.append("Missing Telegram Stats")
+        if uri_status != "Valid (Reachable)":
+            data_completeness_score -= 25
+            completeness_notes.append(f"Invalid URI: {uri_status}")
+        if market_summary.get('market_dynamics_summary_str', "N/A").startswith("N/A"):
+            data_completeness_score -= 15
+            completeness_notes.append("Missing Market Dynamics")
+        
+        data_completeness_score = max(0, data_completeness_score) # Clamp at 0
+        market_regime = await GlobalState.get_instance().get_market_regime()
 
         # 8. Assemble Final Data Dictionary
         current_data = {
@@ -429,6 +510,12 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
             'uri_status': uri_status,
             'price': float(current_price_sol) if current_price_sol is not None else 0.0,
             'market_cap': current_mcap_usd, 'volatility': volatility,
+            'latest_rsi': latest_rsi,
+            'latest_ema_fast': latest_ema_fast,
+            'latest_ema_slow': latest_ema_slow,
+            'data_completeness_score': data_completeness_score,
+            'data_completeness_notes': ", ".join(completeness_notes) or "All data present",
+            'market_regime': market_regime,
             **rugcheck_summary, **socials_summary,
             'trade_history_summary': trade_history_summary,
             'market_dynamics_summary_str': market_summary.get('market_dynamics_summary', "N/A"),

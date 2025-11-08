@@ -48,12 +48,18 @@ class GlobalState:
         self.socialscheck_queue = asyncio.PriorityQueue()  # SocialsCheck processing queue
         self.enrichment_queue = asyncio.Queue() # Transaction enrichment queue
         self.ai_evaluation_queue = asyncio.PriorityQueue(maxsize=config.AI_QUEUE_MAX_SIZE) # AI eval queue with max size
+        self.ai_queue_mints = set() # Tracks mints currently in the AI queue
+        self.ai_queue_lock = asyncio.Lock() # Lock to protect the set
 
         self.ws_refresh_next_run_ts: Optional[datetime] = None
 
         # Concurrency control
         self.lock = asyncio.Lock()  # General state lock
         self.db_write_lock = asyncio.Lock()  # Database write lock
+
+        # In GlobalState.__init__
+        self.market_regime: str = "NEUTRAL"
+        self.market_regime_lock = asyncio.Lock()
         
 
     def _load_subscriptions_from_file(self):
@@ -160,6 +166,15 @@ class GlobalState:
                 logger.error(f"Failed to write SOL price to {SOL_PRICE_FILE}: {e}")
             except Exception as e: # Catch potential JSON errors too
                 logger.error(f"Unexpected error writing SOL price to {SOL_PRICE_FILE}: {e}")
+
+    #🚀 Market Regime Awareness
+    async def set_market_regime(self, regime: str):
+        async with self.market_regime_lock:
+            self.market_regime = regime
+
+    async def get_market_regime(self) -> str:
+        async with self.market_regime_lock:
+            return self.market_regime
 
     async def get_sol_price(self) -> float:
         async with self.lock:

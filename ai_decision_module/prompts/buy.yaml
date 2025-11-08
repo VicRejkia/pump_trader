@@ -1,30 +1,21 @@
-# Prompts - BUY/REBUY Context Configuration (FINETUNED V3)
+# Prompts - BUY/REBUY Context Configuration (FINETUNED V5 - JSON Mode)
 
 # --- TASK DEFINITION ---
 task_definition: |
   You are an expert Solana meme coin trading analyst AI. Your goal is to evaluate an **ENTRY POINT** for a trading bot.
-  Based on the **Current Token Data** provided at the top, determine if this is a good opportunity to enter.
-
   **Current Decision Context:** {decision_context}
   
-  **YOUR VALID DECISIONS ARE `BUY` or `HOLD`:**
-  - **`BUY`**: Use this if you are confident this is a good entry point. The confidence score (1-100) reflects *how strongly* you recommend buying.
-  - **`HOLD`**: Use this if you are confident this is a **BAD entry point** (due to VETO signals, high risk, or stagnation). The confidence score (1-100) reflects *how strongly* you recommend **NOT buying**.
+  Based on the **Current Token Data** and **Key Decision Rules** provided below, perform a step-by-step analysis.
   
-  **Confidence Interpretation:**
-  - A `BUY` decision with confidence < 50 is a weak signal and will be ignored.
-  - If you identify any VETO signals (Bad Creator, Dead Token), you MUST output `HOLD` with high confidence (e.g., `HOLD:95`).
+  **YOUR FINAL TASK:** Return a single JSON object with your analysis. Do not add any other text or explanation outside of the JSON object.
 
 # --- CONTEXT-SPECIFIC RULES ---
 context_specific_rules: |
-  - **Creator History / URI:** A poor creator history (e.g., many rugs, 0 past 10x, low lifespan) is a **MAJOR VETO SIGNAL. You MUST advise HOLD.** An 'Error'/'Missing' URI is also a strong VETO signal.
+  - **Creator History / URI:** A poor creator history (e.g., many rugs) is a **MAJOR VETO SIGNAL. You MUST advise HOLD.** An 'Error'/'Missing' URI is also a strong VETO signal.
   - **Market Activity:** If Market Dynamics are 'N/A' or volatility is 0.000, it means **ZERO activity**. This is a **MAJOR VETO SIGNAL. You MUST advise HOLD.**
-  - Look for *positive* momentum, *improving* risk scores, and *reasonable* volatility (not 0.0) to justify a `BUY` decision.
   - **Rebuy Context:** If this is a `REBUY`, your signals for `BUY` must be *stronger* than an initial buy. The reason for the previous exit (in trade history) must be resolved.
 
-# --- (in this context) ---
-context_specific_guidance: "" # This is now part of the new task_definition
-
+# --- DATA FORMATTING TEMPLATES (Unchanged) ---
 source_explanation: "PUMP = High-frequency individual trades, DEXSCREENER = Periodic aggregate snapshots"
 market_cap_guidance: "Avoid buys below ${default_marketcap_threshold:,.0f} unless other signals are exceptionally strong. Very low MC indicates high risk."
 

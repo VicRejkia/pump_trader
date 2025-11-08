@@ -148,7 +148,7 @@ _DRPC_ENDPOINT = "https://lb.drpc.org/ogrpc?network=solana"
 
 # --- AI Decision Maker Configuration ---
 AI_DECISION_MAKING_ENABLED = True           # Master switch to enable/disable AI evaluation
-AI_MODEL_NAME = 'deepseek-r1:8b'             # Ollama model to use (e.g., 'llama3', 'mistral')
+AI_MODEL_NAME = 'lucasmg/gemma3-12b-tool-thinking-true:latest' #'deepseek-r1:8b-0528-qwen3-q4_K_M' #'deepseek-r1:8b'             # Ollama model to use (e.g., 'llama3', 'mistral')
 AI_LOG_VERBOSE = False                      # Set to True for full AI debug spam, False for concise logs
 _AI_EMBEDDNG_MODEL = 'all-MiniLM-L6-v2'     # Sentence Transformer model for RAG embeddings
 _AI_PROMPTS_DIR = 'ai_decision_module/prompts' # Path to the YAML prompt files
@@ -170,8 +170,8 @@ AI_REFRESH_INTERVAL_STALE_MIN = 60          # How often to check for the oldest 
 AI_CONFIDENCE_THRESHOLD_INITIAL_BUY = 90    # 90 is just an example. Set your desired threshold.
 AI_CONFIDENCE_THRESHOLD_STRONG = 70         # Confidence level for strong confirmation/action
 AI_CONFIDENCE_THRESHOLD_VETO = 75           # Confidence level for AI to veto a rule-based buy
-AI_BUY_HOLD_CONFIDENCE_THRESHOLD = 60       # Min confidence for AI 'HOLD' to defer a buy
-AI_SELL_TRIGGER_CONFIDENCE_THRESHOLD = 75   # Min confidence for AI 'SELL' to trigger an early sell
+AI_BUY_HOLD_CONFIDENCE_THRESHOLD = 75       # Min confidence for AI 'HOLD' to defer a buy
+AI_SELL_TRIGGER_CONFIDENCE_THRESHOLD = 85   # Min confidence for AI 'SELL' to trigger an early sell
 AI_HOLD_OVERRIDE_CONFIDENCE_THRESHOLD = 85  # Min confidence for AI 'HOLD' to potentially override a non-critical rule-based sell
 
 # AI Queue Population Settings
