@@ -148,7 +148,7 @@ _DRPC_ENDPOINT = "https://lb.drpc.org/ogrpc?network=solana"
 
 # --- AI Decision Maker Configuration ---
 AI_DECISION_MAKING_ENABLED = True           # Master switch to enable/disable AI evaluation
-AI_MODEL_NAME = 'lucasmg/gemma3-12b-tool-thinking-true:latest' #'deepseek-r1:8b-0528-qwen3-q4_K_M' #'deepseek-r1:8b'             # Ollama model to use (e.g., 'llama3', 'mistral')
+AI_MODEL_NAME = 'ibm/granite4:latest'       #'lucasmg/gemma3-12b-tool-thinking-true:latest' #'deepseek-r1:8b-0528-qwen3-q4_K_M' #'deepseek-r1:8b'             # Ollama model to use (e.g., 'llama3', 'mistral')
 AI_LOG_VERBOSE = False                      # Set to True for full AI debug spam, False for concise logs
 _AI_EMBEDDNG_MODEL = 'all-MiniLM-L6-v2'     # Sentence Transformer model for RAG embeddings
 _AI_PROMPTS_DIR = 'ai_decision_module/prompts' # Path to the YAML prompt files

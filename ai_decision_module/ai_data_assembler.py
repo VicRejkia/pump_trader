@@ -290,9 +290,10 @@ def summarize_trade_history(history_records: list, max_events: int = 5) -> str:
 # --- Main Data Fetching Function ---
 async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
     """
-    [MODIFIED]
+    [MODIFIED V3 - CORRECTED]
     Fetches and processes all necessary data for a given token mint.
-    Now uses `get_creator_history_summary` instead of the old binary flag.
+    - Fixes logic to ensure creator history is fetched for BOTH active and backed-up tokens.
+    - Computes time-to-peak, max price, and drawdown metrics.
     """
     logger.info(f"🧠 Fetching comprehensive data for token {mint}...")
     async with db.pool.acquire() as conn:
@@ -300,51 +301,51 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
         token_info = await conn.fetchrow(
             "SELECT name, symbol, data_source, traderpublickey, timestamp, uri FROM tokens WHERE mint = $1", mint
         )
+        
+        creator_wallet = None
+        
         if not token_info:
             # Token is not in the active 'tokens' table.
-            # Check if it's in the backup table to detect the race condition.
             backup_info = await conn.fetchrow(
                  "SELECT backup_reason, timestamp, traderPublicKey FROM tokens_backup WHERE mint = $1 LIMIT 1", mint
             )
             if backup_info:
                 # This is the race condition. The token was just backed up.
-                # We should not evaluate it, but we *should* log this outcome.
                 logger.warning(f"🧠 Token {mint} is no longer active (found in backup). Returning minimal outcome packet.")
+                creator_wallet = backup_info['traderpublickey'] # Get creator from backup
                 
-                # --- NEW: Fetch the creator summary properly ---
-                creator_wallet = backup_info['traderpublickey']
-                creator_summary_string = "N/A"
+                # --- [FIXED] Fetch creator summary for backup token ---
+                creator_summary_string, creator_summary_dict = "N/A", {}
                 if creator_wallet:
-                     creator_summary_string = await db.get_creator_history_summary(creator_wallet, mint)
-                # --- END NEW ---
+                     creator_summary_string, creator_summary_dict = await db.get_creator_history_summary(creator_wallet, mint)
+                # --- [END FIX] ---
 
-                # Return a special dictionary that the AI worker can use to log this outcome
                 return {
-                    "status": "INACTIVE_BACKED_UP", # Special key to be checked by the worker
+                    "status": "INACTIVE_BACKED_UP",
                     "mint": mint,
                     "backup_reason": backup_info['backup_reason'],
                     "backup_timestamp": backup_info['timestamp'],
-                    "creator_history_summary": creator_summary_string, # <-- THIS IS THE FIX
-                    "decision_context": "NON_TRADE_OUTCOME" # Use the outcome context
+                    "creator_history_summary": creator_summary_string,
+                    **creator_summary_dict,
+                    "decision_context": "NON_TRADE_OUTCOME"
                 }
             else:
                 # The token doesn't exist anywhere.
                 logger.error(f"🧠 Token {mint} not found in 'tokens' or 'tokens_backup' table.")
                 raise ValueError(f"Token {mint} not found in 'tokens' or 'tokens_backup' table.")
 
+        # --- [FIXED] This block now runs for all ACTIVE tokens ---
         # If we are here, token_info is valid and from the active 'tokens' table.
         source, name, symbol, creator_wallet = token_info['data_source'], token_info['name'], token_info['symbol'], token_info['traderpublickey']
         token_creation_ts = ensure_datetime(token_info['timestamp'])
         uri = token_info['uri']
         token_age_minutes = (dt.datetime.now(dt.timezone.utc) - token_creation_ts).total_seconds() / 60 if token_creation_ts else None
         
-        # --- MODIFICATION START ---
-        # Get the new rich creator summary from the database
-        # We pass 'conn' so it uses the existing connection/transaction
-        creator_summary_string = await db.get_creator_history_summary(creator_wallet, mint)
-        # --- MODIFICATION END ---
+        # Fetch creator summary for the active token
+        creator_summary_string, creator_summary_dict = await db.get_creator_history_summary(creator_wallet, mint)
         
         uri_status = await check_uri_status(uri)
+        # --- [END FIX] ---
 
         # 2. Determine Current Decision Context
         decision_context = "INITIAL BUY"
@@ -372,7 +373,7 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
             "SELECT score_value, timestamp, details::TEXT as details FROM v_social_scores WHERE mint = $1 ORDER BY timestamp DESC LIMIT 50", mint
         )
 
-        # 5. Fetch Market History
+        # 5. Fetch Market History (for recent dynamics)
         market_hist_lookback_mins = 15
         view_to_use = "v_unified_market_ticks_live" if await conn.fetchval("SELECT 1 FROM tokens WHERE mint = $1", mint) else "v_unified_market_ticks_historical"
         market_hist_raw_unified = await conn.fetch(
@@ -395,6 +396,40 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
                     FROM v_dexscreener_data WHERE mint_address = $1 AND timestamp >= NOW() - INTERVAL '{market_hist_lookback_mins} minutes'
                     ORDER BY timestamp ASC;""", mint
             )
+
+        # --- [NEW BLOCK 5b: Fetch Full History for Peak/Drawdown Metrics] ---
+        max_price_sol = None
+        max_mcap_sol = None
+        max_price_ts = None
+        time_to_peak_minutes = None
+        minutes_since_peak = None
+        drawdown_from_peak_pct = 0.0
+
+        peak_data = await conn.fetchrow(
+            f"""SELECT
+                   MAX(price_sol) as max_price_sol,
+                   MAX(market_cap_sol) as max_mcap_sol,
+                   (array_agg(timestamp ORDER BY price_sol DESC))[1] as max_price_ts
+               FROM v_unified_market_ticks_historical
+               WHERE mint = $1 AND price_sol > 0 AND market_cap_sol > 0
+            """, mint
+        )
+        
+        if peak_data and peak_data['max_price_sol'] and peak_data['max_price_ts'] and token_creation_ts:
+            try:
+                max_price_sol = float(peak_data['max_price_sol'])
+                max_mcap_sol = float(peak_data['max_mcap_sol'])
+                max_price_ts = ensure_datetime(peak_data['max_price_ts'])
+                
+                time_to_peak_minutes = (max_price_ts - token_creation_ts).total_seconds() / 60
+                minutes_since_peak = (dt.datetime.now(dt.timezone.utc) - max_price_ts).total_seconds() / 60
+                
+                if current_price_sol and max_price_sol > 0:
+                    drawdown_from_peak_pct = ((float(current_price_sol) / max_price_sol) - 1) * 100.0
+                
+            except Exception as e:
+                logger.warning(f"🧠 Error calculating peak/drawdown metrics for {mint}: {e}", exc_info=True)
+        # --- [END NEW BLOCK 5b] ---
 
         # 6. Fetch Portfolio (Trade) History
         portfolio_hist_raw = await conn.fetch(
@@ -503,9 +538,18 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
             'decision_context': decision_context,
             'token_age_minutes': round(token_age_minutes, 1) if token_age_minutes is not None else None,
             
-            # --- MODIFICATION START ---
-            'creator_history_summary': creator_summary_string, # ADD this
-            # --- MODIFICATION END ---
+            # --- [FIXED] This now correctly includes data for active tokens ---
+            'creator_history_summary': creator_summary_string, # The summary string
+            **creator_summary_dict, # Unpack structured data (creator_rug_rate, etc.)
+            
+            # Add new peak/drawdown metrics
+            'max_price_sol': max_price_sol,
+            'max_mcap_sol': max_mcap_sol,
+            'max_price_ts': max_price_ts.isoformat() if max_price_ts else None,
+            'time_to_peak_minutes': round(time_to_peak_minutes, 1) if time_to_peak_minutes is not None else None,
+            'minutes_since_peak': round(minutes_since_peak, 1) if minutes_since_peak is not None else None,
+            'drawdown_from_peak_pct': round(drawdown_from_peak_pct, 2),
+            # --- [END FIX] ---
             
             'uri_status': uri_status,
             'price': float(current_price_sol) if current_price_sol is not None else 0.0,

@@ -1,4 +1,4 @@
-# Prompts - Base Template (FINETUNED V5 - JSON Mode)
+# Prompts - Base Template (FINETUNED V6 - Rich JSON Schema)
 # This file contains REUSABLE SNIPPETS for the dynamic prompt builder.
 
 # --- 1. CURRENT TOKEN DATA (Data-First Structure) ---
@@ -17,6 +17,11 @@ core_metrics_section: |
   - Market Cap (USD): ${market_cap:,.0f}
   - Volatility (Recent): {volatility:.3f}
   - TA (5s Candle): RSI: {latest_rsi} | EMA Fast: {latest_ema_fast} | EMA Slow: {latest_ema_slow}
+  
+  **Peak & Drawdown Metrics:**
+  - Peak Price (SOL): {max_price_sol:.9f} (at {time_to_peak_minutes:.1f} mins)
+  - Time Since Peak: {minutes_since_peak:.1f} mins
+  - Drawdown from Peak: {drawdown_from_peak_pct:.2f}%
 
 risk_assessment_section: |
   **Risk Assessment:**
@@ -34,23 +39,23 @@ trade_history_section: |
   **Past Trade History Summary:**
   {trade_history_summary}
 
-# --- 3. DECISION RULES (VETO-Focused) ---
+# --- 3. DECISION RULES (MODIFIED: Graded Penalties) ---
 key_decision_rules_section: |
   **Key Decision Rules & Interpretation Guide:**
   - **Data Source:** Interpret '{source}' data correctly ({source_explanation}).
   
-  - **CRITICAL VETO SIGNALS (Read First):**
-    - **Bad Creator:** A creator history with many rugged tokens is a **MAJOR VETO SIGNAL (DO NOT BUY)**.
-    - **Dead Token (N/A):** If Market Dynamics are 'N/A' or volatility is 0.000, it means **ZERO activity**. This is a **MAJOR VETO SIGNAL (DO NOT BUY)**. For SELL/HOLD, this is a strong EXIT signal.
+  - **CRITICAL VETO SIGNALS (Graded Risk):**
+    - **Bad Creator:** A creator history with many rugged tokens (e.g., creator_rug_rate > 0.5) is a **MAJOR VETO SIGNAL**. You should advise **HOLD** with high confidence unless other signals are exceptionally strong (e.g., massive hype + momentum).
+    - **Dead Token (N/A):** If Market Dynamics are 'N/A' or volatility is 0.000, it means **ZERO activity**. This is a **MAJOR VETO SIGNAL (advise HOLD for buys)**. For SELL/HOLD, this is a strong **SELL** signal.
+    - **Temporal Risk:** If creator_avg_time_to_rug_minutes is known (e.g., 30 mins) and token_age_minutes is close to that (e.g., 28 mins), the risk is **EXTREME**.
 
   - **Risk Scores (Lower is Better):**
       - **Rugcheck Score:** Scale: <50 (Low), <600 (Moderate), 900+ (Very High).
       - **Social Score (0-100):** Scale: <10 (Excellent), <30 (Good), <50 (Moderate), 70+ (Very Poor).
   
   - **Market Cap (USD):** {market_cap_guidance}
-  - **Creator History:** A history of past 10x tokens is positive. A history of many rugs is a VETO.
-  - **URI Status:** 'Missing', 'Invalid Format', or 'Error' is a potential VETO for buys.
-  {context_specific_rules} # Placeholder for BUY/SELL/REBUY specific rules
+  - **URI Status:** 'Missing', 'Invalid Format', or 'Error' is a strong negative signal, apply a high risk penalty.
+  {context_specific_rules}
 
   - **CRITICAL - Past Situations (RAG) Warning:**
     - Learn from relevant past scenarios provided below, but **PRIORITIZE CURRENT TOKEN DATA**.
@@ -66,26 +71,33 @@ key_decision_rules_section: |
   - In 'BULLISH' regimes, you can be more tolerant of risk for high momentum.
   - In 'BEARISH' regimes, you must be extremely risk-averse and prioritize capital preservation.
 
-# --- 4. NEW: JSON OUTPUT FORMAT INSTRUCTIONS (Simplified) ---
+# --- 4. NEW: JSON OUTPUT FORMAT (Richer Schema, Utility Model) ---
 json_output_format: |
   **CRITICAL: YOUR TASK IS TO RETURN A VALID JSON OBJECT.**
   - Your *entire* response must be a single JSON object.
   - **DO NOT** include any text, titles, markdown (like `###`), or explanations before or after the JSON.
-  - Perform a step-by-step analysis *internally* using the 7 steps below, then provide your final output in the specified JSON format.
+  - Perform a step-by-step analysis *internally* using the 7 steps below.
+  - **Compute a utility score:** utility = (expected_return_1h_pct * (confidence/100)) - (risk_penalty_score).
+  - Risk Penalty: Start at 0. Add +40 if creator_rug_rate > 0.5. Add +30 if social_score > 60. Add +30 if rugcheck_score > 800. Add +20 if drawdown_from_peak_pct < -50%.
+  - **Base your decision on this utility score.** (e.g., Utility > 20 -> BUY, Utility < -10 -> SELL, else HOLD).
 
   **Internal Reasoning Steps (Do not include these steps in the final output):**
   1.  **VETO Check**: Check for Critical Veto Signals (Bad Creator, Dead Token, Bad URI).
-  2.  **Risk Analysis**: Evaluate creator, rug, and social scores.
-  3.  **Momentum Analysis**: Evaluate market dynamics, RSI, and EMAs.
-  4.  **Hype Analysis**: Evaluate Telegram stats.
-  5.  **RAG Synthesis**: Compare to past cases and market examples.
+  2.  **Risk Analysis**: Evaluate creator_rug_rate, rug, and social scores to compute `risk_penalty_score`.
+  3.  **Momentum Analysis**: Evaluate market dynamics, RSI, and drawdown to estimate `expected_return_1h_pct`.
+  4.  **RAG Synthesis**: Compare to past cases. Do they support the momentum or the risk?
+  5.  **Utility Calculation**: Compute the utility score based on your estimates.
   6.  **Data Quality**: Check completeness: {data_completeness_score}% - {data_completeness_notes}.
-  7.  **Final Synthesis**: Weigh all factors to make a final decision.
+  7.  **Final Synthesis**: Formulate the decision, confidence, and explanation based on the final utility score.
 
   **REQUIRED JSON OUTPUT SCHEMA:**
   Make 100% sure your output matches this schema exactly:
   {{
-    "decision": "string (Valid values: 'BUY', 'SELL', 'HOLD')",
+    "decision": "string (Valid values: 'BUY', 'SELL', 'HOLD', 'AGGRESSIVE_BUY')",
     "confidence": "integer [0-100]",
-    "full_reasoning": "string (A concise, one-paragraph summary of your final synthesis, justifying the decision and confidence based on your internal step-by-step analysis.)"
+    "expected_return_1h_pct": "number (Your numeric estimate, e.g., 50.5 or -10.0)",
+    "expected_return_6h_pct": "number (Your numeric estimate)",
+    "suggested_size_pct": "number (e.g., 25 for 25% of allocated capital, 0 for HOLD/SELL)",
+    "primary_risk": "string (One of: 'CREATOR_HISTORY', 'LOW_LIQUIDITY', 'RAPID_DECAY', 'POOR_SOCIALS', 'RUG_SIGNALS', 'NONE')",
+    "explanation": "string (A concise, one-paragraph summary of your final synthesis, justifying the decision and utility calculation.)"
   }}

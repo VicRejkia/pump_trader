@@ -1181,12 +1181,16 @@ class DatabaseClient:
                 logger.error(f":police_car_light: Error fetching portfolio transactions for mints {mints}: {e}", exc_info=True)
                 return {} # Return empty dict on error
             
-    async def get_creator_history_summary(self, creator_wallet: str, current_mint: str) -> str:
+    # In class DatabaseClient:
+
+    async def get_creator_history_summary(self, creator_wallet: str, current_mint: str) -> Tuple[str, dict]:
         """
-        Analyzes a creator's past tokens and generates a summary string for the AI.
+        [REFACTORED]
+        Analyzes a creator's past tokens and generates a summary string AND
+        a structured metadata dictionary for the AI.
         """
         if not creator_wallet:
-            return "Creator wallet not specified."
+            return "Creator wallet not specified.", {}
 
         query = """
         WITH PastTokens AS (
@@ -1204,12 +1208,20 @@ class DatabaseClient:
         SELECT * FROM PastTokens WHERE max_mcap IS NOT NULL OR backup_reason IS NOT NULL;
         """
         
+        summary_dict = {
+            "creator_total_launches": 0,
+            "creator_rug_count": 0,
+            "creator_rug_rate": 0.0,
+            "creator_good_runs_count": 0,
+            "creator_avg_lifespan_minutes": 0.0
+        }
+
         try:
             async with self.pool.acquire() as conn:
                 rows = await conn.fetch(query, creator_wallet, current_mint)
 
             if not rows:
-                return "This is the creator's first token."
+                return "This is the creator's first token.", summary_dict
 
             total_tokens = len(rows)
             rugged_count = 0
@@ -1233,24 +1245,34 @@ class DatabaseClient:
                     lifespan_count += 1
 
             avg_lifespan_str = "N/A"
+            avg_lifespan_minutes_val = 0.0
             if lifespan_count > 0:
-                avg_lifespan_minutes = total_lifespan_minutes / lifespan_count
-                if avg_lifespan_minutes < 120:
-                    avg_lifespan_str = f"{avg_lifespan_minutes:.0f} minutes"
+                avg_lifespan_minutes_val = total_lifespan_minutes / lifespan_count
+                if avg_lifespan_minutes_val < 120:
+                    avg_lifespan_str = f"{avg_lifespan_minutes_val:.0f} minutes"
                 else:
-                    avg_lifespan_str = f"{avg_lifespan_minutes / 60:.1f} hours"
+                    avg_lifespan_str = f"{avg_lifespan_minutes_val / 60:.1f} hours"
 
-            summary = (
+            summary_string = (
                 f"Creator has {total_tokens} past tokens. "
                 f"{rugged_count} were rugged. "
                 f"{good_runs_count} achieved >10x MCap. "
                 f"Average lifespan: {avg_lifespan_str}."
             )
-            return summary
+            
+            summary_dict = {
+                "creator_total_launches": total_tokens,
+                "creator_rug_count": rugged_count,
+                "creator_rug_rate": (rugged_count / total_tokens) if total_tokens > 0 else 0.0,
+                "creator_good_runs_count": good_runs_count,
+                "creator_avg_lifespan_minutes": avg_lifespan_minutes_val
+            }
+            
+            return summary_string, summary_dict
 
         except Exception as e:
             logger.error(f"Error generating creator history summary for {creator_wallet}: {e}", exc_info=True)
-            return "Error generating creator history."
+            return "Error generating creator history.", summary_dict
 
     async def backup_and_delete_token(self, mint: str, archived_at: datetime, reason: str=None):
         """Backup core table data to a corresponding backup table."""

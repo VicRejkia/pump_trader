@@ -28,7 +28,7 @@ from trade_processor import trade_worker
 from connectors.sol_price_api import update_sol_price
 from connectors.rugcheck_handler import Rugcheck
 from socials_processor import SocialsProcessor
-from utils import calculate_volatility 
+from utils import calculate_volatility, ensure_datetime
 from connectors.dexscreener_api import DexscreenerFetcher
 from ai_decision_module.ai_decision_maker import AIDecisionMaker
 from ai_decision_module.ai_data_assembler import fetch_comprehensive_token_data
@@ -414,10 +414,12 @@ class TradingBot:
 
                     # --- [ENRICHED QUERY] ---
                     query = """
-                        SELECT 
-                            t.mint, t.name, t.traderpublickey, t.backup_reason,
+                        SELECT
+                            t.mint, t.name, t.traderpublickey, t.backup_reason, t.timestamp as token_creation_ts,
                             ((SELECT MAX(tr.timestamp) FROM trades_backup tr WHERE tr.mint = t.mint) - t.timestamp) as lifespan,
                             (SELECT MAX(tr.marketCapSol) FROM trades_backup tr WHERE tr.mint = t.mint) as max_mcap,
+                            (SELECT MAX(tr.price_sol) FROM trades_backup tr WHERE tr.mint = t.mint) as max_price,
+                            (SELECT (array_agg(tr.timestamp ORDER BY tr.price_sol DESC))[1] FROM trades_backup tr WHERE tr.mint = t.mint AND tr.price_sol > 0) as max_price_ts,
                             (SELECT SUM(tr.sol_amount) FROM trades_backup tr WHERE tr.mint = t.mint) as total_volume_sol,
                             (SELECT score FROM rugcheck_backup rb WHERE rb.mint = t.mint ORDER BY rb.last_checked DESC LIMIT 1) as last_rug_score,
                             (SELECT score_value FROM social_scores_backup sb WHERE sb.mint = t.mint ORDER BY sb.timestamp DESC LIMIT 1) as last_social_score,
@@ -443,7 +445,10 @@ class TradingBot:
                             creator_wallet = r['traderpublickey']
                             backup_reason = r['backup_reason']
                             name = r['name']
+                            token_creation_ts = ensure_datetime(r['token_creation_ts'])
                             max_mcap = r['max_mcap']
+                            max_price = r['max_price']
+                            max_price_ts = ensure_datetime(r['max_price_ts'])
                             lifespan_delta = r['lifespan']
                             total_volume_sol = r['total_volume_sol']
                             last_rug_score = r['last_rug_score']
@@ -451,7 +456,7 @@ class TradingBot:
                             last_social_details_json = r['last_social_details']
 
                             # 2. Call for creator history
-                            creator_history_summary = await self.db_client.get_creator_history_summary(creator_wallet, mint)
+                            creator_history_summary, creator_summary_dict = await self.db_client.get_creator_history_summary(creator_wallet, mint)
 
                             # --- [START FIX] ---
                             # 3. Parse lifespan with better granularity
@@ -468,6 +473,11 @@ class TradingBot:
                                 else: # 2+ hours
                                     lifespan_str = f"{lifespan_minutes / 60.0:.1f} hrs"
                             # --- [END FIX] ---
+
+                            # --- [NEW] Compute time-to-peak ---
+                            time_to_peak_minutes = None
+                            if max_price_ts and token_creation_ts:
+                                time_to_peak_minutes = (max_price_ts - token_creation_ts).total_seconds() / 60.0
                             
                             # 4. Parse social details for hype
                             last_member_count_str = "N/A"
@@ -490,8 +500,8 @@ class TradingBot:
                                 f"Case Study: Token '{name}' ({mint}) by creator {creator_wallet}.\n"
                                 f"Outcome: {backup_reason} (Lifespan: {lifespan_str}).\n"
                                 f"Creator History: {creator_history_summary}\n"
-                                f"Metrics at End: Max MCap: {max_mcap or 'N/A'} SOL | Total Volume: {total_volume_sol or 'N/A'} SOL\n"
-                                f"Last Scores: Rug: {last_rug_score or 'N/A'} | Social: {last_social_score or 'N/A'} | TG Members: {last_member_count_str}"
+                                f"Metrics at End: Max MCap: {max_mcap or 'N/A'} SOL | Max Price: {max_price or 'N/A'} SOL (at {time_to_peak_minutes:.1f} mins)\n"
+                                f"Last Scores: Rug: {last_rug_score or 'N/A'} | Social: {last_social_score or 'N/A'}"
                             )
 
                             # 6. Format the rich metadata dict
@@ -499,11 +509,15 @@ class TradingBot:
                                 'creator': creator_wallet, 
                                 'reason': backup_reason, 
                                 'max_mcap': float(max_mcap) if max_mcap is not None else None,
+                                'max_price': float(max_price) if max_price is not None else None,
+                                'max_price_ts': max_price_ts.isoformat() if max_price_ts else None,
+                                'time_to_peak_minutes': float(time_to_peak_minutes) if time_to_peak_minutes is not None else None,
                                 'total_volume_sol': float(total_volume_sol) if total_volume_sol is not None else None,
                                 'lifespan_minutes': float(lifespan_minutes) if lifespan_minutes is not None else None,
                                 'last_rug_score': int(last_rug_score) if last_rug_score is not None else None,
                                 'last_social_score': int(last_social_score) if last_social_score is not None else None,
-                                'last_member_count': last_member_count_int
+                                # Unpack the structured creator data
+                                **creator_summary_dict
                             }
                             
                             # 7. Add to batch
@@ -566,8 +580,6 @@ class TradingBot:
                 await self.state.wait_or_interrupt(timeout=3600) # Wait 1 hour on other errors
         
         logger.info("📚 Market-Wide Knowledge Base Builder task shutting down.")
-        
-        logger.info("📚 Market-Wide Knowledge Base Builder task shutting down.")
 
     async def ai_evaluation_worker(self):
         """
@@ -595,11 +607,9 @@ class TradingBot:
                     self.state.get_ai_evaluation_queue().get(), timeout=1.0
                 )
 
-                # --- [START SOLUTION 2: REMOVE FROM SET] ---
                 # Immediately remove it from the tracking set so it can be re-queued if needed
                 async with self.state.ai_queue_lock:
                     self.state.ai_queue_mints.discard(mint)
-                # --- [END SOLUTION 2] ---
                 
                 logger.debug(f"🧠 AI Worker: Picked up {mint} (Context: {context}, Prio: {priority})")
                 
@@ -1116,27 +1126,26 @@ class TradingBot:
 
     async def ai_outcome_monitor_task(self):
         """
+        [REFACTORED V2]
         Periodically checks for outcomes (rugs, moons) of tokens the
-        AI evaluated but the bot did not purchase. This feeds back into
-        the RAG memory for future decisions.
+        AI evaluated but the bot did not purchase.
+        - Now writes a full, labeled case study to `market_knowledge_base`.
         """
         await self.state.wait_or_interrupt(timeout=600) # Wait 10 mins after startup
         logger.info("🧠 AI Outcome Monitor task started.")
 
         while not self.state.shutdown_event.is_set():
             try:
-                # Check if AI is enabled in this loop iteration
                 if not self.ai_decision_maker or not self.config.get('AI_DECISION_MAKING_ENABLED', False):
-                    await self.state.wait_or_interrupt(timeout=1800) # Sleep 30 mins if AI is off
+                    await self.state.wait_or_interrupt(timeout=1800)
                     continue
 
                 logger.debug("🧠 AI Outcome Monitor: Checking for non-trade outcomes...")
                 async with self.db_client.pool.acquire() as conn:
-                    # 1. Get tokens AI has evaluated but bot doesn't own
                     tokens_to_check = await self.db_client.get_tokens_for_outcome_analysis(lookback_hours=24, conn=conn)
                     if not tokens_to_check:
                         logger.debug("🧠 AI Outcome Monitor: No new non-portfolio tokens to analyze.")
-                        await self.state.wait_or_interrupt(timeout=1800) # Sleep 30 mins
+                        await self.state.wait_or_interrupt(timeout=1800)
                         continue
 
                     logger.info(f"🧠 AI Outcome Monitor: Found {len(tokens_to_check)} tokens to analyze for outcomes.")
@@ -1148,64 +1157,121 @@ class TradingBot:
                         last_metadata = json.loads(record['metadata']) if isinstance(record['metadata'], str) else record['metadata']
                         price_at_decision = last_metadata.get('price', 0.0)
 
-                        # 2. Check for "Dodged Bullet" (Rug)
+                        outcome_label = None
+                        outcome_reason = None
+                        outcome_timestamp = None
+                        current_price = None
+
                         rugged_record = await conn.fetchrow(
                             "SELECT backup_reason, backup_timestamp FROM tokens_backup WHERE mint = $1 AND backup_reason IN ('high_rugcheckscore', 'dead_token')",
                             mint
                         )
                         
-                        outcome_snapshot = None
-                        outcome_decision = None
-
                         if rugged_record:
-                            # This token was rugged!
-                            outcome_snapshot = {
-                                "mint": mint, "source": last_metadata.get('source', 'PUMP'), "timestamp": rugged_record['backup_timestamp'].isoformat(),
-                                "decision_context": "NON_TRADE_OUTCOME", "market_cap": 0, "volatility": 0,
-                                "token_age_minutes": last_metadata.get('token_age_minutes', 0),
-                                "is_prolific_creator": last_metadata.get('is_prolific_creator', False),
-                                "uri_status": last_metadata.get('uri_status', 'N/A'),
-                                "market_dynamics_summary_str": f"Token rugged. Reason: {rugged_record['backup_reason']}",
-                                "trade_history_summary": "No trades by bot."
-                            }
-                            outcome_decision = {
-                                "decision": "DODGED_BULLET (RUGGED)", "confidence": 100,
-                                "explanation": f"AI previously decided '{last_decision}' at {last_decision_ts.isoformat()}.\n"
-                                             f"Token was later rugged for reason: {rugged_record['backup_reason']} at {rugged_record['backup_timestamp'].isoformat()}.\n"
-                                             f"This was a correct non-action."
-                            }
-                            logger.info(f"🧠 AI Outcome: Logged DODGED_BULLET for {mint}.")
-
+                            outcome_label = "DODGED_BULLET (RUGGED)"
+                            outcome_reason = rugged_record['backup_reason']
+                            outcome_timestamp = ensure_datetime(rugged_record['backup_timestamp'])
                         else:
-                            # 3. Check for "Missed Opportunity" (Moon)
                             price_data = await self.db_client.get_price_and_market_cap_for_decision(mint, self.config, conn)
                             current_price = price_data.get('price')
                             
                             if current_price and price_at_decision > 0:
                                 price_multiplier = current_price / price_at_decision
-                                # Let's define "moon" as 10x (900% profit)
                                 if price_multiplier >= 10.0:
-                                    outcome_snapshot = {
-                                        "mint": mint, "source": last_metadata.get('source', 'PUMP'), "timestamp": datetime.now(timezone.utc).isoformat(),
-                                        "decision_context": "NON_TRADE_OUTCOME",
-                                        "market_cap": price_data.get('market_cap', 0) * (await self.state.get_sol_price()),
-                                        "volatility": 0, "token_age_minutes": last_metadata.get('token_age_minutes', 0),
-                                        "is_prolific_creator": last_metadata.get('is_prolific_creator', False),
-                                        "uri_status": last_metadata.get('uri_status', 'N/A'),
-                                        "market_dynamics_summary_str": f"Token price increased {price_multiplier:.0f}x.",
-                                        "trade_history_summary": "No trades by bot."
-                                    }
-                                    outcome_decision = {
-                                        "decision": "MISSED_OPPORTUNITY (MOON)", "confidence": 100,
-                                        "explanation": f"AI previously decided '{last_decision}' at price {price_at_decision:.9f} SOL.\n"
-                                                     f"Token subsequently rose to {current_price:.9f} SOL ({price_multiplier:.0f}x increase).\n"
-                                                     f"This was an incorrect non-action."
-                                    }
-                                    logger.info(f"🧠 AI Outcome: Logged MISSED_OPPORTUNITY for {mint}.")
+                                    outcome_label = "MISSED_OPPORTUNITY (MOON)"
+                                    outcome_reason = f"{price_multiplier:.0f}x price increase"
+                                    outcome_timestamp = datetime.now(timezone.utc)
+                        
+                        # If we found a definitive outcome, log it to both RAG tables
+                        if outcome_label and self.ai_decision_maker:
+                            logger.info(f"🧠 AI Outcome: Logging '{outcome_label}' for {mint}.")
+                            
+                            # --- [START NEW LOGIC: Build full case study] ---
+                            
+                            # 1. Get token creation info
+                            token_info = await conn.fetchrow("SELECT traderpublickey, timestamp FROM v_tokens WHERE mint = $1 LIMIT 1", mint)
+                            if not token_info:
+                                logger.warning(f"Could not find token info for {mint} to build outcome case study.")
+                                continue
+                            
+                            creator_wallet = token_info['traderpublickey']
+                            token_creation_ts = ensure_datetime(token_info['timestamp'])
 
-                        # 4. If an outcome was found, log it to RAG memory
-                        if outcome_snapshot and outcome_decision and self.ai_decision_maker:
+                            # 2. Get full historical metrics
+                            peak_data = await conn.fetchrow(
+                                f"""SELECT
+                                       MAX(price_sol) as max_price_sol,
+                                       MAX(market_cap_sol) as max_mcap_sol,
+                                       (array_agg(timestamp ORDER BY price_sol DESC))[1] as max_price_ts
+                                   FROM v_unified_market_ticks_historical
+                                   WHERE mint = $1 AND price_sol > 0
+                                """, mint
+                            )
+                            max_price_sol, max_mcap_sol, max_price_ts, time_to_peak_minutes = None, None, None, None
+                            if peak_data and peak_data['max_price_sol'] and peak_data['max_price_ts']:
+                                max_price_sol = float(peak_data['max_price_sol'])
+                                max_mcap_sol = float(peak_data['max_mcap_sol'])
+                                max_price_ts = ensure_datetime(peak_data['max_price_ts'])
+                                time_to_peak_minutes = (max_price_ts - token_creation_ts).total_seconds() / 60
+
+                            # 3. Get creator summary
+                            creator_history_summary, creator_summary_dict = await self.db_client.get_creator_history_summary(creator_wallet, mint)
+
+                            # 4. Build the RAG snapshot for ai_decision_memory (the "why")
+                            outcome_snapshot = {
+                                "mint": mint, "source": last_metadata.get('source', 'PUMP'), "timestamp": outcome_timestamp.isoformat(),
+                                "decision_context": "NON_TRADE_OUTCOME",
+                                "market_cap": 0, "volatility": 0, "token_age_minutes": last_metadata.get('token_age_minutes', 0),
+                                "creator_history_summary": creator_history_summary,
+                                **creator_summary_dict,
+                                "uri_status": last_metadata.get('uri_status', 'N/A'),
+                                "market_dynamics_summary_str": f"Token outcome: {outcome_reason}",
+                                "trade_history_summary": "No trades by bot.",
+                                "max_price_sol": max_price_sol, "time_to_peak_minutes": time_to_peak_minutes
+                            }
+                            outcome_decision = {
+                                "decision": outcome_label, "confidence": 100,
+                                "explanation": f"AI previously decided '{last_decision}' at {last_decision_ts.isoformat()}.\n"
+                                             f"Token's final outcome was: {outcome_reason} at {outcome_timestamp.isoformat()}.\n"
+                                             f"This was a {'correct' if 'DODGED' in outcome_label else 'incorrect'} non-action."
+                            }
+                            
                             await self.ai_decision_maker.add_decision_snapshot_to_memory(outcome_snapshot, outcome_decision)
+                            
+                            # 5. Build the case study for market_knowledge_base (the "what")
+                            market_summary_str = (
+                                f"Case Study: Token {mint} by creator {creator_wallet}.\n"
+                                f"Outcome: {outcome_reason} (Label: {outcome_label}).\n"
+                                f"Creator History: {creator_history_summary}\n"
+                                f"Metrics: Max MCap: {max_mcap_sol or 'N/A'} SOL (at {time_to_peak_minutes:.1f} mins)"
+                            )
+                            market_metadata_dict = {
+                                "creator": creator_wallet,
+                                "reason": outcome_reason,
+                                "label": outcome_label,
+                                "max_mcap": float(max_mcap_sol) if max_mcap_sol else None,
+                                "max_price": float(max_price_sol) if max_price_sol else None,
+                                "max_price_ts": max_price_ts.isoformat() if max_price_ts else None,
+                                "time_to_peak_minutes": float(time_to_peak_minutes) if time_to_peak_minutes else None,
+                                **creator_summary_dict
+                            }
+                            
+                            market_embedding = await self.ai_decision_maker.embed_text(market_summary_str)
+                            if market_embedding:
+                                await conn.execute(
+                                    """
+                                    INSERT INTO market_knowledge_base (mint, summary, embedding, metadata) 
+                                    VALUES ($1, $2, $3, $4) 
+                                    ON CONFLICT(mint) DO UPDATE SET
+                                        summary = EXCLUDED.summary,
+                                        embedding = EXCLUDED.embedding,
+                                        metadata = EXCLUDED.metadata,
+                                        created_at = NOW();
+                                    """,
+                                    mint, market_summary_str, str(market_embedding), json.dumps(market_metadata_dict)
+                                )
+                                logger.debug(f"📚 Knowledge Base: Added new case study for {mint} from outcome monitor.")
+                            # --- [END NEW LOGIC] ---
 
             except asyncio.CancelledError:
                 logger.info("🧠 AI Outcome Monitor task cancelled.")
@@ -1213,7 +1279,6 @@ class TradingBot:
             except Exception as e:
                 logger.error(f":police_car_light: Error in AI Outcome Monitor: {e}", exc_info=True)
             
-            # Sleep for 30 minutes before the next check
             await self.state.wait_or_interrupt(timeout=1800)
         
         logger.info("🧠 AI Outcome Monitor task shutting down.")
@@ -1225,7 +1290,7 @@ class TradingBot:
         # --- 1. Setup Logging & Signals ---
         if threading.current_thread() is threading.main_thread():
             if not self.no_log_rotate:
-                rotate_logger.file()
+                rotate_log_file()
             self.register_signal_handlers()
         
         setup_logging()
