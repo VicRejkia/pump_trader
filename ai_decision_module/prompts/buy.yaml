@@ -16,7 +16,7 @@ context_specific_rules: |
   - **Rebuy Context:** If this is a `REBUY`, your signals for `BUY` must be *stronger* than an initial buy. The reason for the previous exit (in trade history) must be resolved.
 
 # --- DATA FORMATTING TEMPLATES (Unchanged) ---
-source_explanation: "PUMP = High-frequency individual trades, DEXSCREENER = Periodic aggregate snapshots"
+source_explanation: "PUMP = High-frequency individual trades on a new, unmigrated token. DEXSCREENER = Periodic aggregate snapshots on a token that has successfully migrated to a standard DEX (e.g., Raydium). A 'DEXSCREENER' source is a positive signal, as it means the token was not an immediate rug-pull and achieved a liquidity pool."
 market_cap_guidance: "Avoid buys below ${default_marketcap_threshold:,.0f} unless other signals are exceptionally strong. Very low MC indicates high risk."
 
 market_dynamics_template_pump: |

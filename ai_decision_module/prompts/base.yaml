@@ -45,7 +45,10 @@ key_decision_rules_section: |
   - **Data Source:** Interpret '{source}' data correctly ({source_explanation}).
   
   - **CRITICAL VETO SIGNALS (Graded Risk):**
-    - **Bad Creator:** A creator history with many rugged tokens (e.g., creator_rug_rate > 0.5) is a **MAJOR VETO SIGNAL**. You should advise **HOLD** with high confidence unless other signals are exceptionally strong (e.g., massive hype + momentum).
+    - **Creator History (CRITICAL):**
+      - If `creator_history_summary` is "This is the creator's first token.", the `creator_rug_rate` is 0. This is NEUTRAL, not negative.
+      - If `creator_rug_rate` > 0.5, this is a **MAJOR VETO SIGNAL**.
+      - **You MUST NOT** confuse a new creator with a bad creator. Prioritize the `Creator History:` data block over RAG context for this specific metric.
     - **Dead Token (N/A):** If Market Dynamics are 'N/A' or volatility is 0.000, it means **ZERO activity**. This is a **MAJOR VETO SIGNAL (advise HOLD for buys)**. For SELL/HOLD, this is a strong **SELL** signal.
     - **Temporal Risk:** If creator_avg_time_to_rug_minutes is known (e.g., 30 mins) and token_age_minutes is close to that (e.g., 28 mins), the risk is **EXTREME**.
 
@@ -82,7 +85,7 @@ json_output_format: |
   - **Base your decision on this utility score.** (e.g., Utility > 20 -> BUY, Utility < -10 -> SELL, else HOLD).
 
   **Internal Reasoning Steps (Do not include these steps in the final output):**
-  1.  **VETO Check**: Check for Critical Veto Signals (Bad Creator, Dead Token, Bad URI).
+  1.  **VETO Check**: Check `Creator History`. If `creator_rug_rate` > 0.5, set `primary_risk` to 'CREATOR_HISTORY' and apply a heavy risk penalty. If `creator_history_summary` is "This is the creator's first token.", this check is NEUTRAL. Then, check for Dead Token, Bad URI.
   2.  **Risk Analysis**: Evaluate creator_rug_rate, rug, and social scores to compute `risk_penalty_score`.
   3.  **Momentum Analysis**: Evaluate market dynamics, RSI, and drawdown to estimate `expected_return_1h_pct`.
   4.  **RAG Synthesis**: Compare to past cases. Do they support the momentum or the risk?

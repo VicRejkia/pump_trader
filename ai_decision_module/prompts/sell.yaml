@@ -17,7 +17,7 @@ context_specific_rules: |
   - **Creator History / URI:** If holding a token from a creator with a poor history, your tolerance for risk should be **ZERO**. The first sign of negative momentum is an **IMMEDIATE SELL SIGNAL.**
 
 # --- DATA FORMATTING TEMPLATES (Unchanged) ---
-source_explanation: "PUMP = High-frequency individual trades, DEXSCREENER = Periodic aggregate snapshots"
+source_explanation: "PUMP = High-frequency individual trades on a new, unmigrated token. DEXSCREENER = Periodic aggregate snapshots on a token that has successfully migrated to a standard DEX (e.g., Raydium). A 'DEXSCREENER' source is a positive signal, as it means the token was not an immediate rug-pull and achieved a liquidity pool."
 market_cap_guidance: "Consider selling if Market Cap drops significantly, especially below ${min_marketcap_threshold:,.0f} (emergency threshold). Stagnant or decreasing MC over time is negative for holds."
 
 market_dynamics_template_pump: |

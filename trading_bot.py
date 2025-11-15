@@ -94,6 +94,9 @@ class TradingBot:
         self.ai_populator_task_handle: Optional[asyncio.Task] = None
         self.ai_outcome_monitor_task_handle: Optional[asyncio.Task] = None
         self.ai_vector_maint_task_handle: Optional[asyncio.Task] = None
+        # --- [NEW] Add task handle for migration KB ---
+        self.migration_knowledge_builder_task_handle: Optional[asyncio.Task] = None
+        self.knowledge_base_builder_task_handle: Optional[asyncio.Task] = None
         # --- END FIX ---
 
         os.makedirs(DATA_DIR_BOT, exist_ok=True)
@@ -201,6 +204,8 @@ class TradingBot:
             self.ai_outcome_monitor_task_handle = asyncio.create_task(self.ai_outcome_monitor_task(), name="ai_outcome_monitor")
             self.ai_vector_maint_task_handle = asyncio.create_task(self.run_vector_index_maintenance(), name="vector_index_maintenance")
             self.knowledge_base_builder_task_handle = asyncio.create_task(self.knowledge_base_builder(), name="knowledge_base_builder")
+            # --- [NEW] Start the migration knowledge builder task ---
+            self.migration_knowledge_builder_task_handle = asyncio.create_task(self.migration_knowledge_builder_task(), name="migration_knowledge_builder_task")
 
             # Add new tasks to the main task list for monitoring
             self.tasks.extend([
@@ -208,14 +213,15 @@ class TradingBot:
                 self.ai_populator_task_handle,
                 self.ai_outcome_monitor_task_handle,
                 self.ai_vector_maint_task_handle,
-                self.knowledge_base_builder_task_handle
+                self.knowledge_base_builder_task_handle,
+                self.migration_knowledge_builder_task_handle # <-- ADD THIS
             ])
             
             # Update the TradingManager with the new AI instance
             if self.trading_manager:
                 self.trading_manager.ai_decision_maker = self.ai_decision_maker
                 
-            logger.info("🧠 AI tasks (worker, populator, outcome_monitor, vector_maint) have been started.")
+            logger.info("🧠 AI tasks (worker, populator, outcome_monitor, vector_maint, kb_builder, migration_kb_builder) have been started.")
 
         except Exception as ai_init_err:
             logger.critical(f"CRITICAL: Failed to initialize AI Decision Maker: {ai_init_err}", exc_info=True)
@@ -246,7 +252,8 @@ class TradingBot:
             self.ai_populator_task_handle, 
             self.ai_outcome_monitor_task_handle,
             self.ai_vector_maint_task_handle,
-            self.knowledge_base_builder_task_handle  # <-- ADD THIS TASK
+            self.knowledge_base_builder_task_handle,
+            self.migration_knowledge_builder_task_handle # <-- ADD THIS
         ]
         # --- END FIX ---
         
@@ -271,7 +278,8 @@ class TradingBot:
         self.ai_populator_task_handle = None
         self.ai_outcome_monitor_task_handle = None
         self.ai_vector_maint_task_handle = None
-        self.knowledge_base_builder_task_handle = None # <-- ADD THIS CLEANUP
+        self.knowledge_base_builder_task_handle = None
+        self.migration_knowledge_builder_task_handle = None # <-- ADD THIS
         # --- END FIX ---
         
         logger.info("🧠 AI services have been stopped.")
@@ -396,7 +404,7 @@ class TradingBot:
                 # Check 1: AI must be enabled AND self.ai_decision_maker must exist
                 if not self.ai_decision_maker or not self.config.get('AI_DECISION_MAKING_ENABLED', False) or self.state.shutdown_event.is_set():
                     logger.warning("📚 Knowledge Base Builder is paused (AI disabled or shutting down).")
-                    await self.state.wait_or_interrupt(timeout=3600) # Sleep for an hour
+                    await self.state.wait_or_interrupt(timeout=1800) # Sleep for an hour
                     continue
                 # --- [END SHUTDOWN/SAFETY CHECK 1] ---
 
@@ -565,7 +573,7 @@ class TradingBot:
                     
                     await self.state.wait_or_interrupt(timeout=2) 
                 
-                await self.state.wait_or_interrupt(timeout=3600) # Sleep for 1 hour
+                await self.state.wait_or_interrupt(timeout=1800) # Sleep for 1 hour
 
             except asyncio.CancelledError:
                 logger.info("📚 Market-Wide Knowledge Base Builder task cancelled.")
@@ -577,9 +585,203 @@ class TradingBot:
                     break # Gracefully exit the task
                 
                 logger.error(f"Error in knowledge_base_builder: {e}", exc_info=True)
-                await self.state.wait_or_interrupt(timeout=3600) # Wait 1 hour on other errors
+                await self.state.wait_or_interrupt(timeout=1800) # Wait 1 hour on other errors
         
         logger.info("📚 Market-Wide Knowledge Base Builder task shutting down.")
+
+    # --- [NEW TASK - REFACTORED] ---
+    async def migration_knowledge_builder_task(self):
+        """
+        [REFACTORED] Builds case studies for tokens that have successfully migrated
+        and adds them to the market_knowledge_base.
+        """
+        logger.info("📚 Migration Knowledge Base Builder started.")
+        BATCH_SIZE = 100 # Process 100 migrations at a time
+
+        while not self.state.shutdown_event.is_set():
+            try:
+                # --- [START SHUTDOWN/SAFETY CHECK 1] ---
+                if not self.ai_decision_maker or not self.config.get('AI_DECISION_MAKING_ENABLED', False) or self.state.shutdown_event.is_set():
+                    logger.warning("📚 Migration KB Builder is paused (AI disabled or shutting down).")
+                    await self.state.wait_or_interrupt(timeout=3600) # Sleep for an hour
+                    continue
+                # --- [END SHUTDOWN/SAFETY CHECK 1] ---
+
+                logger.info("📚 Migration KB: Checking 'v_migrations' for new case studies to process...")
+                
+                # --- Batch Processing Loop ---
+                while not self.state.shutdown_event.is_set():
+                    
+                    if not self.ai_decision_maker or self.state.shutdown_event.is_set():
+                        logger.info("📚 Migration KB: Shutdown detected during batch processing.")
+                        break # Exit inner loop
+
+                    # --- [ENRICHED QUERY] ---
+                    # Find migrations that are not yet in the knowledge base
+                    query = """
+                        WITH LatestMigration AS (
+                            SELECT 
+                                mint, 
+                                MAX(timestamp) as migration_ts
+                            FROM v_migrations
+                            GROUP BY mint
+                        )
+                        SELECT 
+                            lm.mint, lm.migration_ts,
+                            vt.traderpublickey, vt.timestamp as token_creation_ts, vt.name
+                        FROM LatestMigration lm
+                        JOIN v_tokens vt ON lm.mint = vt.mint
+                        LEFT JOIN market_knowledge_base kb ON lm.mint = kb.mint
+                        WHERE kb.mint IS NULL -- Not yet in the knowledge base
+                        LIMIT $1;
+                    """
+                    records = await self.db_client.pool.fetch(query, BATCH_SIZE)
+
+                    if not records:
+                        logger.info("📚 Migration KB: All available migration cases have been processed. Sleeping for 1 hour.")
+                        break 
+
+                    logger.info(f"📚 Migration KB: Found a batch of {len(records)} new migration cases to process...")
+                    batch_to_insert = []
+                    
+                    # --- [START FIX] ---
+                    # Acquire connection *outside* the loop
+                    async with self.db_client.pool.acquire() as conn:
+                        for r in records:
+                            try:
+                                # 1. Extract data
+                                mint = r['mint']
+                                name = r['name']
+                                migration_ts = ensure_datetime(r['migration_ts'])
+                                token_creation_ts = ensure_datetime(r['token_creation_ts'])
+                                creator_wallet = r['traderpublickey']
+
+                                if not all([mint, migration_ts, token_creation_ts, creator_wallet]):
+                                    logger.warning(f"Migration KB: Skipping {mint}, missing core data.")
+                                    continue
+
+                                age_at_migration_minutes = (migration_ts - token_creation_ts).total_seconds() / 60.0
+
+                                # 2. Get pre-migration data (last 30 mins of Pump)
+                                pre_migration_data = await conn.fetch(
+                                    """
+                                    SELECT price, marketcapsol FROM v_trades 
+                                    WHERE mint = $1 AND timestamp < $2 
+                                    ORDER BY timestamp DESC LIMIT 100
+                                    """, mint, migration_ts
+                                )
+                                pre_mig_price, pre_mig_mcap = None, None
+                                if pre_migration_data:
+                                    pre_mig_price = float(pre_migration_data[0]['price'])
+                                    pre_mig_mcap = float(pre_migration_data[0]['marketcapsol'])
+
+                                # 3. Get post-migration data (first 30 mins of Dex)
+                                post_migration_data = await conn.fetch(
+                                    """
+                                    SELECT price_native, (market_cap / sol_price_usd) as market_cap_sol 
+                                    FROM v_dexscreener_data 
+                                    WHERE mint_address = $1 AND timestamp > $2 
+                                    ORDER BY timestamp ASC LIMIT 10
+                                    """, mint, migration_ts
+                                )
+                                post_mig_price, post_mig_mcap = None, None
+                                if post_migration_data:
+                                    post_mig_price = float(post_migration_data[0]['price_native'])
+                                    post_mig_mcap = float(post_migration_data[0]['market_cap_sol'])
+                                
+                                # 4. Get 1-hour post-migration peak
+                                peak_post_migration = await conn.fetchrow(
+                                    """
+                                    SELECT MAX(price_native) as peak_price, MAX(market_cap / sol_price_usd) as peak_mcap
+                                    FROM v_dexscreener_data
+                                    WHERE mint_address = $1 AND timestamp BETWEEN $2 AND $2 + INTERVAL '1 hour'
+                                    """, mint, migration_ts
+                                )
+                                peak_price_1h_post = float(peak_post_migration['peak_price']) if peak_post_migration and peak_post_migration['peak_price'] else None
+                                peak_mcap_1h_post = float(peak_post_migration['peak_mcap']) if peak_post_migration and peak_post_migration['peak_mcap'] else None
+
+                                # 5. Creator history
+                                creator_history_summary, creator_summary_dict = await self.db_client.get_creator_history_summary(creator_wallet, mint)
+
+                                # 6. Format summary string
+                                summary = (
+                                    f"Case Study: Token '{name}' ({mint}) by creator {creator_wallet}.\n"
+                                    f"Outcome: Successful Migration at {age_at_migration_minutes:.1f} minutes old.\n"
+                                    f"Creator History: {creator_history_summary}\n"
+                                    f"Pre-Migration (Pump): Price: {pre_mig_price or 'N/A'} SOL | MCap: {pre_mig_mcap or 'N/A'} SOL\n"
+                                    f"Post-Migration (DEX): Price: {post_mig_price or 'N/A'} SOL | MCap: {post_mig_mcap or 'N/A'} SOL\n"
+                                    f"Peak within 1h post-migration: {peak_price_1h_post or 'N/A'} SOL | {peak_mcap_1h_post or 'N/A'} SOL MCap"
+                                )
+
+                                # 7. Format metadata dict
+                                metadata = {
+                                    'creator': creator_wallet, 
+                                    'reason': "Successful Migration", 
+                                    'label': "MIGRATION_SUCCESS",
+                                    'age_at_migration_minutes': age_at_migration_minutes,
+                                    'pre_migration_price_sol': pre_mig_price,
+                                    'pre_migration_mcap_sol': pre_mig_mcap,
+                                    'post_migration_price_sol': post_mig_price,
+                                    'post_migration_mcap_sol': post_mig_mcap,
+                                    'peak_price_1h_post_sol': peak_price_1h_post,
+                                    'peak_mcap_1h_post_sol': peak_mcap_1h_post,
+                                    **creator_summary_dict
+                                }
+                                
+                                # 8. Add to batch
+                                if not self.ai_decision_maker:
+                                    logger.warning("📚 Migration KB: AI maker was shut down mid-batch. Aborting.")
+                                    break 
+                                
+                                embedding = await self.ai_decision_maker.embed_text(summary)
+                                if embedding:
+                                    batch_to_insert.append((
+                                        mint, summary, str(embedding), json.dumps(metadata)
+                                    ))
+                                else:
+                                    logger.warning(f"📚 Migration KB: Failed to generate embedding for {mint}. Skipping this record.")
+                            
+                            except Exception as processing_err:
+                                logger.error(f"📚 Migration KB: Failed to process record {r.get('mint')}: {processing_err}", exc_info=True)
+                        
+                        # 9. Insert the processed batch (Still inside the `with` block)
+                        if batch_to_insert:
+                            if not self.ai_decision_maker or self.state.shutdown_event.is_set():
+                                logger.warning("📚 Migration KB: AI maker was shut down before batch insert.")
+                            else:
+                                try:
+                                    insert_query = """
+                                        INSERT INTO market_knowledge_base (mint, summary, embedding, metadata) 
+                                        VALUES ($1, $2, $3, $4) 
+                                        ON CONFLICT(mint) DO NOTHING
+                                    """
+                                    await conn.executemany(insert_query, batch_to_insert)
+                                    logger.info(f"📚 Migration KB: Successfully inserted {len(batch_to_insert)} migration case studies.")
+                                except Exception as insert_err:
+                                    logger.error(f"📚 Migration KB: Error during batch insert: {insert_err}", exc_info=True)
+                    # --- [END FIX] ---
+                    
+                    if len(records) < BATCH_SIZE:
+                        logger.info("📚 Migration KB: Finished processing the last batch.")
+                        break 
+                    
+                    await self.state.wait_or_interrupt(timeout=2) 
+                
+                await self.state.wait_or_interrupt(timeout=3600) # Sleep for 1 hour
+
+            except asyncio.CancelledError:
+                logger.info("📚 Migration Knowledge Base Builder task cancelled.")
+                break
+            except Exception as e:
+                if isinstance(e, AttributeError) and "'NoneType' object has no attribute 'embed_text'":
+                    logger.warning(f"📚 Migration KB: Caught shutdown race condition. Task will exit.")
+                    break 
+                
+                logger.error(f"Error in migration_knowledge_builder_task: {e}", exc_info=True)
+                await self.state.wait_or_interrupt(timeout=3600)
+        
+        logger.info("📚 Migration Knowledge Base Builder task shutting down.")
+    # --- [END NEW TASK] ---
 
     async def ai_evaluation_worker(self):
         """
@@ -1120,7 +1322,7 @@ class TradingBot:
                 break
             except Exception as e:
                 logger.error(f":police_car_light: Error in vector index maintenance: {e}", exc_info=True)
-                await self.state.wait_or_interrupt(timeout=3600) # Wait 1 hour on error
+                await self.state.wait_or_interrupt(timeout=1800) # Wait 1 hour on error
         
         logger.info("🔧 Vector Index Maintenance task shutting down.")
 
@@ -1230,7 +1432,7 @@ class TradingBot:
                                 "max_price_sol": max_price_sol, "time_to_peak_minutes": time_to_peak_minutes
                             }
                             outcome_decision = {
-                                "decision": outcome_label, "confidence": 100,
+                                "decision": outcome_label, "confidence": 100, # This was an actual event
                                 "explanation": f"AI previously decided '{last_decision}' at {last_decision_ts.isoformat()}.\n"
                                              f"Token's final outcome was: {outcome_reason} at {outcome_timestamp.isoformat()}.\n"
                                              f"This was a {'correct' if 'DODGED' in outcome_label else 'incorrect'} non-action."
