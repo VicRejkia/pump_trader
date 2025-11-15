@@ -25,6 +25,10 @@ class AIDecisionMaker:
     """
     
     EMBEDDING_DIM = 384
+    # --- [NEW] ---
+    # Define the confidence threshold for BUY/SELL actions
+    CONFIDENCE_ACTION_THRESHOLD = 50 
+    # --- [END NEW] ---
 
     def __init__(self, config: Dict[str, Any], db_client: DatabaseClient):
         """
@@ -128,6 +132,9 @@ class AIDecisionMaker:
         """
         [MODIFIED] Stores a snapshot of the market data, context, AI decision, and reasoning
         into the PostgreSQL `ai_decision_memory` table for future RAG retrieval.
+        
+        [NEW in this version] If 'raw_llm_response' is provided, it is minified
+        to a one-line JSON string before being stored in the 'explanation' column.
         """
         mcap_usd = snapshot_data.get('market_cap', 0)
         volatility = snapshot_data.get('volatility', 0)
@@ -151,20 +158,39 @@ class AIDecisionMaker:
         uri_status = snapshot_data.get('uri_status', 'N/A')
         market_summary = snapshot_data.get('market_dynamics_summary_str', 'N/A')
         trade_history = snapshot_data.get('trade_history_summary', 'N/A')
-        # Prioritize saving the raw response if provided.
-        # The 'explanation' column will now store the RAW response for debugging.
-        # The 'parsed_explanation' is still used for the summary snippet.
-        parsed_explanation = decision_info.get('explanation')
-        full_response_to_store = raw_llm_response if raw_llm_response else parsed_explanation # <-- Use raw_llm_response
+
+        # --- [START OF REFACTOR] ---
+        # The 'explanation' column in the DB will store the minified raw LLM JSON
+        # or a simple text explanation for internal logs (like 'DODGED_BULLET').
         
+        parsed_explanation = decision_info.get('explanation')
+        full_response_to_store = None # Initialize
         explanation_snippet = "N/A"
         placeholder_explanations = ["Explanation not found or invalid format.", "No explanation processed."]
-        
-        # Use the *parsed* explanation for the snippet
+
+        if raw_llm_response:
+            # This is the path for a direct LLM response. Minify it.
+            try:
+                # 1. Parse the (potentially) pretty-printed JSON string.
+                parsed_json = json.loads(raw_llm_response)
+                # 2. Re-dump it as a minified string (one-liner).
+                full_response_to_store = json.dumps(parsed_json, separators=(',', ':'))
+            except json.JSONDecodeError:
+                # Fallback: If it's not valid JSON (e.g., an error message from query_llm), store it as-is.
+                logger.warning(f"🧠 Could not re-parse raw_llm_response for minification. Storing as raw text. Response: {raw_llm_response[:100]}...")
+                full_response_to_store = raw_llm_response
+        else:
+            # This is the path for internal "DODGED_BULLET" or "MISSED_OPPORTUNITY" logs.
+            # In this case, 'parsed_explanation' is the simple text string.
+            full_response_to_store = parsed_explanation
+        # --- [END OF REFACTOR] ---
+
+        # Use the *parsed* explanation for the snippet (this logic is unchanged)
         if parsed_explanation and parsed_explanation not in placeholder_explanations:
             explanation_snippet = parsed_explanation[:150] + ('...' if len(parsed_explanation) > 150 else '')
         elif raw_llm_response:
              # Fallback for snippet if parsing failed but we have a raw response
+             # This snippet logic is fine, it doesn't need to be minified.
             explanation_snippet = raw_llm_response.split('---', 1)[-1].strip()[:150] + '...'
         
         if not full_response_to_store or full_response_to_store in placeholder_explanations:
@@ -190,6 +216,7 @@ class AIDecisionMaker:
 
         # --- MODIFICATION START ---
         # Update situation_summary to use new creator history
+        # --- [MODIFIED] Now includes the translated decision
         situation_summary = (
             f"Situation Snapshot at {timestamp} for {mint} ({context} context):\n"
             f"Source: {source}, MCap (USD): ${mcap_usd_str}, Volatility: {volatility_str}\n"
@@ -260,7 +287,8 @@ class AIDecisionMaker:
                     mint, datetime.fromisoformat(snapshot_time_str), context,
                     decision_info.get('decision'), int(decision_info.get('confidence', 0)),
                     self.model,
-                    full_response_to_store, situation_summary, 
+                    full_response_to_store, # <-- This is now the minified JSON
+                    situation_summary, 
                     str(embedding), 
                     metadata_json
                 )
@@ -432,8 +460,8 @@ class AIDecisionMaker:
         except Exception as e:
             logger.error(f"🧠 Ollama query failed using model '{self.model}': {e}", exc_info=True)
             # Return a fallback JSON error string
+            # --- [MODIFIED] Removed "decision" key from this fallback ---
             return json.dumps({
-                "decision": "HOLD",
                 "confidence": 0,
                 "expected_return_1h_pct": 0.0,
                 "expected_return_6h_pct": 0.0,
@@ -444,10 +472,12 @@ class AIDecisionMaker:
 
     async def get_trade_advice(self, current_data: dict, include_explanation: bool = True) -> dict:
         """
-        [REFACTORED V7 - CORRECTED]
+        [REFACTORED V8 - CONTEXT-AWARE PARSING]
         Orchestrates the process of getting trade advice from the LLM.
         - Passes current_data to retrieve_context for filtered RAG.
-        - Parses the new, richer JSON response.
+        - Parses the new, confidence-only JSON response.
+        - **[NEW]** Passes `decision_context` to the parser so it can
+          translate `confidence` back into a `decision` string.
         - [FIX] Sanitizes prompt_data to handle None values before formatting.
         """
         required_keys = ['mint', 'source', 'price', 'market_cap', 'volatility', 'decision_context', 'token_age_minutes']
@@ -591,8 +621,14 @@ class AIDecisionMaker:
         if self.log_verbose:
             logger.debug(f"🧠 LLM Raw JSON Response for {current_data['mint']} ({decision_context}): {llm_response_string}")
 
-        # Parse the NEW, richer JSON response
-        parsed_decision_rich = self._parse_llm_json_response(llm_response_string, include_explanation)
+        # --- [MODIFIED] ---
+        # Pass the decision_context to the parser so it can translate the confidence score
+        parsed_decision_rich = self._parse_llm_json_response(
+            llm_response_string, 
+            decision_context, # <-- Pass the context
+            include_explanation
+        )
+        # --- [END MODIFIED] ---
 
         if self.log_verbose:
             log_explanation_snippet = parsed_decision_rich['explanation'][:200] + ('...' if len(parsed_decision_rich['explanation']) > 200 else '') if include_explanation and parsed_decision_rich.get('explanation') else "(Explanation Skipped or Missing)"
@@ -607,10 +643,13 @@ class AIDecisionMaker:
 
         return parsed_decision_rich
 
-    def _parse_llm_json_response(self, llm_response_string: str, parse_explanation: bool = True) -> dict:
+    # --- [MODIFIED] ---
+    def _parse_llm_json_response(self, llm_response_string: str, decision_context: str, parse_explanation: bool = True) -> dict:
         """
-        Parses the simplified 3-key JSON response from the LLM.
-        [MODIFIED] Now handles string-based confidence values (e.g., "Low", "High").
+        [MODIFIED V2]
+        Parses the confidence-only JSON response from the LLM.
+        Translates the `confidence` score into a `decision` string based on the
+        `decision_context` and the `CONFIDENCE_ACTION_THRESHOLD`.
         """
         
         # Map for string-based confidence values to integers
@@ -632,8 +671,9 @@ class AIDecisionMaker:
         }
 
         default_reasoning = "Explanation not found or invalid JSON format."
+        # --- [MODIFIED] Default output now includes a 'decision' key
         default_output = {
-            "decision": "HOLD", 
+            "decision": "HOLD", # Default action is always HOLD
             "confidence": 0, 
             "expected_return_1h_pct": 0.0,
             "expected_return_6h_pct": 0.0,
@@ -657,7 +697,7 @@ class AIDecisionMaker:
                 raise TypeError("LLM returned valid JSON, but it was not a dictionary.")
 
             # --- [ NEW SCHEMA PARSING ] ---
-            decision = str(data.get("decision", "HOLD")).upper()
+            # 'decision' key is NO LONGER expected from the LLM
             
             # --- [ MODIFIED CONFIDENCE PARSING ] ---
             raw_confidence = data.get("confidence")
@@ -716,16 +756,25 @@ class AIDecisionMaker:
             primary_risk = str(data.get("primary_risk", "UNKNOWN")).upper()
             # --- END MODIFICATION ---
 
-            # Ensure values are sane
-            valid_decisions = ["BUY", "SELL", "HOLD", "AGGRESSIVE_BUY", "REBUY", "REDUCE"]
-            if decision not in valid_decisions:
-                logger.warning(f"🧠 Parser: LLM returned invalid decision '{decision}'. Defaulting to HOLD.")
-                decision = "HOLD"
+            # --- [NEW] TRANSLATION LOGIC ---
+            # Translate the confidence score back into a decision string
+            decision = "HOLD" # Default
+            if decision_context in ["INITIAL BUY", "REBUY"]:
+                if confidence >= self.CONFIDENCE_ACTION_THRESHOLD:
+                    decision = "BUY"
+                else:
+                    decision = "HOLD"
+            elif decision_context == "SELL/HOLD":
+                if confidence >= self.CONFIDENCE_ACTION_THRESHOLD:
+                    decision = "SELL"
+                else:
+                    decision = "HOLD"
+            # --- [END NEW] ---
 
             # --- MODIFICATION: Return new rich dictionary ---
             return {
-                "decision": decision, 
-                "confidence": confidence, 
+                "decision": decision, # The *translated* decision
+                "confidence": confidence, # The *raw* confidence from the LLM
                 "expected_return_1h_pct": expected_return_1h_pct,
                 "expected_return_6h_pct": expected_return_6h_pct,
                 "suggested_size_pct": max(0, min(100, suggested_size_pct)), # Clamp 0-100
@@ -741,133 +790,7 @@ class AIDecisionMaker:
             logger.error(f"🧠 Parser: Error parsing fields from LLM JSON. Error: {e}. Data: {llm_response_string[:500]}...")
             return default_output
     
-    # --- [ DELETE THE OLD PARSERS ] ---
-    # def _parse_llm_response_structured(self, ...):
-    # def _parse_llm_response_fallback(self, ...):
-
-    def _parse_llm_response_structured(self, llm_response: str, parse_explanation: bool = True) -> dict:
-        """
-        Parses the LLM response (Unchanged).
-        """
-        decision, confidence, explanation = "HOLD", 0, "No explanation processed." if not parse_explanation else "Explanation not found or invalid format."
-        if not llm_response:
-            logger.warning("🧠 LLM response parser received empty string.")
-            return {"decision": decision, "confidence": confidence, "explanation": explanation}
-        
-        lines = llm_response.strip().split('\n', 2)
-        # This new regex is more robust. It ignores any combination of whitespace,
-        # asterisks (*), or brackets ([]) around the core components.
-        strict_match = re.match(
-            r"^\s*[\*\[\]]*\s*(BUY|SELL|HOLD|REBUY)\s*[\*\[\]]*\s*:\s*[\*\[\]]*\s*(\d{1,3})\s*[\*\[\]]*\s*$",
-            lines[0],
-            re.IGNORECASE
-        )
-
-        if strict_match:
-            decision = strict_match.group(1).upper()
-            try:
-                confidence = max(0, min(100, int(strict_match.group(2))))
-                if self.log_verbose: logger.debug(f"🧠 Parser: Matched strict format '{decision}:{confidence}' on first line.")
-                if parse_explanation:
-                    if len(lines) > 2 and lines[1].strip() == '---':
-                        explanation = lines[2].strip()
-                        if self.log_verbose: logger.debug("🧠 Parser: Extracted explanation following strict format and separator.")
-                    elif len(lines) == 2 and lines[1].strip() == '---':
-                        explanation = "(No explanation text provided after separator)"
-                        if self.log_verbose: logger.debug("🧠 Parser: Strict format OK, separator found, but no explanation text.")
-                    elif len(lines) > 1:
-                        explanation = "\n".join(lines[1:]).strip()
-                        logger.warning("🧠 Parser: Strict format OK, but separator '---' missing. Taking rest as explanation.")
-                    else: 
-                        explanation = "(No explanation provided)"
-                        if self.log_verbose: logger.debug("🧠 Parser: Strict format OK, but no subsequent lines for explanation.")
-                return {"decision": decision, "confidence": confidence, "explanation": explanation}
-            except ValueError:
-                logger.warning(f"🧠 Parser: Matched strict format, but failed to parse confidence '{strict_match.group(2)}'. Falling back.")
-        else:
-            logger.warning(f"🧠 Parser: Strict format 'DECISION:CONFIDENCE' not found on line 1: '{lines[0]}'. Falling back.")
-
-        fallback_result = self._parse_llm_response_fallback(llm_response)
-        if not parse_explanation:
-            fallback_result["explanation"] = "No explanation processed."
-        return fallback_result
-
-    def _parse_llm_response_fallback(self, llm_response: str) -> dict:
-        """
-        Fallback parser using regex (Unchanged).
-        """
-        decision, confidence, explanation = "HOLD", 50, llm_response
-        response_upper = llm_response.upper()
-
-        decision_match_strict_line = re.search(r"^\W*\*?\s*Decision\s*\*?\W*:\s*\**?(BUY|SELL|HOLD)\**?", llm_response, re.IGNORECASE | re.MULTILINE)
-        if decision_match_strict_line:
-            decision = decision_match_strict_line.group(1).upper()
-            if self.log_verbose: logger.debug(f"🧠 Fallback Parser: Found decision '{decision}' via strict line search.")
-        else:
-            decision_match_lenient_line = re.search(r"^.*?\W*Decision\W*:\s*\**?(BUY|SELL|HOLD)\**?", llm_response, re.IGNORECASE | re.MULTILINE)
-            if decision_match_lenient_line:
-                decision = decision_match_lenient_line.group(1).upper()
-                if self.log_verbose: logger.debug(f"🧠 Fallback Parser: Found decision '{decision}' via lenient line search.")
-            elif re.search(r"^\s*SELL\s*$", llm_response, re.IGNORECASE | re.MULTILINE) or ("SELL" in response_upper and "BUY" not in response_upper and "HOLD" not in response_upper):
-                decision = "SELL"
-                if self.log_verbose: logger.debug("🧠 Fallback Parser: Deduced 'SELL' via keyword dominance.")
-            elif re.search(r"^\s*BUY\s*$", llm_response, re.IGNORECASE | re.MULTILINE) or ("BUY" in response_upper and "SELL" not in response_upper and "HOLD" not in response_upper):
-                decision = "BUY"
-                if self.log_verbose: logger.debug("🧠 Fallback Parser: Deduced 'BUY' via keyword dominance.")
-            elif re.search(r"^\s*HOLD\s*$", llm_response, re.IGNORECASE | re.MULTILINE):
-                decision = "HOLD"
-                if self.log_verbose: logger.debug("🧠 Fallback Parser: Found 'HOLD' on its own line.")
-            else:
-                 if self.log_verbose: logger.debug(f"🧠 Fallback Parser: No clear decision keyword found. Defaulting to '{decision}'.")
-
-        conf_match_strict_line = re.search(r"^\W*\*?\s*Confidence(?:\s*Score)?\s*\*?\W*:\s*(\d{1,3})\%?", llm_response, re.IGNORECASE | re.MULTILINE)
-        if conf_match_strict_line:
-            try: 
-                confidence = max(0, min(100, int(conf_match_strict_line.group(1))))
-                if self.log_verbose: logger.debug(f"🧠 Fallback Parser: Found confidence '{confidence}' via strict line search.")
-            except ValueError: logger.warning(f"🧠 Fallback Parser: Strict confidence line found, but failed to parse number '{conf_match_strict_line.group(1)}'.")
-        else:
-            conf_match_lenient_line = re.search(r"^.*?\W*Confidence(?:\s*Score)?\s*\*?\W*:\s*(\d{1.3})\%?", llm_response, re.IGNORECASE | re.MULTILINE)
-            if conf_match_lenient_line:
-                 try: 
-                     confidence = max(0, min(100, int(conf_match_lenient_line.group(1))))
-                     if self.log_verbose: logger.debug(f"🧠 Fallback Parser: Found confidence '{confidence}' via lenient line search.")
-                 except ValueError: logger.warning(f"🧠 Fallback Parser: Lenient confidence line found, but failed to parse number '{conf_match_lenient_line.group(1)}'.")
-            else:
-                 conf_fallback_anywhere = re.search(r"Confidence.*?[:\s](\d{1,3})", llm_response, re.IGNORECASE | re.DOTALL)
-                 if conf_fallback_anywhere:
-                     try: 
-                         confidence = max(0, min(100, int(conf_fallback_anywhere.group(1))))
-                         if self.log_verbose: logger.debug(f"🧠 Fallback Parser: Found confidence '{confidence}' via general fallback search.")
-                     except ValueError: logger.warning(f"🧠 Fallback Parser: General confidence search found, but failed to parse number '{conf_fallback_anywhere.group(1)}'.")
-                 else:
-                     if self.log_verbose: logger.debug(f"🧠 Fallback Parser: No confidence value found. Defaulting to {confidence}.")
-
-        explanation_match = re.search(r"^\W*\*?\s*(?:Explanation|Reasoning|Justification)\s*\*?\W*:\s*(.*)", llm_response, re.IGNORECASE | re.MULTILINE | re.DOTALL)
-        if explanation_match:
-            explanation_text = explanation_match.group(1).strip()
-            explanation_text = re.sub(r"^\W*\*?\s*Decision\s*\*?\W*:.*?\n?", "", explanation_text, count=1, flags=re.IGNORECASE | re.MULTILINE).strip()
-            explanation_text = re.sub(r"^\W*\*?\s*Confidence(?:\s*Score)?\s*\*?\W*:.*?\n?", "", explanation_text, count=1, flags=re.IGNORECASE | re.MULTILINE).strip()
-            explanation = explanation_text
-            if self.log_verbose: logger.debug("🧠 Fallback Parser: Found explanation using header keyword.")
-        else:
-            lines = llm_response.splitlines()
-            start_index, last_marker_line_index, found_marker = 0, -1, False
-            for i, line in enumerate(lines):
-                 if re.search(r"^\W*\*?\s*Decision\s*\*?\W*:", line, re.IGNORECASE) or \
-                    re.search(r"^\W*\*?\s*Confidence(?:\s*Score)?\s*\*?\W*:", line, re.IGNORECASE):
-                     last_marker_line_index = i; found_marker = True
-            if found_marker:
-                start_index = last_marker_line_index + 1
-                if start_index < len(lines) and (re.search(r"^\W*\*?\s*Confidence(?:\s*Score)?\s*\*?\W*:", lines[start_index], re.IGNORECASE)):
-                    start_index += 1
-                if start_index < len(lines):
-                    explanation = "\n".join(lines[start_index:]).strip()
-                    if self.log_verbose: logger.debug("🧠 Fallback Parser: Found explanation by splitting after last Decision/Confidence marker.")
-                else:
-                    explanation = "" 
-                    if self.log_verbose: logger.debug("🧠 Fallback Parser: Decision/Confidence markers found, but no subsequent text for explanation.")
-
-        explanation = re.sub(r'\n{3,}', '\n\n', explanation).strip()
-        if not explanation: explanation = "(Explanation could not be extracted)"
-        return {"decision": decision, "confidence": confidence, "explanation": explanation}
+    # --- [DELETED] ---
+    # The old _parse_llm_response_structured and _parse_llm_response_fallback
+    # functions have been removed as they are no longer used by get_trade_advice.
+    # --- [END DELETED] ---

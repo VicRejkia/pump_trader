@@ -426,8 +426,8 @@ class TradingBot:
                             t.mint, t.name, t.traderpublickey, t.backup_reason, t.timestamp as token_creation_ts,
                             ((SELECT MAX(tr.timestamp) FROM trades_backup tr WHERE tr.mint = t.mint) - t.timestamp) as lifespan,
                             (SELECT MAX(tr.marketCapSol) FROM trades_backup tr WHERE tr.mint = t.mint) as max_mcap,
-                            (SELECT MAX(tr.price_sol) FROM trades_backup tr WHERE tr.mint = t.mint) as max_price,
-                            (SELECT (array_agg(tr.timestamp ORDER BY tr.price_sol DESC))[1] FROM trades_backup tr WHERE tr.mint = t.mint AND tr.price_sol > 0) as max_price_ts,
+                            (SELECT MAX(tr.price) FROM trades_backup tr WHERE tr.mint = t.mint) as max_price,
+                            (SELECT (array_agg(tr.timestamp ORDER BY tr.price DESC))[1] FROM trades_backup tr WHERE tr.mint = t.mint AND tr.price > 0) as max_price_ts,
                             (SELECT SUM(tr.sol_amount) FROM trades_backup tr WHERE tr.mint = t.mint) as total_volume_sol,
                             (SELECT score FROM rugcheck_backup rb WHERE rb.mint = t.mint ORDER BY rb.last_checked DESC LIMIT 1) as last_rug_score,
                             (SELECT score_value FROM social_scores_backup sb WHERE sb.mint = t.mint ORDER BY sb.timestamp DESC LIMIT 1) as last_social_score,
@@ -503,12 +503,19 @@ class TradingBot:
                                     last_member_count_str = f"{telegram_stats['members']}"
                                     last_member_count_int = int(telegram_stats['members'])
                             
+                            # --- [START FIX for TypeError] ---
+                            # Pre-format the time_to_peak_minutes to handle None
+                            ttp_str = f"{time_to_peak_minutes:.1f}" if time_to_peak_minutes is not None else "N/A"
+                            # --- [END FIX] ---
+                            
                             # 5. Format the rich summary string
                             summary = (
                                 f"Case Study: Token '{name}' ({mint}) by creator {creator_wallet}.\n"
                                 f"Outcome: {backup_reason} (Lifespan: {lifespan_str}).\n"
                                 f"Creator History: {creator_history_summary}\n"
-                                f"Metrics at End: Max MCap: {max_mcap or 'N/A'} SOL | Max Price: {max_price or 'N/A'} SOL (at {time_to_peak_minutes:.1f} mins)\n"
+                                # --- [MODIFIED LINE] ---
+                                f"Metrics at End: Max MCap: {max_mcap or 'N/A'} SOL | Max Price: {max_price or 'N/A'} SOL (at {ttp_str} mins)\n"
+                                # --- [END MODIFIED LINE] ---
                                 f"Last Scores: Rug: {last_rug_score or 'N/A'} | Social: {last_social_score or 'N/A'}"
                             )
 
@@ -866,35 +873,42 @@ class TradingBot:
                         async with self.db_client.pool.acquire() as conn:
                             await self.db_client.update_token_ai_eval_timestamp(mint, eval_ts, conn=conn)
 
-                        # Only act if it was an 'INITIAL BUY' check and the AI said to buy
-                        if (comprehensive_data.get('decision_context') == 'INITIAL BUY' and 
-                            advice['decision'] in ['BUY', 'REBUY']):
-                            
-                            buy_threshold = self.config.get('AI_CONFIDENCE_THRESHOLD_INITIAL_BUY', 90)
-                            
-                            if advice['confidence'] >= buy_threshold:
-                                logger.info(f"🧠 [bold green]AI-First Buy Triggered[/bold green] for {mint} (Confidence: {advice['confidence']} >= {buy_threshold}).")
-                                
-                                price_to_buy = comprehensive_data.get('price')
-                                # execute_buy expects market_cap in SOL
-                                mcap_to_buy = (comprehensive_data.get('market_cap', 0) / (await self.state.get_sol_price())) if await self.state.get_sol_price() else 0.0
+                        # --- [START FIX] ---
+                        # Check for both 'INITIAL BUY' and 'REBUY' contexts.
+                        # We also trust the 'decision' from the parser, which has already
+                        # applied the 50% confidence threshold.
+                        if (comprehensive_data.get('decision_context') in ['INITIAL BUY', 'REBUY'] and 
+                            advice['decision'] == 'BUY'):
 
-                                if price_to_buy and mcap_to_buy and price_to_buy > 0 and mcap_to_buy > 0:
-                                    if not self.state.is_buying_enabled:
-                                        logger.info(f"🧠 AI-First Buy for {mint} skipped: Buying is globally disabled.")
-                                    else:
-                                        # Call execute_buy from the trading_manager
-                                        await self.trading_manager.execute_buy(
-                                            mint=mint,
-                                            trigger_price=price_to_buy,
-                                            market_cap_sol_at_trigger=mcap_to_buy,
-                                            buy_reason="AI-First (New Token)",
-                                            ai_context=advice # Pass the full advice dict
-                                        )
+                            # The check against AI_CONFIDENCE_THRESHOLD_INITIAL_BUY is no longer needed here,
+                            # because the parser ('_parse_llm_json_response') has already done this
+                            # by translating any confidence >= 50 into a "BUY" decision.
+                            
+                            logger.info(f"🧠 [bold green]AI-First Buy Triggered[/bold green] for {mint} (Context: {comprehensive_data.get('decision_context')}, Confidence: {advice['confidence']}%).")
+                            
+                            price_to_buy = comprehensive_data.get('price')
+                            # execute_buy expects market_cap in SOL
+                            mcap_to_buy = (comprehensive_data.get('market_cap', 0) / (await self.state.get_sol_price())) if await self.state.get_sol_price() else 0.0
+
+                            if price_to_buy and mcap_to_buy and price_to_buy > 0 and mcap_to_buy > 0:
+                                if not self.state.is_buying_enabled:
+                                    logger.info(f"🧠 AI-First Buy for {mint} skipped: Buying is globally disabled.")
                                 else:
-                                    logger.warning(f"🧠 AI-First Buy for {mint} skipped: Invalid price ({price_to_buy}) or mcap ({mcap_to_buy}).")
+                                    # Call execute_buy from the trading_manager
+                                    await self.trading_manager.execute_buy(
+                                        mint=mint,
+                                        trigger_price=price_to_buy,
+                                        market_cap_sol_at_trigger=mcap_to_buy,
+                                        buy_reason=f"AI-First ({comprehensive_data.get('decision_context')})", # More specific reason
+                                        ai_context=advice # Pass the full advice dict
+                                    )
                             else:
-                                logger.debug(f"🧠 AI-First Buy: AI advised {advice['decision']} for {mint}, but confidence ({advice['confidence']}) was below threshold ({buy_threshold}).")
+                                logger.warning(f"🧠 AI-First Buy for {mint} skipped: Invalid price ({price_to_buy}) or mcap ({mcap_to_buy}).")
+                        
+                        elif (comprehensive_data.get('decision_context') in ['INITIAL BUY', 'REBUY'] and
+                            advice['decision'] == 'HOLD'):
+                            logger.debug(f"🧠 AI-First Buy: AI advised HOLD for {mint} (Confidence: {advice['confidence']}%). No action taken.")
+                        # --- [END FIX] ---
 
                         evaluation_duration = time.monotonic() - evaluation_start_time
                         

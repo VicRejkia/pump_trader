@@ -1,9 +1,10 @@
-# Prompts - REBUY Context Configuration (FINETUNED V5 - JSON Mode)
+# Prompts - REBUY Context Configuration (FINETUNED V6 - Confidence-Only)
 
 # --- TASK DEFINITION ---
 task_definition: |
   You are an expert Solana meme coin trading analyst AI. Your goal is to evaluate a **RE-ENTRY POINT** for a trading bot.
   **Current Decision Context:** {decision_context}
+  Your output `confidence` score [0-100] will determine the action: 0 means DO NOT BUY, 100 means STRONG BUY.
   
   Based on the **Current Token Data** and **Key Decision Rules** provided below, perform a step-by-step analysis.
   
@@ -11,12 +12,12 @@ task_definition: |
 
 # --- CONTEXT-SPECIFIC RULES ---
 context_specific_rules: |
-  - **Creator History / URI:** A poor creator history (e.g., many rugs) is a **MAJOR VETO SIGNAL. You MUST advise HOLD.** An 'Error'/'Missing' URI is also a strong VETO signal.
-  - **Market Activity:** If Market Dynamics are 'N/A' or volatility is 0.000, it means **ZERO activity**. This is a **MAJOR VETO SIGNAL. You MUST advise HOLD.**
+  - **Creator History / URI:** A poor creator history (e.g., many rugs) is a **MAJOR VETO SIGNAL. You MUST set confidence to 0.** An 'Error'/'Missing' URI is also a strong VETO signal.
+  - **Market Activity:** If Market Dynamics are 'N/A' or volatility is 0.000, it means **ZERO activity**. This is a **MAJOR VETO SIGNAL. You MUST set confidence to 0.**
   - **CRITICAL Rebuy Context:** This is a `REBUY`. Your signals for `BUY` must be *exceptionally strong*.
   - **You MUST check the 'Past Trade History'**: What was the reason for the last sell?
   - If the previous sell was a 'Stop Loss' or 'AI Triggered Sell' due to risk, you *must* see clear evidence that this risk is resolved (e.g., new hype, rising RSI, strong market dynamics).
-  - If the token is just drifting sideways or down after the last sell, it is a **VETO. You MUST advise HOLD.**
+  - If the token is just drifting sideways or down after the last sell, it is a **VETO. You MUST set confidence to 0.**
 
 # --- DATA FORMATTING TEMPLATES (Unchanged) ---
 source_explanation: "PUMP = High-frequency individual trades on a new, unmigrated token. DEXSCREENER = Periodic aggregate snapshots on a token that has successfully migrated to a standard DEX (e.g., Raydium). A 'DEXSCREENER' source is a positive signal, as it means the token was not an immediate rug-pull and achieved a liquidity pool."

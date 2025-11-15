@@ -1,4 +1,4 @@
-# Prompts - Base Template (FINETUNED V6 - Rich JSON Schema)
+# Prompts - Base Template (FINETUNED V9 - Forceful Data Re-injection)
 # This file contains REUSABLE SNIPPETS for the dynamic prompt builder.
 
 # --- 1. CURRENT TOKEN DATA (Data-First Structure) ---
@@ -49,7 +49,7 @@ key_decision_rules_section: |
       - If `creator_history_summary` is "This is the creator's first token.", the `creator_rug_rate` is 0. This is NEUTRAL, not negative.
       - If `creator_rug_rate` > 0.5, this is a **MAJOR VETO SIGNAL**.
       - **You MUST NOT** confuse a new creator with a bad creator. Prioritize the `Creator History:` data block over RAG context for this specific metric.
-    - **Dead Token (N/A):** If Market Dynamics are 'N/A' or volatility is 0.000, it means **ZERO activity**. This is a **MAJOR VETO SIGNAL (advise HOLD for buys)**. For SELL/HOLD, this is a strong **SELL** signal.
+    - **Dead Token (N/A):** If Market Dynamics are 'N/A' or volatility is 0.000, it means **ZERO activity**. This is a **MAJOR VETO SIGNAL (set confidence to 0 for buys)**. For SELL/HOLD, this is a strong **SELL** signal (set confidence to 100).
     - **Temporal Risk:** If creator_avg_time_to_rug_minutes is known (e.g., 30 mins) and token_age_minutes is close to that (e.g., 28 mins), the risk is **EXTREME**.
 
   - **Risk Scores (Lower is Better):**
@@ -60,9 +60,11 @@ key_decision_rules_section: |
   - **URI Status:** 'Missing', 'Invalid Format', or 'Error' is a strong negative signal, apply a high risk penalty.
   {context_specific_rules}
 
-  - **CRITICAL - Past Situations (RAG) Warning:**
-    - Learn from relevant past scenarios provided below, but **PRIORITIZE CURRENT TOKEN DATA**.
-    - You *must* consider why the current token is similar to or different from the past cases.
+  - **CRITICAL - RAG CONTEXT WARNING (READ THIS):**
+    - The past situations below are for *context only*.
+    - **DO NOT** copy the `explanation` or `primary_risk` from a past case.
+    - **YOUR PRIMARY TASK** is to analyze the **Current Token Data** block above.
+    - **FAILURE MODE TO AVOID:** If the `Creator History:` line above says "This is the creator's first token.", you MUST treat this as a **NEUTRAL** signal. DO NOT look at a RAG example of a bad creator and copy its risk. You MUST base your `primary_risk` and `explanation` on the *current token's* data.
     
   --- Relevant Past Situations (Your Actions) ---
   {rag_context_actions}
@@ -74,33 +76,44 @@ key_decision_rules_section: |
   - In 'BULLISH' regimes, you can be more tolerant of risk for high momentum.
   - In 'BEARISH' regimes, you must be extremely risk-averse and prioritize capital preservation.
 
-# --- 4. NEW: JSON OUTPUT FORMAT (Richer Schema, Utility Model) ---
+# --- 4. NEW: JSON OUTPUT FORMAT (Confidence-Only Decision) ---
 json_output_format: |
+  **CRITICAL DATA RECAP (USE THIS DATA, NOT RAG EXAMPLES):**
+  - **Current Creator History:** {creator_history_summary}
+  - **Current Creator Rug Rate:** {creator_rug_rate}
+  - **Current Data Completeness:** {data_completeness_score}% - {data_completeness_notes}
+
   **CRITICAL: YOUR TASK IS TO RETURN A VALID JSON OBJECT.**
   - Your *entire* response must be a single JSON object.
   - **DO NOT** include any text, titles, markdown (like `###`), or explanations before or after the JSON.
   - Perform a step-by-step analysis *internally* using the 7 steps below.
   - **Compute a utility score:** utility = (expected_return_1h_pct * (confidence/100)) - (risk_penalty_score).
   - Risk Penalty: Start at 0. Add +40 if creator_rug_rate > 0.5. Add +30 if social_score > 60. Add +30 if rugcheck_score > 800. Add +20 if drawdown_from_peak_pct < -50%.
-  - **Base your decision on this utility score.** (e.g., Utility > 20 -> BUY, Utility < -10 -> SELL, else HOLD).
+  - **Base your `confidence` score on this utility score, scaled to the context.**
+  - **Context 'BUY'/'REBUY'**: 0 = No Buy, 100 = Strong Buy.
+  - **Context 'SELL'**: 0 = Hold, 100 = Strong Sell.
 
   **Internal Reasoning Steps (Do not include these steps in the final output):**
-  1.  **VETO Check**: Check `Creator History`. If `creator_rug_rate` > 0.5, set `primary_risk` to 'CREATOR_HISTORY' and apply a heavy risk penalty. If `creator_history_summary` is "This is the creator's first token.", this check is NEUTRAL. Then, check for Dead Token, Bad URI.
-  2.  **Risk Analysis**: Evaluate creator_rug_rate, rug, and social scores to compute `risk_penalty_score`.
-  3.  **Momentum Analysis**: Evaluate market dynamics, RSI, and drawdown to estimate `expected_return_1h_pct`.
-  4.  **RAG Synthesis**: Compare to past cases. Do they support the momentum or the risk?
-  5.  **Utility Calculation**: Compute the utility score based on your estimates.
-  6.  **Data Quality**: Check completeness: {data_completeness_score}% - {data_completeness_notes}.
-  7.  **Final Synthesis**: Formulate the decision, confidence, and explanation based on the final utility score.
+  1.  **Analyze Creator History (CRITICAL FIRST STEP):**
+      - Look *only* at the **CRITICAL DATA RECAP** block directly above this.
+      - **If `Current Creator History` is "This is the creator's first token."**: This is a **NEUTRAL** signal. `primary_risk` MUST NOT be 'CREATOR_HISTORY'.
+      - **If `Current Creator Rug Rate` > 0.5**: This is a **MAJOR VETO SIGNAL**. `primary_risk` MUST be 'CREATOR_HISTORY'.
+      - **DO NOT** copy explanations from RAG examples. Your explanation MUST reflect the *actual* data from the **CRITICAL DATA RECAP**.
+  2.  **VETO Check (Other)**: Check for Dead Token (Market Dynamics 'N/A' or volatility 0.000), Bad URI. Apply VETO if found.
+  3.  **Risk Analysis**: Evaluate *other* scores (rug, social) to compute `risk_penalty_score`. Add the creator risk penalty *only if* step 1 determined it was bad (e.g. Rug Rate > 0.5).
+  4.  **Momentum Analysis**: Evaluate market dynamics, RSI, and drawdown to estimate `expected_return_1h_pct`.
+  5.  **RAG Synthesis**: Compare to past cases. Do they support the momentum or the risk? (Remember Step 1's warning!).
+  6.  **Utility Calculation**: Compute the utility score based on your estimates.
+  7.  **Data Quality**: Check completeness using the **CRITICAL DATA RECAP** block.
+  8.  **Final Synthesis**: Formulate the final `confidence` score and `explanation` based on the utility score, the *actual* creator history, and the current context.
 
   **REQUIRED JSON OUTPUT SCHEMA:**
   Make 100% sure your output matches this schema exactly:
   {{
-    "decision": "string (Valid values: 'BUY', 'SELL', 'HOLD', 'AGGRESSIVE_BUY')",
     "confidence": "integer [0-100]",
     "expected_return_1h_pct": "number (Your numeric estimate, e.g., 50.5 or -10.0)",
     "expected_return_6h_pct": "number (Your numeric estimate)",
     "suggested_size_pct": "number (e.g., 25 for 25% of allocated capital, 0 for HOLD/SELL)",
     "primary_risk": "string (One of: 'CREATOR_HISTORY', 'LOW_LIQUIDITY', 'RAPID_DECAY', 'POOR_SOCIALS', 'RUG_SIGNALS', 'NONE')",
-    "explanation": "string (A concise, one-paragraph summary of your final synthesis, justifying the decision and utility calculation.)"
+    "explanation": "string (A concise, one-paragraph summary of your final synthesis, justifying the confidence score and utility calculation.)"
   }}
