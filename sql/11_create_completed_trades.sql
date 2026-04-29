@@ -1,3 +1,5 @@
+CREATE SEQUENCE IF NOT EXISTS completed_trades_trade_id_seq;
+
 CREATE TABLE IF NOT EXISTS public.completed_trades
 (
     trade_id integer NOT NULL DEFAULT nextval('completed_trades_trade_id_seq'::regclass),

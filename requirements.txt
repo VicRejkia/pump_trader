@@ -3,21 +3,29 @@ base58
 asyncpg
 httpx
 aiolimiter
+aiofiles
 python-dotenv
 rich
 beautifulsoup4
 pydantic
-Flask
-pandas
-pygad
 nest_asyncio
 
+# Web / API
+fastapi
+uvicorn
+strawberry-graphql[fastapi]
+Flask
+websockets
+
 # Machine Learning & RL
-torch>=2.6.0
-stable-baselines3[extra]>=2.6.0
-gymnasium>)1.1.1
+torch>=2.2.0
+stable-baselines3>=2.3.0,<2.6.0
+tensorboard
+gymnasium>=0.29.1,<1.1.0
 quantstats>=0.0.69
 optuna>=4.4.0
+mlflow
+inquirer
 
 # PostgreSQL Integration
 asyncpg
@@ -26,9 +34,25 @@ psycopg2-binary
 # Data & Utilities
 numpy
 pandas>=2.2.3
+ta
 scikit-learn
 pyyaml
 tqdm
 
-shap
+# AI / Embeddings
+sentence-transformers
+ollama
+
+# Solana
+solana
+solders
+
+# Visualization
+dash
+streamlit
+pygad
+
+# Messaging
 python-telegram-bot
+telethon
+redis

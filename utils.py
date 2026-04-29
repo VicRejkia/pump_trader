@@ -8,7 +8,7 @@ Includes URL validation, audio alerts, and log formatting.
 import os
 import asyncio
 import pandas as pd
-import pandas_ta as ta
+import ta as ta_lib
 import warnings # Add this import
 import numpy as np
 import json
@@ -22,7 +22,11 @@ if TYPE_CHECKING:
     from state_manager import GlobalState
     from database_handler import DatabaseClient
 from urllib.parse import urlparse
-import winsound
+try:
+    import winsound
+    _WINSOUND_AVAILABLE = True
+except ImportError:
+    _WINSOUND_AVAILABLE = False
 
 
 def is_valid_telegram(url: str) -> bool:
@@ -40,6 +44,8 @@ def is_valid_website(url: str) -> bool:
 
 def play_wav(file_path: str):
     """Synchronously plays a WAV file using winsound."""
+    if not _WINSOUND_AVAILABLE:
+        return
     try:
         winsound.PlaySound(file_path, winsound.SND_FILENAME | winsound.SND_NODEFAULT)
     except RuntimeError as e:
@@ -57,6 +63,8 @@ async def play_buy_opportunity_sound():
 
 def play_sell_sl_sound():
     """Synchronously play the stop-loss sell sound."""
+    if not _WINSOUND_AVAILABLE:
+        return
     try:
         winsound.PlaySound("assets/hupe.wav", winsound.SND_FILENAME | winsound.SND_NODEFAULT)
     except RuntimeError as e:
@@ -64,6 +72,8 @@ def play_sell_sl_sound():
 
 def play_sell_tp_sound():
     """Synchronously play the take profit sell sound."""
+    if not _WINSOUND_AVAILABLE:
+        return
     try:
         winsound.PlaySound("assets/ka_ching.wav", winsound.SND_FILENAME | winsound.SND_NODEFAULT)
     except RuntimeError as e:
@@ -500,36 +510,37 @@ def calculate_trend_indicators(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     try:
         df_ta = df.copy()
 
-        # --- BUG FIX: Set the timestamp as the index before calculating indicators ---
         if 'timestamp' in df_ta.columns:
             df_ta.set_index('timestamp', inplace=True)
 
-        # --- BUG FIX START ---
-        # Explicitly use the 'Close' column for indicators that operate on a single price series.
-        # This prevents pandas-ta from returning a multi-column DataFrame when a single Series is expected.
-        close_prices = df_ta['Close']
+        close = df_ta['Close']
+        high = df_ta['High']
+        low = df_ta['Low']
+        volume = df_ta['Volume']
 
-        # Calculate Bollinger Bands (this is usually fine as it uses H, L, C)
-        bbands = df_ta.ta.bbands(length=config['BBANDS_PERIOD'], std=config['BBANDS_STD_DEV'], append=True)
+        bb_period = config['BBANDS_PERIOD']
+        bb_std = config['BBANDS_STD_DEV']
+        bb = ta_lib.volatility.BollingerBands(close=close, window=bb_period, window_dev=bb_std)
+        df_ta[f'BBL_{bb_period}_{bb_std}'] = bb.bollinger_lband()
+        df_ta[f'BBM_{bb_period}_{bb_std}'] = bb.bollinger_mavg()
+        df_ta[f'BBU_{bb_period}_{bb_std}'] = bb.bollinger_hband()
 
-        # Calculate RSI using the specified close price series
-        df_ta.ta.rsi(close=close_prices, length=config['RSI_PERIOD'], append=True)
+        rsi_period = config['RSI_PERIOD']
+        df_ta[f'RSI_{rsi_period}'] = ta_lib.momentum.RSIIndicator(close=close, window=rsi_period).rsi()
 
-        # Calculate EMAs using the specified close price series
-        df_ta.ta.ema(close=close_prices, length=config['FAST_EMA_PERIOD'], append=True, col_names=('EMA_fast',))
-        df_ta.ta.ema(close=close_prices, length=config['SLOW_EMA_PERIOD'], append=True, col_names=('EMA_slow',))
+        df_ta['EMA_fast'] = ta_lib.trend.EMAIndicator(close=close, window=config['FAST_EMA_PERIOD']).ema_indicator()
+        df_ta['EMA_slow'] = ta_lib.trend.EMAIndicator(close=close, window=config['SLOW_EMA_PERIOD']).ema_indicator()
 
-        # Calculate ATR for the Chandelier Exit
-        df_ta.ta.atr(length=config['ADAPTIVE_ATR_PERIOD'], append=True)
+        atr_period = config['ADAPTIVE_ATR_PERIOD']
+        df_ta[f'ATRr_{atr_period}'] = ta_lib.volatility.AverageTrueRange(
+            high=high, low=low, close=close, window=atr_period
+        ).average_true_range()
 
-        # Calculate Parabolic SAR (optional, but good for confirmation strategies)
-        df_ta.ta.psar(append=True)
-        
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
-            # VWAP requires High, Low, Close, and Volume, which df_ta has.
-            df_ta.ta.vwap(append=True)
-        # --- BUG FIX END ---
+            df_ta['VWAP'] = ta_lib.volume.VolumeWeightedAveragePrice(
+                high=high, low=low, close=close, volume=volume
+            ).volume_weighted_average_price()
         
         df_ta.dropna(inplace=True)
         
