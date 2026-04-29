@@ -30,9 +30,9 @@ Quick reference for each major subsystem: what it does, which files matter, and 
 
 Key entry points:
 - `TradingBot.run()` — starts everything (`trading_bot.py:1567`)
-- `TradingBot.run_buy_checks()` — scores new tokens, executes buys
-- `TradingBot.run_sell_checks()` — evaluates positions, executes sells
-- `TradingManager.evaluate_position()` — per-position sell logic (`trading_logic.py`)
+- `TradingBot.run_buy_checks()` — scores new tokens, executes buys (`trading_bot.py:1611`)
+- `TradingBot.run_sell_checks()` — evaluates positions, executes sells (`trading_bot.py:1625`)
+- `TradingManager.check_sell_opportunities()` — per-position sell logic (`trading_logic.py:789`)
 
 > **TODO:** `trading_bot.py` is 1,682 lines and `trading_logic.py` is 1,127 lines. Both violate single responsibility. A future architecture phase will split them (buy logic, sell logic, position manager, task orchestrator). Do not add new top-level methods to either file without discussion.
 
