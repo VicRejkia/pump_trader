@@ -16,7 +16,11 @@ source venv/bin/activate          # macOS/Linux
 # venv\Scripts\activate           # Windows
 
 # 2. Install dependencies
-pip install -r requirements.txt
+pip install -r requirements.txt                              # macOS 13+ / Linux / Windows
+# pip install -r requirements.txt -c constraints-macos12.txt  # macOS 12 only
+
+# 2b. Install dev tools (linter, type checker, test runner)
+pip install -r requirements-dev.txt
 
 # 3. Set up PostgreSQL + pgvector
 # Install pgvector for your PostgreSQL version, then:
@@ -35,6 +39,20 @@ ollama pull mistral   # or whichever model you use
 python main.py
 ```
 
+## Dev Tools
+
+Run these commands from the project root with the virtual environment active.
+
+```bash
+ruff check .                   # lint the entire codebase
+ruff check . --fix             # auto-fix safe issues (unused imports, ordering)
+mypy state_manager.py          # type-check a single file (start here)
+pytest                         # run tests (currently: "no tests ran" is correct)
+pytest -v                      # verbose output
+```
+
+On macOS 12, `ruff` and `mypy` work without any platform-specific flags.
+
 ## Environment Variables
 
 | Variable | Required | Default | Purpose |
@@ -47,7 +65,7 @@ python main.py
 | `TG_BOT_TOKEN` | Optional | — | Telegram bot token for alerts |
 | `TG_CHAT_ID` | Optional | — | Telegram chat ID for alerts |
 
-> **TODO:** Several optional variables are not in `.env_sample` — notably `REDIS_HOST`, `REDIS_PORT`, Ollama endpoint, and logging overrides. Until `requirements-dev.txt` and a config schema exist, check `config/config.py` for the full list of hardcoded defaults.
+> **TODO:** Several optional variables are not in `.env_sample` — notably `REDIS_HOST`, `REDIS_PORT`, Ollama endpoint, and logging overrides. Until a config schema exists, check `config/config.py` for the full list of hardcoded defaults.
 
 ## Configuration Hierarchy
 
@@ -115,5 +133,3 @@ tensorboard --logdir ./data/rl_tensorboard_logs/   # RL training monitor
 > **NOTE (macOS 12):** Torch 2.2.2 is installed with a native macOS build but is CPU-only — no CUDA/GPU acceleration. The Windows asyncio event loop policy guard at `trading_bot.py:1651` (`asyncio.WindowsSelectorEventLoopPolicy`) is platform-conditional and must remain.
 
 > **NOTE (macOS 12):** RL training will be significantly slower without CUDA. Use `hardware_advisor.py` recommendations for multiprocessing limits, or load a pre-trained checkpoint from the original Windows machine.
-
-> **TODO:** No `pytest` setup. No `requirements-dev.txt`. These are needed before writing any automated tests. `asyncpg` also appears twice in `requirements.txt` (lines 4 and 31) — remove the duplicate.
