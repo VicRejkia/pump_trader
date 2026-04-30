@@ -28,7 +28,6 @@ mlflow
 inquirer
 
 # PostgreSQL Integration
-asyncpg
 psycopg2-binary
 
 # Data & Utilities
