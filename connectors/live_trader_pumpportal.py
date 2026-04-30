@@ -1,15 +1,16 @@
 import os
+
 import httpx
 from dotenv import load_dotenv
+from solana.rpc.api import Client as SolanaClient
+from solana.rpc.commitment import Confirmed
+from solana.rpc.types import TxOpts
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
-from solana.rpc.api import Client as SolanaClient
-from solana.rpc.types import TxOpts
-from solana.rpc.commitment import Confirmed
 
-from bot_logger import logger
 # Import your main config module to access TRADING_MODE and other settings
-import config.config as bot_config # Use an alias to avoid confusion if config is passed
+import config.config as bot_config  # Use an alias to avoid confusion if config is passed
+from bot_logger import logger
 
 load_dotenv()
 
@@ -29,7 +30,7 @@ if PRIVATE_KEY_STRING:
     except Exception as e:
         logger.error(f"Failed to load Solana wallet from private key: {e}")
         # Bot should not proceed to live/paper if wallet fails
-        WALLET_KEYPAIR = None 
+        WALLET_KEYPAIR = None
         WALLET_PUBLIC_KEY = None
 
 if RPC_ENDPOINT:
@@ -95,7 +96,7 @@ async def execute_live_pumpportal_trade(
         async with httpx.AsyncClient() as client:
             response = await client.post(PUMPORTAL_LOCAL_API_URL, data=payload) # Assuming form data
             response.raise_for_status()
-        
+
         raw_tx_bytes = response.content
         unsigned_tx = VersionedTransaction.from_bytes(raw_tx_bytes)
         signed_tx = WALLET_KEYPAIR.sign_transaction(unsigned_tx)
@@ -103,7 +104,7 @@ async def execute_live_pumpportal_trade(
 
         if current_trading_mode == "paper_trading":
             logger.info(f"[PAPER TRADING] Prepared TX for {action} on {mint_address}. Sig_prefix: {tx_signature_str[:10]}... NOT SENDING.")
-            
+
             # Simulate fill for paper trading:
             # Use the trigger_price as the basis for simulation.
             # This is a simplified simulation. A real paper trader might fetch fresh quotes.
@@ -131,10 +132,10 @@ async def execute_live_pumpportal_trade(
             logger.info(f"[LIVE TRADING] Sending TX for {action} on {mint_address}. Sig: {tx_signature_str}")
             # Using skip_preflight=False for safety, you can change it
             options = TxOpts(skip_preflight=False, preflight_commitment=Confirmed) # Use preflight for safety
-            
+
             tx_receipt = SOLANA_CLIENT.send_raw_transaction(txn=bytes(signed_tx), opts=options)
             actual_tx_signature = str(tx_receipt.value)
-            
+
             logger.info(f"Live {action} submitted. Signature: {actual_tx_signature}")
             logger.info(f"Track on Solscan: https://solscan.io/tx/{actual_tx_signature}")
 
@@ -142,7 +143,7 @@ async def execute_live_pumpportal_trade(
             # TODO: After confirmation, fetch transaction details to get *actual* fill price and amounts.
             # This is critical for accurate P&L in live mode.
             # For now, we'll return success upon sending and use trigger_price as a placeholder.
-            
+
             # Placeholder: In a real system, these would come from confirmed transaction details
             # If denominated_in_sol (buy with SOL): quantity_exchanged = tokens received
             # If not denominated_in_sol (sell tokens): quantity_exchanged = SOL received

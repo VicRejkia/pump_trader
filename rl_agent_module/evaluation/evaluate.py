@@ -10,27 +10,27 @@ detailed quantstats report to MLflow for tracking and comparison.
 import argparse
 import asyncio
 import os
-from datetime import datetime
-from typing import Dict, Any
 
+# Project-specific imports
+import sys
+from datetime import datetime
+from typing import Any, Dict
+
+# --- MLflow Integration ---
+import mlflow
 import numpy as np
 import pandas as pd
 import quantstats as qs
 from stable_baselines3 import PPO
 
-# --- MLflow Integration ---
-import mlflow
-
-# Project-specific imports
-import sys
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from bot_logger import logger, setup_logging
+from config.rl_config import RL_CONFIG, get_config_for_mode
 from rl_agent_module.data.data_manager import DataManager
 from rl_agent_module.environments.meme_coin_env import MemeCoinEnv
-from config.rl_config import get_config_for_mode, RL_CONFIG
 
 
 def _run_backtest(model: PPO, env: MemeCoinEnv) -> pd.Series:
@@ -46,15 +46,15 @@ def _run_backtest(model: PPO, env: MemeCoinEnv) -> pd.Series:
     while not (done or truncated):
         action, _states = model.predict(obs, deterministic=True)
         obs, reward, done, truncated, info = env.step(action)
-        
+
         # Store portfolio value at each step using the environment's timestamp
         if env.current_timestamp:
             portfolio_history[env.current_timestamp] = env.portfolio_value
-        
+
         if done or truncated:
             logger.info("Backtest simulation finished.")
             break
-            
+
     if not portfolio_history:
         logger.warning("Backtest resulted in no portfolio history. Cannot generate report.")
         return pd.Series(dtype=float)
@@ -75,7 +75,7 @@ def _generate_quantstats_report(
         return pd.Series(dtype=float)
 
     logger.info("Generating Quantstats performance report...")
-    
+
     portfolio_history.index = pd.to_datetime(portfolio_history.index, utc=True)
     portfolio_history = portfolio_history.loc[~portfolio_history.index.duplicated(keep='last')]
     returns = portfolio_history.pct_change().fillna(0)
@@ -88,7 +88,7 @@ def _generate_quantstats_report(
         # Return an empty Series to indicate no metrics were generated.
         return pd.Series(dtype=float)
     # --- END FIX ---
-    
+
     try:
         title = f"RL Agent Performance ({run_name})"
         qs.reports.html(
@@ -118,16 +118,16 @@ async def run_evaluation(model_path: str, dataset_run_id: str, output_dir: str):
 
         mlflow.log_param("model_path", model_path)
         mlflow.log_param("source_dataset_run_id", dataset_run_id)
-        
+
         setup_logging()
         os.makedirs(output_dir, exist_ok=True)
-        
+
         if not os.path.exists(model_path):
             logger.error(f"Model file not found at: {model_path}")
             return
 
         # Use a generic config mode to get environment parameters
-        rl_config = get_config_for_mode('train') 
+        rl_config = get_config_for_mode('train')
 
         try:
             logger.info(f"Loading pre-trained model from {model_path}...")
@@ -141,7 +141,7 @@ async def run_evaluation(model_path: str, dataset_run_id: str, output_dir: str):
             if not data_manager.load_and_prepare_data():
                 logger.error("Failed to load and prepare evaluation data. Aborting.")
                 return
-            
+
             data_manager.use_evaluation_data()
             evaluation_df = data_manager.get_evaluation_data()
 
@@ -158,7 +158,7 @@ async def run_evaluation(model_path: str, dataset_run_id: str, output_dir: str):
             if not portfolio_history.empty:
                 report_filename = os.path.join(output_dir, f"report_{run.info.run_id}.html")
                 metrics = _generate_quantstats_report(portfolio_history, report_filename, run.info.run_name)
-                
+
                 if not metrics.empty:
                     mlflow.log_artifact(report_filename, "quantstats_report")
                     logger.info("✅ Quantstats report logged to MLflow as an artifact.")

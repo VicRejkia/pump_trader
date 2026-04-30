@@ -1,22 +1,23 @@
 # bot_logger.py
+import inspect
+import logging
 import os
 import queue
-import inspect
 from datetime import datetime
-import logging
 from functools import wraps
-from rich.logging import RichHandler
-from rich.console import Console
-from config.config import _LOGGER_NAME, _LOG_LEVEL_CONSOLE, _LOG_LEVEL_FILE, _LOG_STORAGE_PATH
-import os
+
+import rich.align
+import rich.box as _rich_box_module
+import rich.console
 
 # --- RICH COMPONENT IMPORTS AND RE-EXPORTS ---
 import rich.panel
 import rich.table
 import rich.text
-import rich.align
-import rich.console
-import rich.box as _rich_box_module
+from rich.console import Console
+from rich.logging import RichHandler
+
+from config.config import _LOG_LEVEL_CONSOLE, _LOG_LEVEL_FILE, _LOG_STORAGE_PATH, _LOGGER_NAME
 
 Panel = rich.panel.Panel
 Table = rich.table.Table
@@ -98,7 +99,7 @@ def setup_logging(logger_name=_LOGGER_NAME):
     logger.propagate = False
 
     logger.debug(":writing_hand: [green]Logging system initialized with level:[/green] [bold red]%s[/bold red]", logging.getLevelName(logger.level))
-    
+
     def log_to_queue(record):
         # Check if the message is already a Rich renderable object
         if hasattr(record.msg, '__rich_console__'):
@@ -150,7 +151,7 @@ def _get_caller_context():
         frame = frame.f_back # type: ignore
     if not frame: # Should not happen in normal use
         return "[unknown_context]"
-        
+
     func_name = frame.f_code.co_name
     cls = frame.f_locals.get("self", None)
     class_name = cls.__class__.__name__ if cls else None

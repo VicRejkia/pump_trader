@@ -1,25 +1,26 @@
 # telegram_interface.py
+import asyncio
+import json
+import math
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime, timedelta, timezone
+from typing import Union
+
+import asyncpg
+from dotenv import load_dotenv
+from telegram import Bot, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
-    CallbackQueryHandler,
+    ConversationHandler,
     MessageHandler,
     filters,
-    ConversationHandler,
 )
-from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
-from typing import Union
-import asyncio
-from dotenv import load_dotenv
-import os
-import json
-import subprocess
-from datetime import datetime, timezone, timedelta
-import math
-import sys
-import re
-import asyncpg
 
 load_dotenv()
 
@@ -271,7 +272,7 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         ws_conn_status = ws_summary.get("connection_status", "N/A")
         ws_subs = ws_summary.get("trade_subscriptions_count", "N/A")
         last_msg_s = ws_summary.get("time_since_last_message_s", -1)
-        
+
         ws_emoji = "✅"
         if ws_conn_status != "connected":
             ws_emoji = "🔌"
@@ -285,7 +286,7 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # --- END WEBSOCKET DISPLAY ---
 
     menu_text = f"{status_emoji} Bot Status: *{escape_markdown_v2_text(current_bot_status)}*{ws_status_text}\n\nChoose an option:"
-    
+
     keyboard = []
     if ws_restart_needed:
         keyboard.append([InlineKeyboardButton("🔄 Restart WebSocket", callback_data=CB_RESTART_WEBSOCKET)])
@@ -327,7 +328,7 @@ async def bot_control_menu_command(update: Update, context: ContextTypes.DEFAULT
     elif "STALE" in current_bot_status or current_bot_status == "ERROR_READING_STATUS":
         start_stop_button_text = "▶️ Force Start Controller"
         start_stop_callback = CB_START_BOT_FORCE
-    
+
     keyboard = [
         [InlineKeyboardButton(start_stop_button_text, callback_data=start_stop_callback)],
         [
@@ -818,7 +819,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     if command.startswith(CB_SELL_NOW_PREFIX):
         await query.answer()
         mint_to_sell = command[len(CB_SELL_NOW_PREFIX):]
-        
+
         token_name = mint_to_sell
         conn = None
         try:
@@ -845,15 +846,15 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         await query.answer("Sending sell command...")
         mint_to_sell = command[len(CB_SELL_CONFIRM_YES_PREFIX):]
         sell_command_str = f"SELL_{mint_to_sell}"
-        
+
         confirmation_text = ""
         if write_bot_command(sell_command_str):
             confirmation_text = f"✅ Sell command for token `{escape_markdown_v2_text_for_code_block(mint_to_sell)}` has been sent to the bot."
         else:
             confirmation_text = f"⚠️ Error sending sell command for token `{escape_markdown_v2_text_for_code_block(mint_to_sell)}`."
-        
+
         await query.message.edit_text(text=escape_markdown_v2_text(confirmation_text), parse_mode="MarkdownV2")
-        
+
         await asyncio.sleep(2)
         current_page = context.user_data.get(OPEN_TRADES_PAGE_KEY, 0)
         await view_open_trades_command(query, context, page=current_page)

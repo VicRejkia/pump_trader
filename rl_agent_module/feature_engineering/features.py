@@ -4,14 +4,15 @@ Contains all functions for calculating features for the RL agent's observation s
 This module transforms raw time-series data into a feature-rich DataFrame dictionary,
 with one DataFrame per token.
 """
-import pandas as pd
-import numpy as np
+import os
+import sys
 import warnings
 from typing import Dict, List, Tuple
+
+import numpy as np
+import pandas as pd
 from tqdm import tqdm
 
-import sys
-import os
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
@@ -38,22 +39,22 @@ def _calculate_pump_features(group: pd.DataFrame) -> pd.DataFrame:
     volume_usd = group['volume_usd']
     buy_volume_usd = group['buy_volume_usd']
     sell_volume_usd = group['sell_volume_usd']
-    
+
     # Constants
     window_15s = pd.Timedelta(seconds=15)
     window_30s = pd.Timedelta(seconds=30)
     epsilon = 1e-10
-    
+
     # Pre-calculate common values
     close_shift1 = close.shift(1)
-    
+
     # --- Rolling Price Change ---
     price_15s_ago = close.rolling(window_15s, closed='left').apply(lambda x: x.iloc[0], raw=False)
     price_change_15s = (close / price_15s_ago - 1).replace([np.inf, -np.inf], np.nan)
 
     price_30s_ago = close.rolling(window_30s, closed='left').apply(lambda x: x.iloc[0], raw=False)
     price_change_30s = (close / price_30s_ago - 1).replace([np.inf, -np.inf], np.nan)
-    
+
     # --- Custom Volume Change ---
     rolling_vol_sum = volume_usd.rolling(window=window_15s, closed='left').sum()
     previous_vol_sum = rolling_vol_sum.shift(1)
@@ -71,7 +72,7 @@ def _calculate_pump_features(group: pd.DataFrame) -> pd.DataFrame:
     deltas = close.diff()
     gains = deltas.where(deltas > 0, 0)
     losses = -deltas.where(deltas < 0, 0)
-    
+
     # RSI 3-period
     ema_gains_3 = gains.ewm(span=3, adjust=False).mean()
     ema_losses_3 = losses.ewm(span=3, adjust=False).mean()
@@ -81,7 +82,7 @@ def _calculate_pump_features(group: pd.DataFrame) -> pd.DataFrame:
         100 - 100 / (1 + rs_3),
         np.where(ema_gains_3 > 0, 100.0, 50.0)
     )
-    
+
     # RSI 6-period
     ema_gains_6 = gains.ewm(span=6, adjust=False).mean()
     ema_losses_6 = losses.ewm(span=6, adjust=False).mean()
@@ -97,11 +98,11 @@ def _calculate_pump_features(group: pd.DataFrame) -> pd.DataFrame:
     high_close_prev = abs(high - close_shift1)
     low_close_prev = abs(low - close_shift1)
     tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1)
-    
+
     # ATR calculations
     atr_14 = tr.ewm(span=14, adjust=False).mean()
     atr_7 = tr.ewm(span=7, adjust=False).mean()
-    
+
     # --- CCI Calculation ---
     typical_price = (high + low + close) / 3
     typical_price_sma = typical_price.rolling(window=20).mean()
@@ -153,18 +154,18 @@ def _calculate_pump_features(group: pd.DataFrame) -> pd.DataFrame:
     # --- ADX Calculation ---
     high_shift1 = high.shift(1)
     low_shift1 = low.shift(1)
-    
+
     up_move = high - high_shift1
     down_move = low_shift1 - low
-    
+
     plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0), index=group.index)
     minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0), index=group.index)
-    
+
     periods_15s = 3
     tr_smooth = tr.rolling(window=periods_15s, min_periods=1).mean()
     plus_di = 100 * plus_dm.rolling(window=periods_15s, min_periods=1).mean() / (tr_smooth + epsilon)
     minus_di = 100 * minus_dm.rolling(window=periods_15s, min_periods=1).mean() / (tr_smooth + epsilon)
-    
+
     dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + epsilon)
     adx_15s = dx.rolling(window=periods_15s, min_periods=1).mean()
 
@@ -201,7 +202,7 @@ def _calculate_pump_features(group: pd.DataFrame) -> pd.DataFrame:
         'adx_15s': adx_15s,
         'obv': obv
     }
-    
+
     return pd.DataFrame(result_data, index=group.index)
 
 
@@ -220,7 +221,7 @@ async def calculate_all_features(
         return {}, []
 
     # --- 1. Data Cleaning & Type Conversion ---
-    for df, date_col in [(trades_df, 'timestamp'), (rugcheck_df, 'timestamp'), 
+    for df, date_col in [(trades_df, 'timestamp'), (rugcheck_df, 'timestamp'),
                          (token_info_df, 'token_creation_time'), (dexscreener_df, 'timestamp')]:
         if not df.empty and date_col in df.columns:
             df[date_col] = pd.to_datetime(df[date_col], utc=True, errors='coerce')
@@ -228,7 +229,7 @@ async def calculate_all_features(
     for col in ['price_sol', 'market_cap_sol', 'volume_usd', 'sol_price_usd']:
         if not trades_df.empty and col in trades_df.columns:
             trades_df[col] = pd.to_numeric(trades_df[col], errors='coerce')
-        
+
     if not trades_df.empty and 'price_sol' in trades_df.columns:
         trades_df = trades_df[trades_df['price_sol'] > 0]
     trades_df.dropna(subset=['timestamp', 'price_sol', 'volume_usd', 'mint'], inplace=True)
@@ -240,32 +241,32 @@ async def calculate_all_features(
 
     grouped_feature_data = {group_name: {} for group_name in FEATURE_GROUPS.keys()}
     unique_mints = trades_df['mint'].unique()
-    
+
     logger.info(f"Starting feature engineering for {len(unique_mints)} tokens...")
     all_feature_columns = set()
 
     for mint in tqdm(unique_mints, desc="Processing Tokens"):
         mint_trades = trades_df[trades_df['mint'] == mint].set_index('timestamp').sort_index()
         if mint_trades.empty: continue
-            
+
         resampler = mint_trades.resample('5s')
         ohlcv = resampler['price_sol'].ohlc()
         agg_dict = {
             'volume_usd': 'sum', 'buy_volume_usd': 'sum', 'sell_volume_usd': 'sum',
             'market_cap_sol': 'last', 'tx_buy_count': 'sum', 'tx_sell_count': 'sum',
-            'sol_price_usd': 'mean' 
+            'sol_price_usd': 'mean'
         }
         aggregated_data = resampler.agg(agg_dict)
-        
+
         mint_df = pd.concat([ohlcv, aggregated_data], axis=1)
         mint_df.columns = ['Open', 'High', 'Low', 'Close', 'volume_usd', 'buy_volume_usd', 'sell_volume_usd', 'market_cap_sol', 'tx_buy_count', 'tx_sell_count', 'sol_price_avg']
-        
+
         mint_df.interpolate(method='time', inplace=True)
         mint_df[['volume_usd', 'buy_volume_usd', 'sell_volume_usd']] = mint_df[['volume_usd', 'buy_volume_usd', 'sell_volume_usd']].fillna(0)
         mint_df.dropna(subset=['Close'], inplace=True)
 
         if mint_df.empty or len(mint_df) < 20: continue
-            
+
         pump_features = _calculate_pump_features(mint_df.copy())
         mint_df = mint_df.join(pump_features, how='left')
 
@@ -274,7 +275,7 @@ async def calculate_all_features(
             if not mint_rugcheck.empty:
                 mint_df = pd.merge_asof(mint_df, mint_rugcheck[['rugcheck_score']], left_index=True, right_index=True, direction='backward')
             else: mint_df['rugcheck_score'] = np.nan
-        
+
         if not token_info_df.empty:
             mint_info = token_info_df[token_info_df['mint'] == mint].iloc[0] if not token_info_df[token_info_df['mint'] == mint].empty else None
             if mint_info is not None:
@@ -286,7 +287,7 @@ async def calculate_all_features(
         final_df['rugcheck_score'] = final_df['rugcheck_score'].fillna(2500) / 2500.0
         final_df['socials_score'] = final_df['socials_score'].fillna(100) / 100.0
         final_df.fillna(0, inplace=True)
-        
+
         # *** CRITICAL FIX: Add mint as a column for identification later ***
         final_df['mint'] = mint
         all_feature_columns.update(final_df.columns)
@@ -294,7 +295,7 @@ async def calculate_all_features(
         for group_name, features in FEATURE_GROUPS.items():
             group_cols = [f for f in features if f in final_df.columns]
             group_df = final_df[group_cols].copy()
-            for col in group_df.columns: 
+            for col in group_df.columns:
                 group_df[col] = group_df[col].astype(np.float32) if pd.api.types.is_numeric_dtype(group_df[col]) else group_df[col]
             grouped_feature_data[group_name][mint] = group_df
 

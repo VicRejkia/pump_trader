@@ -1,19 +1,23 @@
 import asyncio
+from datetime import datetime
+
 import redis.asyncio as aioredis
+import strawberry
+from core.bot_service import BotService
+from core.database import DatabaseClient
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import PlainTextResponse
-import strawberry
 from strawberry.fastapi import GraphQLRouter
 
-from bot_logger import logger
-from api.endpoints import bot_control, config as api_config
-from api.metrics import setup_metrics
 from api.auth import auth_router
-from core.bot_service import BotService
-from core.database import DatabaseClient
+from api.endpoints import bot_control
+from api.endpoints import config as api_config
+from api.metrics import setup_metrics
+from bot_logger import logger
 from config.loader import ConfigLoader
 from state_manager import GlobalState
+
 
 # --- GraphQL Schema (Placeholder) ---
 @strawberry.type
@@ -49,27 +53,27 @@ async def startup_event():
         config_loader = ConfigLoader()
         config = await config_loader.load_config()
         state.config = config
-        
+
         # 2. Connect to PostgreSQL
         db_client = DatabaseClient(config=config)
         await db_client.connect()
         await state.set_db_client(db_client)
         logger.info("PostgreSQL pool established.")
-        
+
         # 3. Connect to Redis
         redis_host = config.get('REDIS_HOST', 'localhost')
         redis_port = config.get('REDIS_PORT', 6379)
         state.redis_client = aioredis.Redis(host=redis_host, port=redis_port, decode_responses=True)
         await state.redis_client.ping()
         logger.info(f"Redis connection established at {redis_host}:{redis_port}.")
-        
+
         # 4. Initialize and start the BotService
         bot_service = BotService(state=state, config=config, db_client=db_client)
         app.state.bot_service = bot_service
         asyncio.create_task(bot_service.start(), name="bot_service_main")
-        
+
         logger.info("✅ C&C Hub startup complete. BotService is running.")
-        
+
     except aioredis.exceptions.ConnectionError as e:
         logger.critical(f"CRITICAL: Failed to connect to Redis at {redis_host}:{redis_port}. {e}")
         # In a real app, you might want to exit if Redis is essential
@@ -84,18 +88,18 @@ async def shutdown_event():
     """Handles graceful shutdown"""
     logger.info("Server shutdown initiated...")
     state = GlobalState.get_instance()
-    
+
     if hasattr(app.state, 'bot_service'):
         await app.state.bot_service.stop()
-        
+
     if state.redis_client:
         await state.redis_client.close()
         logger.info("Redis connection closed.")
-        
+
     if state.db_client:
         await state.db_client.close()
         logger.info("PostgreSQL pool closed.")
-        
+
     logger.info("✅ C&C Hub shutdown complete.")
 
 # --- Error Handlers ---

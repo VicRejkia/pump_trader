@@ -7,19 +7,20 @@ Now supports multiple, prioritized check types (Initial, Follow-up, Telegram).
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from typing import Tuple
 from urllib.parse import urlparse, urlsplit
+
+import asyncpg
 import httpx
 from bs4 import BeautifulSoup
-from decimal import Decimal
-from datetime import datetime, timezone, timedelta
-import asyncpg
-from typing import Tuple
 
-from database_handler import DatabaseClient
 from bot_logger import logger
+from connectors.telegram_monitor import check_telegram_channel
+from database_handler import DatabaseClient
 from state_manager import GlobalState
 from utils import is_valid_telegram, is_valid_twitter
-from connectors.telegram_monitor import check_telegram_channel
 
 # --- Configuration for Retries ---
 MAX_FETCH_ATTEMPTS = 3
@@ -121,7 +122,7 @@ class SocialsProcessor:
                     results['mentions_token'] = True
                 elif token_symbol_lower and token_symbol_lower in page_content:
                      results['mentions_token'] = True
-            
+
         except httpx.HTTPStatusError as e:
             results['error'] = f"HTTP Error {e.response.status_code}"
         except httpx.TimeoutException:
@@ -145,7 +146,7 @@ class SocialsProcessor:
 
         # Dynamically load config values to allow for live updates
         disallowed_domains = self.config['SOCIALS_DISALLOWED_WEBSITE_DOMAINS']
-        
+
         website = social_data.get("website")
         if not website:
             penalty = self.config['SOCIALS_PENALTY_NO_WEBSITE']
@@ -231,7 +232,7 @@ class SocialsProcessor:
                     bonus = self.config['SOCIALS_BONUS_TG_HIGH_ONLINE_RATIO']
                     total_penalty += bonus
                     reasons.append(f"High Online Ratio: {bonus}")
-        
+
         twitter = social_data.get("twitter") or social_data.get("x")
         if not twitter:
             penalty = self.config['SOCIALS_PENALTY_NO_TWITTER']
@@ -292,7 +293,7 @@ class SocialsProcessor:
         """
         score_type = self.config['SOCIALS_SCORE_TYPE_INITIAL'] if is_initial_check else self.config['SOCIALS_SCORE_TYPE_FOLLOWUP']
         logger.debug(f"🔍 Processing '{score_type}' for token: {mint}")
-        
+
         try:
             async with self.db_client.pool.acquire() as conn:
                 token_info_row = await conn.fetchrow("SELECT uri, name, symbol FROM tokens WHERE mint = $1", mint)
@@ -312,9 +313,9 @@ class SocialsProcessor:
             website = metadata.get("website") or metadata.get("homepage") or metadata.get("url") or metadata.get("external_url")
             telegram = metadata.get("telegram") or metadata.get("tg")
             twitter = metadata.get("twitter") or metadata.get("x")
-            
+
             social_links = {"website": str(website) if website else None, "telegram": telegram, "twitter": str(twitter) if twitter else None}
-            
+
             verification_results, telegram_results = None, None
             if social_links["website"]:
                 verification_results = await self._verify_website_details(social_links["website"], token_name, token_symbol)
@@ -323,10 +324,10 @@ class SocialsProcessor:
 
             social_score, reasons = self._calculate_social_score(social_links, token_name, token_symbol, verification_results, telegram_results)
             details = {"metadata_source": metadata_source, "website_verification": verification_results, "telegram_stats": telegram_results, "reasons": reasons}
-            
+
             display_name = token_name or token_symbol or mint
             logger.debug(f"📊 Socials Score for '{display_name}': {social_score} (Reasons: {', '.join(reasons)})")
-            
+
             await self._update_token_socials(mint, social_links["website"], social_links["telegram"], social_links["twitter"], social_score, score_type, details)
             return True
 
@@ -343,28 +344,28 @@ class SocialsProcessor:
         try:
             async with self.db_client.pool.acquire() as conn:
                 token_info = await conn.fetchrow("SELECT name, symbol, website, telegram, twitter FROM tokens WHERE mint = $1", mint)
-            
+
             if not token_info or not token_info['telegram']:
                 return "NO_TELEGRAM_LINK"
-            
+
             telegram_url = token_info['telegram']
             telegram_results = await check_telegram_channel(telegram_url)
-            
+
             if not telegram_results or not telegram_results.get('valid'):
                 # Not a retryable error if the link is now invalid
                 logger.warning(f"Telegram link {telegram_url} for {mint} is no longer valid.")
                 return "TELEGRAM_INVALID"
-            
+
             # Re-calculate score with EXISTING social links but NEW telegram data
             existing_socials = {"website": token_info['website'], "telegram": token_info['telegram'], "twitter": token_info['twitter']}
-            
+
             # We don't re-verify the website here to keep this check lightweight
             # Pass None for verification_results to use only link presence/format checks
             new_score, reasons = self._calculate_social_score(existing_socials, token_info['name'], token_info['symbol'], None, telegram_results)
-            
+
             details = {"source": "Telegram Update", "telegram_stats": telegram_results, "reasons": reasons}
             await self._update_token_socials(mint, None, None, None, new_score, self.config['SOCIALS_SCORE_TYPE_TELEGRAM'], details)
-            
+
             return True
         except Exception as e:
             logger.error(f"🚨 Unexpected error in _process_telegram_update for {mint}: {e}", exc_info=True)
@@ -404,7 +405,7 @@ class SocialsProcessor:
                       AND t.socials_last_checked < NOW() - ($1 || ' minutes')::interval
                     GROUP BY t.mint ORDER BY recent_volume DESC;
                 """, str(interval))
-                
+
                 if rows:
                     for row in rows:
                         if row["mint"] not in self.fetch_attempts:
@@ -453,7 +454,7 @@ class SocialsProcessor:
                         continue
 
                 priority, (mint, check_type) = await asyncio.wait_for(self.queue.get(), timeout=1.0)
-                
+
                 if self.fetch_attempts.get(mint, 0) >= MAX_FETCH_ATTEMPTS:
                     self.queue.task_done(); continue
 
@@ -467,7 +468,7 @@ class SocialsProcessor:
                     process_status = await self._process_metadata_check(mint, is_initial_check=(check_type == 'INITIAL_METADATA'))
                 elif check_type == 'TELEGRAM_UPDATE':
                     process_status = await self._process_telegram_update(mint)
-                
+
                 # --- Preserved Error Handling Logic ---
                 permanent_failures = {"NOT_FOUND", "Error InvalidURI", "NO_PRIMARY_URI", "NO_TELEGRAM_LINK", "TELEGRAM_INVALID", "Error NotJSONContentType", "Error DecodeFailedStrict", "Error DecodeGeneral", "Error HTTP 404", "Error HTTP 403", "Error HTTP 401"}
                 is_permanent_failure = isinstance(process_status, str) and any(pf in process_status for pf in permanent_failures)
@@ -486,7 +487,7 @@ class SocialsProcessor:
                     else:
                         await self.queue.put((DEPRIORITIZED_PRIORITY, (mint, check_type)))
                         logger.warning(f"🚩 Max socials check attempts ({MAX_FETCH_ATTEMPTS}) reached for {mint}. Deprioritizing.")
-                
+
                 self.queue.task_done()
 
             except asyncio.TimeoutError: continue
@@ -494,7 +495,7 @@ class SocialsProcessor:
             except Exception as e:
                 logger.error(f"🚨 Unexpected error in Socials Check worker main loop: {e}", exc_info=True)
                 await self.state.wait_or_interrupt(timeout=10)
-        
+
         logger.info("🛑 Socials check worker shutting down.")
 
     def start(self) -> list[asyncio.Task]:

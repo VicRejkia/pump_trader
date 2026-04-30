@@ -1,20 +1,21 @@
 # rl_agent_module/environments/meme_coin_env.py
+import os
+import sys
+from typing import Any, Dict, List, Optional, Tuple
+
 import gymnasium as gym
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, List, Tuple, Optional
 from gymnasium import spaces
-import os
-import sys
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from bot_logger import logger
+from config.rl_config import get_active_features
 from rl_agent_module.data.data_manager import DataManager
 from rl_agent_module.rewards.reward_function import RewardFunction
-from config.rl_config import get_active_features
 
 # --- NEW: Stability constants ---
 EPS = 1e-9  # Epsilon for safe division
@@ -33,7 +34,7 @@ class MemeCoinEnv(gym.Env):
         self.eps = self.rl_config.get('ENV_EPS', EPS)
 
         self.feature_columns = get_active_features(self.rl_config)
-        
+
         # --- Load parameters from the config dictionary ---
         self.initial_balance = self.rl_config.get('ENV_INITIAL_BALANCE', 100.0)
         self.max_concurrent_positions = self.rl_config.get('ENV_MAX_CONCURRENT_POSITIONS', 5)
@@ -46,12 +47,12 @@ class MemeCoinEnv(gym.Env):
         num_position_features = 5
         total_token_features = num_base_token_features + num_position_features
         obs_space_size = num_portfolio_features + (self.num_top_tokens_to_observe * total_token_features)
-        
+
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_space_size,), dtype=np.float32)
-        
+
         # Action Space
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(self.num_top_tokens_to_observe,), dtype=np.float32)
-        
+
         # Initialize state variables
         self.balance = self.initial_balance
         self.portfolio_value = self.initial_balance
@@ -68,7 +69,7 @@ class MemeCoinEnv(gym.Env):
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[np.ndarray, dict]:
         super().reset(seed=seed)
         self.data_manager.reset()
-        
+
         self.balance = self.initial_balance
         self.portfolio_value = self.initial_balance
         self.positions = {}
@@ -79,11 +80,11 @@ class MemeCoinEnv(gym.Env):
         # --- NEW: Episode stats for logging ---
         self.episode_buys = 0
         self.episode_sells = 0
-        
+
         next_data = next(self.data_manager, None)
         if next_data is None: raise StopIteration("No data available in DataManager.")
         self.current_timestamp, self.current_data_point = next_data
-        
+
         obs = self._get_observation()
         obs = np.nan_to_num(obs, nan=0.0, posinf=1e6, neginf=-1e6)
         obs = np.clip(obs, -10.0, 10.0)
@@ -114,7 +115,7 @@ class MemeCoinEnv(gym.Env):
                 self._update_portfolio()
             else:
                 self._log_episode_end("Data ended during warmup")
-            
+
             obs = self._get_observation()
             return obs, 0.0, terminated, False, {}
 
@@ -125,13 +126,13 @@ class MemeCoinEnv(gym.Env):
         next_step_data = next(self.data_manager, None)
         terminated = next_step_data is None
         truncated = self._steps >= self.rl_config.get('ENV_MAX_STEPS_PER_EPISODE', MAX_STEPS_PER_EPISODE)
-        
+
         if not terminated:
             self.current_timestamp, self.current_data_point = next_step_data
             self.current_step += 1
-        
+
         self._update_portfolio()
-        
+
         if self.portfolio_value < (self.initial_balance * 0.5):
             terminated = True
             truncated = False
@@ -160,7 +161,7 @@ class MemeCoinEnv(gym.Env):
         balance_norm = self.balance / max(self.portfolio_value, self.eps)
         portfolio_value_norm = self.portfolio_value / max(self.initial_balance, self.eps)
         num_positions_norm = len(self.positions) / self.max_concurrent_positions
-        
+
         unrealized_pnl = sum(
             (self._get_price_for_mint(mint) - pos['entry_price']) * (pos['size_sol'] / max(pos['entry_price'], self.eps))
             for mint, pos in self.positions.items() if self._get_price_for_mint(mint) is not None
@@ -173,7 +174,7 @@ class MemeCoinEnv(gym.Env):
         token_features_list = []
         num_base_token_features = len(self.feature_columns)
         num_position_features = 5
-        
+
         for i in range(self.num_top_tokens_to_observe):
             if i < len(top_tokens):
                 token_data = top_tokens[i]
@@ -188,7 +189,7 @@ class MemeCoinEnv(gym.Env):
                     highest_price_ratio = price / max(pos['highest_price'], self.eps) if price is not None else 1.0
 
                     position_features = np.array([
-                        1.0, 
+                        1.0,
                         pos['size_sol'] / max(self.portfolio_value, self.eps),
                         pnl_ratio,
                         min(time_in_pos / self.time_norm_seconds, 1.0),
@@ -196,16 +197,16 @@ class MemeCoinEnv(gym.Env):
                     ], dtype=np.float32)
                 else:
                     position_features = np.zeros(num_position_features, dtype=np.float32)
-                
+
                 token_features_list.append(np.concatenate([base_features, position_features]))
             else:
                 token_features_list.append(np.zeros(num_base_token_features + num_position_features, dtype=np.float32))
-        
+
         obs = np.concatenate([portfolio_features] + token_features_list, axis=0).astype(np.float32)
-        
+
         obs = np.nan_to_num(obs, nan=0.0, posinf=10.0, neginf=-10.0)
         obs = np.clip(obs, -10.0, 10.0)
-        
+
         return obs
 
     def _execute_sells(self, action: np.ndarray, observed_tokens: List[pd.Series]):
@@ -238,7 +239,7 @@ class MemeCoinEnv(gym.Env):
                 capital_per_buy = (self.balance / available_slots) * capital_pct
                 current_price = token_data.get('Close')
                 if current_price is None or current_price <= 0: continue
-                
+
                 if self.balance >= capital_per_buy > 0:
                     self.balance -= capital_per_buy
                     self.positions[mint] = {
@@ -257,25 +258,25 @@ class MemeCoinEnv(gym.Env):
         for mint, position in self.positions.items():
             current_price = self._get_price_for_mint(mint)
             if current_price is None:
-                held_value += 0 
+                held_value += 0
                 continue
 
             position['highest_price'] = max(position['highest_price'], current_price)
             held_value += position['size_sol'] * (current_price / max(position['entry_price'], self.eps))
-        
+
         self.portfolio_value = self.balance + held_value
-        
+
     def _get_price_for_mint(self, mint: str) -> Optional[float]:
         if self.current_data_point is None: return None
         if isinstance(self.current_data_point, pd.Series):
             return self.current_data_point['Close'] if self.current_data_point.get('mint') == mint else None
-        
+
         token_row = self.current_data_point[self.current_data_point['mint'] == mint]
         return token_row['Close'].iloc[0] if not token_row.empty else None
 
     def _get_current_global_state(self) -> Dict:
         return {}
-        
+
     def render(self, mode='human'):
         logger.info(f"Step: {self.current_step}, Timestamp: {self.current_timestamp}, "
               f"Portfolio Value: {self.portfolio_value:.4f} SOL, Positions: {len(self.positions)}")

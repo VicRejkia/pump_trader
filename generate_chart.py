@@ -9,13 +9,14 @@ and displays an interactive, multi-paned chart that accurately reflects the bot'
 This script is designed to be run from the root of your project directory.
 """
 import os
-from dotenv import load_dotenv
+
 import dash
+import pandas as pd
+import plotly.graph_objects as go
 from dash import dcc, html
 from dash.dependencies import Input, Output, State
-import plotly.graph_objects as go
+from dotenv import load_dotenv
 from plotly.subplots import make_subplots
-import pandas as pd
 from psycopg2.extras import DictCursor
 
 # --- Load Environment Variables ---
@@ -24,13 +25,19 @@ load_dotenv()
 # --- Project-Specific Imports ---
 try:
     from bot_logger import logger, setup_logging
-    from database_handler import DatabaseClient
     from config.config import (
-        RSI_PERIOD, TREND_REVERSAL_RSI_NEUTRAL_LEVEL, ADAPTIVE_RSI_STRONG_LEVEL, ADAPTIVE_RSI_EXTREME_LEVEL,
-        BBANDS_PERIOD, BBANDS_STD_DEV,
-        FAST_EMA_PERIOD, SLOW_EMA_PERIOD, ADAPTIVE_ATR_PERIOD,
-        MIN_CANDLE_DATA_FOR_INDICATORS
+        ADAPTIVE_ATR_PERIOD,
+        ADAPTIVE_RSI_EXTREME_LEVEL,
+        ADAPTIVE_RSI_STRONG_LEVEL,
+        BBANDS_PERIOD,
+        BBANDS_STD_DEV,
+        FAST_EMA_PERIOD,
+        MIN_CANDLE_DATA_FOR_INDICATORS,
+        RSI_PERIOD,
+        SLOW_EMA_PERIOD,
+        TREND_REVERSAL_RSI_NEUTRAL_LEVEL,
     )
+    from database_handler import DatabaseClient
     from utils import calculate_trend_indicators
 except ImportError as e:
     print(f"Error: Could not import necessary modules. {e}")
@@ -111,13 +118,13 @@ def get_trade_ticks(token_address, is_migrated):
         query = "SELECT timestamp, price_native AS price, (volume_m5 / sol_price_usd) AS volume FROM dexscreener_data WHERE mint_address = %s AND sol_price_usd > 0 ORDER BY timestamp"
     else:
         query = "SELECT timestamp, price, sol_amount as volume FROM trades WHERE mint = %s ORDER BY timestamp"
-    
+
     conn = None
     try:
         conn = db_pool.getconn()
         df = pd.read_sql_query(query, conn, params=(token_address,))
         if df.empty: return pd.DataFrame()
-        
+
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df['price'] = pd.to_numeric(df['price'], errors='coerce')
         df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
@@ -195,13 +202,13 @@ def update_chart(selected_token_address):
         return go.Figure().update_layout(title="Please select a token", template='plotly_dark'), "Select a token."
 
     logger.info(f"Generating chart for token: {selected_token_address}")
-    
+
     config_params = {
         'RSI_PERIOD': RSI_PERIOD, 'BBANDS_PERIOD': BBANDS_PERIOD, 'BBANDS_STD_DEV': BBANDS_STD_DEV,
         'FAST_EMA_PERIOD': FAST_EMA_PERIOD, 'SLOW_EMA_PERIOD': SLOW_EMA_PERIOD,
         'ADAPTIVE_ATR_PERIOD': ADAPTIVE_ATR_PERIOD, 'MIN_CANDLE_DATA_FOR_INDICATORS': MIN_CANDLE_DATA_FOR_INDICATORS
     }
-    
+
     settings_display = [
         html.P(f"Token: {selected_token_address}", style={'color': '#FFFFFF', 'fontWeight': 'bold'}),
         html.H5("Trend Reversal (Buy)", style={'color': '#4682B4', 'marginTop': '10px'}),
@@ -213,10 +220,10 @@ def update_chart(selected_token_address):
         html.P(f"RSI-Adaptive ATR: ({ADAPTIVE_ATR_PERIOD})"),
         html.P(f"RSI Levels (Neutral/Strong/Extreme): {TREND_REVERSAL_RSI_NEUTRAL_LEVEL} / {ADAPTIVE_RSI_STRONG_LEVEL} / {ADAPTIVE_RSI_EXTREME_LEVEL}")
     ]
-    
+
     is_migrated = check_if_migrated(selected_token_address)
     df_ticks = get_trade_ticks(selected_token_address, is_migrated)
-    
+
     if df_ticks.empty:
         return go.Figure().update_layout(title=f"No trade data found for token: {selected_token_address}", template='plotly_dark'), settings_display
 
@@ -227,38 +234,38 @@ def update_chart(selected_token_address):
     chart_title = "Price & Trend Indicators"
     if not is_migrated:
         chart_title += " (Pre-Migration)"
-    
+
     fig = build_unified_chart(df_indicators if not df_indicators.empty else df_ohlcv, df_trades, config_params, selected_token_address, chart_title)
-        
+
     return fig, settings_display
 
 def build_unified_chart(df, df_trades, settings, token_address, chart_title):
     """Builds a unified, multi-pane chart for any token with OHLCV data."""
     row_config, row_heights, subplot_titles = {'main': 1}, [0.6], [chart_title]
     rows_total = 1
-    
+
     if 'Volume' in df.columns and not df['Volume'].empty:
         rows_total += 1; row_config['volume'] = rows_total; row_heights.append(0.1); subplot_titles.append("Volume")
-    
+
     rsi_col = f'RSI_{settings["RSI_PERIOD"]}'
     if rsi_col in df.columns:
         rows_total += 1; row_config['rsi'] = rows_total; row_heights.append(0.15); subplot_titles.append("RSI")
-        
+
     atr_col = f'ATRr_{settings["ADAPTIVE_ATR_PERIOD"]}'
     if atr_col in df.columns:
         rows_total += 1; row_config['atr'] = rows_total; row_heights.append(0.15); subplot_titles.append("ATR (for Dynamic Sell Logic)")
-        
+
     fig = make_subplots(rows=rows_total, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=row_heights, subplot_titles=subplot_titles)
-    
+
     main_row = row_config['main']
     fig.add_trace(go.Candlestick(x=df['timestamp'], open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Candles'), row=main_row, col=1)
-    
+
     bb_lower_col = f'BBL_{settings["BBANDS_PERIOD"]}_{settings["BBANDS_STD_DEV"]}'
     bb_upper_col = f'BBU_{settings["BBANDS_PERIOD"]}_{settings["BBANDS_STD_DEV"]}'
     if bb_lower_col in df.columns and bb_upper_col in df.columns:
         fig.add_trace(go.Scatter(x=df['timestamp'], y=df[bb_upper_col], name='BB Upper', line=dict(color='rgba(100, 100, 255, 0.4)', width=1)), row=main_row, col=1)
         fig.add_trace(go.Scatter(x=df['timestamp'], y=df[bb_lower_col], name='BB Lower', line=dict(color='rgba(100, 100, 255, 0.4)', width=1), fill='tonexty', fillcolor='rgba(100, 100, 255, 0.05)'), row=main_row, col=1)
-    
+
     if 'EMA_fast' in df.columns: fig.add_trace(go.Scatter(x=df['timestamp'], y=df['EMA_fast'], name=f'EMA {settings["FAST_EMA_PERIOD"]}', line=dict(color='aqua', width=1.5)), row=main_row, col=1)
     if 'EMA_slow' in df.columns: fig.add_trace(go.Scatter(x=df['timestamp'], y=df['EMA_slow'], name=f'EMA {settings["SLOW_EMA_PERIOD"]}', line=dict(color='magenta', width=1.5)), row=main_row, col=1)
     if 'VWAP' in df.columns: fig.add_trace(go.Scatter(x=df['timestamp'], y=df['VWAP'], name='VWAP', line=dict(color='orange', width=1, dash='dot')), row=main_row, col=1)
@@ -267,10 +274,10 @@ def build_unified_chart(df, df_trades, settings, token_address, chart_title):
         buys, sells = df_trades[df_trades['trade_type'] == 'buy'], df_trades[df_trades['trade_type'] == 'sell']
         fig.add_trace(go.Scatter(x=buys['timestamp'], y=buys['price_sol'], name='Buys', mode='markers', marker=dict(color='lime', symbol='triangle-up', size=10, line=dict(width=1, color='DarkGreen'))), row=main_row, col=1)
         fig.add_trace(go.Scatter(x=sells['timestamp'], y=sells['price_sol'], name='Sells', mode='markers', marker=dict(color='red', symbol='triangle-down', size=10, line=dict(width=1, color='DarkRed'))), row=main_row, col=1)
-    
+
     if 'volume' in row_config:
         fig.add_trace(go.Bar(x=df['timestamp'], y=df['Volume'], name='Volume', marker=dict(color='rgba(255, 255, 255, 0.5)')), row=row_config['volume'], col=1)
-    
+
     if 'rsi' in row_config:
         rs_row = row_config['rsi']
         fig.add_trace(go.Scatter(x=df['timestamp'], y=df[rsi_col], name='RSI', line=dict(color='cyan')), row=rs_row, col=1)
@@ -278,7 +285,7 @@ def build_unified_chart(df, df_trades, settings, token_address, chart_title):
         fig.add_hline(y=ADAPTIVE_RSI_STRONG_LEVEL, line=dict(color='orange', dash='dot', width=1), annotation_text="Strong", annotation_position="bottom right", row=rs_row, col=1)
         fig.add_hline(y=TREND_REVERSAL_RSI_NEUTRAL_LEVEL, line=dict(color='green', dash='dot', width=1), annotation_text="Neutral", annotation_position="bottom right", row=rs_row, col=1)
         fig.update_yaxes(range=[0, 100], row=rs_row, col=1)
-    
+
     if 'atr' in row_config:
         fig.add_trace(go.Scatter(x=df['timestamp'], y=df[atr_col], name='ATR', line=dict(color='goldenrod')), row=row_config['atr'], col=1)
 

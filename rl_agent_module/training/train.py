@@ -36,20 +36,21 @@ Resume a previous training run or fine-tune an existing model.
     > 3) Continue Training a Model
     > 4) Perform Model Fine-Tuning
 """
+import argparse
 import asyncio
 import json
-import os
-import sys
-import argparse
-import time
-import shutil
-import tempfile
-from datetime import datetime
-from typing import Any, Dict, List
-from functools import partial
-import pandas as pd
 import multiprocessing
+import os
 import random
+import shutil
+import sys
+import tempfile
+import time
+from datetime import datetime
+from functools import partial
+from typing import Any, Dict, List
+
+import pandas as pd
 
 # --- Project Setup ---
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -57,33 +58,41 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 # --- Third-Party Imports ---
-import numpy as np
-import optuna
-import torch as th
-from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback, CallbackList
-from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
-from stable_baselines3.common.evaluation import evaluate_policy
-from optuna.samplers import TPESampler
-from stable_baselines3.common.logger import configure
-
 # --- MLflow Integration ---
 import mlflow
-from mlflow.tracking import MlflowClient
-from rl_agent_module.mlflow_model import log_sb3_model
-from mlflow.data.pandas_dataset import PandasDataset
-from mlflow.entities import RunStatus
 
 # --- Local Application Imports ---
 import nest_asyncio
-from config.rl_config import get_config_for_mode, RL_CONFIG
+import numpy as np
+import optuna
+import torch as th
+from mlflow.data.pandas_dataset import PandasDataset
+from mlflow.entities import RunStatus
+from mlflow.tracking import MlflowClient
+from optuna.samplers import TPESampler
+from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import CallbackList, CheckpointCallback, EvalCallback
+from stable_baselines3.common.evaluation import evaluate_policy
+from stable_baselines3.common.logger import configure
+from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
+
 from bot_logger import logger, setup_logging
+from config.rl_config import RL_CONFIG, get_config_for_mode
 from rl_agent_module.agents.ppo_agent import create_ppo_agent
 from rl_agent_module.data.data_manager import DataManager
 from rl_agent_module.environments.meme_coin_env import MemeCoinEnv
-from rl_agent_module.utils.mlflow_utils import get_parent_run_info, build_tensorboard_command, find_mlflow_entity_by_run_id
-from rl_agent_module.utils.script_utils import generate_tensorboard_launch_scripts, generate_readme, generate_config_json
+from rl_agent_module.mlflow_model import log_sb3_model
+from rl_agent_module.utils.mlflow_utils import (
+    build_tensorboard_command,
+    find_mlflow_entity_by_run_id,
+    get_parent_run_info,
+)
+from rl_agent_module.utils.script_utils import (
+    generate_config_json,
+    generate_readme,
+    generate_tensorboard_launch_scripts,
+)
 
 # Apply asyncio patch for environments that use it internally
 nest_asyncio.apply()
@@ -111,7 +120,7 @@ class AdvancedMlflowCallback(EvalCallback):
             if "episode" in info:
                 mlflow.log_metric("rollout_ep_rew_mean", info["episode"]["r"], step=self.num_timesteps)
                 mlflow.log_metric("rollout_ep_len_mean", info["episode"]["l"], step=self.num_timesteps)
-        
+
         if not super()._on_step():
             return False
 
@@ -132,7 +141,7 @@ def find_latest_dataset_run() -> mlflow.entities.Run | None:
         if not exp:
             logger.error(f"MLflow experiment '{ MLFLOW_EXPERIMENT_DATASET }' not found.")
             return None
-        
+
         runs = client.search_runs(
             experiment_ids=[exp.experiment_id],
             filter_string="attributes.status = 'FINISHED'",
@@ -160,10 +169,10 @@ def sample_ppo_params(trial: optuna.trial.Trial, n_envs: int) -> Dict[str, Any]:
     n_steps = trial.suggest_categorical("n_steps", [1024, 2048, 4096])
     valid_bs = _valid_batch_sizes(n_steps, n_envs)
     if not valid_bs: raise optuna.exceptions.TrialPruned("No valid batch_size.")
-    
+
     batch_size = trial.suggest_categorical("batch_size", valid_bs)
     pi_vf_layers = trial.suggest_categorical("pi_vf_layers", ["64,64", "128,128", "256,256"])
-    
+
     return {
         "n_steps": n_steps, "batch_size": batch_size,
         "gamma": trial.suggest_float("gamma", 0.95, 0.9999),
@@ -192,23 +201,23 @@ def objective(trial: optuna.trial.Trial, rl_config: Dict, train_mints: List[str]
 
             train_subset = random.sample(train_mints, min(len(train_mints), 50))
             eval_subset = random.sample(eval_mints, min(len(eval_mints), 10))
-            
+
             train_dm = DataManager(rl_config, dataset_run_id=dataset_run_id)
             train_dm.load_and_prepare_data(mints_to_load=train_subset, verbose=False)
             train_env = DummyVecEnv([lambda: Monitor(MemeCoinEnv(train_dm, rl_config, silent=True))])
-            
+
             params = sample_ppo_params(trial, n_envs=1)
             if params["policy_kwargs"]["activation_fn"] == 'ReLU':
                 params["policy_kwargs"]["activation_fn"] = th.nn.ReLU
             mlflow.log_params(params)
-            
+
             model = PPO("MlpPolicy", train_env, device=rl_config.get('DEVICE', 'cpu'), verbose=0, **params)
             model.learn(total_timesteps=rl_config['PPO_TIMESTEPS_PER_TRIAL'])
-            
+
             eval_dm = DataManager(rl_config, dataset_run_id=dataset_run_id)
             eval_dm.load_and_prepare_data(mints_to_load=eval_subset, verbose=False)
             eval_env = DummyVecEnv([lambda: Monitor(MemeCoinEnv(eval_dm, rl_config, silent=True))])
-            
+
             datasets, contexts, tags_list = [], [], []
 
             training_data = train_dm.get_training_data()
@@ -231,11 +240,11 @@ def objective(trial: optuna.trial.Trial, rl_config: Dict, train_mints: List[str]
                     contexts=contexts,
                     tags_list=tags_list
                 )
-            
+
             mean_reward, _ = evaluate_policy(model, eval_env, n_eval_episodes=5, deterministic=True)
             if not np.isfinite(mean_reward):
                 raise optuna.exceptions.TrialPruned("Reward is not finite.")
-            
+
             mlflow.log_metric("final_mean_reward", float(mean_reward))
             return float(mean_reward)
         except optuna.exceptions.TrialPruned as e:
@@ -251,7 +260,7 @@ def objective(trial: optuna.trial.Trial, rl_config: Dict, train_mints: List[str]
 async def run_hyperparameter_tuning(rl_config: Dict[str, Any], dataset_run_id: str):
     """Orchestrates the Optuna hyperparameter tuning process."""
     logger.info("PHASE 1: Starting Hyperparameter Tuning.")
-    
+
     data_provider = DataManager(rl_config=rl_config, dataset_run_id=dataset_run_id)
     if not data_provider.load_and_prepare_data():
         logger.error("Failed to load data. Aborting tuning."); return
@@ -261,7 +270,7 @@ async def run_hyperparameter_tuning(rl_config: Dict[str, Any], dataset_run_id: s
     with mlflow.start_run(run_name=f"OptunaStudy_{datetime.now().strftime('%Y%m%d-%H%M%S')}", log_system_metrics=True):
         mlflow.log_params({"n_trials": rl_config['OPTUNA_N_TRIALS'], "timeout": rl_config['OPTUNA_TIMEOUT_SECONDS']})
         mlflow.set_tag("source_dataset_run_id", dataset_run_id)
-        
+
         study = optuna.create_study(direction="maximize", sampler=TPESampler(seed=42))
         objective_with_args = partial(objective, rl_config=rl_config, train_mints=train_mints, eval_mints=eval_mints, dataset_run_id=dataset_run_id)
         study.optimize(objective_with_args, n_trials=rl_config['OPTUNA_N_TRIALS'], n_jobs=1, gc_after_trial=True)
@@ -269,7 +278,7 @@ async def run_hyperparameter_tuning(rl_config: Dict[str, Any], dataset_run_id: s
         logger.info(f"Tuning finished. Best trial: #{study.best_trial.number} with reward: {study.best_trial.value:.4f}")
         mlflow.log_params(study.best_trial.params)
         mlflow.log_metric("best_trial_value", study.best_trial.value)
-        
+
         best_params = study.best_trial.params
         if 'policy_kwargs' in best_params and 'activation_fn' in best_params['policy_kwargs']:
             if not isinstance(best_params['policy_kwargs']['activation_fn'], str):
@@ -293,15 +302,15 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
     """Orchestrates the main model training, continuation, or fine-tuning process."""
     mlflow.set_experiment(RL_CONFIG["common"]["MLFLOW_EXPERIMENT_TRAINING"])
     client = MlflowClient()
-    
+
     with mlflow.start_run(run_name=f"{args.name}-{args.action}", log_system_metrics=True) as run:
         logger.info(f"Starting model '{args.action}' with MLflow run '{run.info.run_name}'.")
         staging_dir = os.path.abspath(f"./.rl_staging/{run.info.run_id}")
         os.makedirs(staging_dir, exist_ok=True)
-        
+
         vec_env, eval_env = None, None
         try:
-            
+
             mlflow.log_params(rl_config)
 
             srl_config_staging = os.path.join(staging_dir, "config")
@@ -338,7 +347,7 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
             if not dataset_run:
                 logger.error("No dataset run found with ID: %s. Aborting.", args.dataset_run_id)
                 return
-            
+
             datasets, contexts, tags_list = [], [], []
 
             data_manager = DataManager(rl_config, dataset_run_id=args.dataset_run_id)
@@ -369,13 +378,13 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
 
             n_cpu = rl_config['N_CPU']
             mint_chunks = [c.tolist() for c in np.array_split(train_mints, n_cpu) if c.size > 0]
-            
+
             # --- SAFETY CHECK: Ensure N_CPU is not too high for the dataset size ---
             if not mint_chunks:
                 logger.error(f"Cannot train with N_CPU={n_cpu} as there are not enough tokens to split ({len(train_mints)} available).")
                 logger.error("Please reduce N_CPU or use a larger dataset.")
                 return
-            
+
             vec_env = SubprocVecEnv([make_env_lazy(i, rl_config, mint_chunks, args.dataset_run_id) for i in range(len(mint_chunks))])
             eval_env = DummyVecEnv([make_env_lazy(0, rl_config, [eval_mints], args.dataset_run_id)])
 
@@ -391,17 +400,17 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
                 if args.action == 'finetune' and hasattr(args, 'learning_rate') and args.learning_rate:
                     model.learning_rate = args.learning_rate
 
-            if not model: 
+            if not model:
                 logger.error("Model could not be initialized. Aborting.")
                 return
 
             chk_cb = CheckpointCallback(max(rl_config['PPO_EVAL_FREQ']//n_cpu,1), os.path.join(staging_dir, "models"), "checkpoint")
             adv_cb = AdvancedMlflowCallback(eval_env, best_model_save_path=os.path.join(staging_dir, "models"), log_path=os.path.join(staging_dir, "logs"), eval_freq=max(rl_config['PPO_EVAL_FREQ']//n_cpu,1))
-            
+
             logger.info("🚀 Starting model training...")
             model.learn(
-                total_timesteps=rl_config['PPO_FINAL_MODEL_TIMESTEPS'], 
-                callback=CallbackList([chk_cb, adv_cb]), 
+                total_timesteps=rl_config['PPO_FINAL_MODEL_TIMESTEPS'],
+                callback=CallbackList([chk_cb, adv_cb]),
                 reset_num_timesteps=reset_num_timesteps,
                 tb_log_name=args.name
             )
@@ -434,14 +443,14 @@ async def run_model_training(rl_config: Dict[str, Any], args: argparse.Namespace
 
             best_model_path = os.path.join(staging_dir, "models", "best_model.zip")
             model_to_log = PPO.load(best_model_path if os.path.exists(best_model_path) else final_model_path)
-            
+
             obs = eval_env.reset()
             input_example = np.asarray(obs[0] if isinstance(obs, np.ndarray) and obs.ndim > 1 else obs)
-            
+
             log_sb3_model(
-                model_to_log, 
-                args.name, 
-                input_example=input_example, 
+                model_to_log,
+                args.name,
+                input_example=input_example,
                 staging_path=staging_dir,
                 register_as=args.register_as
             )
@@ -459,20 +468,20 @@ async def main():
     """Parses command-line arguments and calls the appropriate workflow function."""
     parser = argparse.ArgumentParser(description="RL Agent Training Workflow")
     subparsers = parser.add_subparsers(dest="action", required=True)
-    
+
     # --- Shared parser for hardware and common training arguments ---
     common_parser = argparse.ArgumentParser(add_help=False)
     common_parser.add_argument("--dataset-run-id", required=True, help="MLflow run ID of the dataset to use.")
     common_parser.add_argument("--register-as", help="If provided, registers the model with this name.")
     common_parser.add_argument("--device", type=str, help="Override the computation device (e.g., 'cuda', 'cpu').")
     common_parser.add_argument("--n-cpu", type=int, help="Override the number of CPU cores to use.")
-    
+
     p_tune = subparsers.add_parser("tune", help="Run hyperparameter tuning.")
     p_tune.add_argument("--dataset-run-id", required=True, help="MLflow run ID of the dataset to use.")
-    
+
     p_train = subparsers.add_parser("train", help="Train a new model.", parents=[common_parser])
     p_train.add_argument("--params-path", required=True); p_train.add_argument("--name", default="PPO_Model")
-    
+
     p_cont = subparsers.add_parser("continue", help="Continue training.", parents=[common_parser])
     p_cont.add_argument("--model-path", required=True); p_cont.add_argument("--parent-run-id", required=True); p_cont.add_argument("--name", default="PPO_Model")
 
@@ -491,9 +500,9 @@ async def main():
         rl_config['N_CPU'] = args.n_cpu
         logger.info(f"Overriding N_CPU with command-line value: {args.n_cpu}")
 
-    if args.action == 'tune': 
+    if args.action == 'tune':
         await run_hyperparameter_tuning(rl_config, args.dataset_run_id)
-    else: 
+    else:
         await run_model_training(rl_config, args)
 
 if __name__ == "__main__":

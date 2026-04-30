@@ -1,9 +1,11 @@
 # rl_agent_module/agents/ppo_agent.py
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
+
 import gymnasium as gym
 import torch as th
 from stable_baselines3 import PPO
 from stable_baselines3.common.policies import ActorCriticPolicy
+
 
 def create_ppo_agent(
     env: gym.Env,
@@ -41,7 +43,7 @@ def create_ppo_agent(
     agent_params.pop("pi_layers", None)
     agent_params.pop("vf_layers", None)
     agent_params.pop("pi_vf_layers", None)
-    
+
     # Instantiate and return the PPO agent
     model = PPO(
         policy=ActorCriticPolicy,
@@ -52,5 +54,5 @@ def create_ppo_agent(
         device=device,
         **agent_params  # Pass the rest of the hyperparameters
     )
-    
+
     return model

@@ -1,9 +1,11 @@
 
 import asyncio
-import httpx
 import json
-from config.config import _SOL_PRICE_API_URL
+
+import httpx
+
 from bot_logger import logger
+from config.config import _SOL_PRICE_API_URL
 from database_handler import DatabaseClient
 from state_manager import GlobalState
 

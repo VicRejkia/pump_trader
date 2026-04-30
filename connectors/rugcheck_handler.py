@@ -3,29 +3,35 @@ rugcheck.py - Manages fetching RugCheck data, prioritization, and processing.
 """
 
 import asyncio
-import os
 import json
+import os
 import time
-from datetime import datetime, timezone, timedelta
 import traceback
-import httpx
-import base58
-from dotenv import load_dotenv
-from aiolimiter import AsyncLimiter
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from solders.keypair import Keypair # type: ignore
 
-from config.config import (
-    _RUGCHECK_AUTH_API, _RUGCHECK_RATE_LIMIT, _RUGCHECK_API, _RUGCHECK_INTERVAL,
-    RUGCHECK_SCORE_THRESHOLD, RUGCHECK_REQUEUE_PRIORITY_BOOST_PURCHASED,
-    RUGCHECK_REQUEUE_INTERVAL_MINUTES, RUGCHECK_MAX_INITIAL_ATTEMPTS,
-    RUGCHECK_MAX_DEPRIORITIZED_ATTEMPTS
-)
-from database_handler import DatabaseClient
+import base58
+import httpx
+from aiolimiter import AsyncLimiter
+from dotenv import load_dotenv
+from solders.keypair import Keypair  # type: ignore
+
 from bot_logger import logger
-from state_manager import GlobalState
+from config.config import (
+    _RUGCHECK_API,
+    _RUGCHECK_AUTH_API,
+    _RUGCHECK_INTERVAL,
+    _RUGCHECK_RATE_LIMIT,
+    RUGCHECK_MAX_DEPRIORITIZED_ATTEMPTS,
+    RUGCHECK_MAX_INITIAL_ATTEMPTS,
+    RUGCHECK_REQUEUE_INTERVAL_MINUTES,
+    RUGCHECK_REQUEUE_PRIORITY_BOOST_PURCHASED,
+    RUGCHECK_SCORE_THRESHOLD,
+)
 from connectors.websocket_handler import WebSocketHandler
+from database_handler import DatabaseClient
 from socials_processor import SocialsProcessor
+from state_manager import GlobalState
 
 # --- Configuration for Retries & Maintenance ---
 DEPRIORITIZED_PRIORITY = float('inf')
@@ -49,7 +55,7 @@ class Rugcheck:
         self.deprioritized_tokens_tracker = {} # Stores {mint: {'first_deprio_timestamp': datetime, 'reprocess_count': int}}
         self.jwt_token: str | None = None
         self.wallet: Keypair | None = None
-        
+
         # --- NEW State Variables for Maintenance Handling ---
         self.maintenance_mode_active = False
         self.consecutive_api_errors = 0 # For the main /report endpoint
@@ -253,11 +259,11 @@ class Rugcheck:
                         base_priority += self.config.get('RUGCHECK_REQUEUE_PRIORITY_BOOST_PURCHASED', 1000.0)
                     base_priority += float(candidate['volume']) * 10
                     base_priority += float(candidate['volatility']) * 50
-                    
+
                     check_count = candidate['check_count']
                     final_priority_score = base_priority / (check_count ** 2) if check_count > 0 else base_priority
                     priority = -final_priority_score
-                    
+
                     if final_priority_score > 1.0:
                         await self.queue.put((priority, mint))
                         requeued_count += 1
@@ -405,7 +411,7 @@ class Rugcheck:
                     is_active_in_portfolio = await conn.fetchval("SELECT 1 FROM portfolio WHERE mint = $1 AND status = 'active' LIMIT 1", mint)
                     if not is_active_in_portfolio:
                         await conn.execute("UPDATE tokens SET is_active = FALSE WHERE mint = $1", mint)
-                
+
                 if self.websocket_handler:
                     await self.websocket_handler.unsubscribe_from_trades([mint], "high_rugcheckscore")
                     logger.debug(f"[bold]:hot_pepper: Too spicy:[/bold] Sent unsubscribe for high-score token {mint}")
@@ -439,7 +445,7 @@ class Rugcheck:
                 # --- START: REFACTORED QUEUE FILLING LOGIC ---
                 if self.queue.empty():
                     logger.debug("RugCheck queue is empty. Attempting to refill...")
-                    
+
                     # Priority 1: Refresh with new, unchecked tokens.
                     await self._refresh_queue()
 

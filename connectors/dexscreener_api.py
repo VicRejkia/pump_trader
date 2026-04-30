@@ -1,15 +1,16 @@
 import asyncio
-import httpx
 import json
 import time
 from datetime import datetime, timezone
-from aiolimiter import AsyncLimiter
 from typing import List
+
+import httpx
+from aiolimiter import AsyncLimiter
 
 # Make sure to use your bot's logger
 from bot_logger import logger
-from state_manager import GlobalState
 from database_handler import DatabaseClient
+from state_manager import GlobalState
 
 # --- API Configuration ---
 # CORRECTED: Using the correct multi-token endpoint as per documentation
@@ -49,26 +50,26 @@ class DexscreenerFetcher:
         """
         if not token_batch:
             return None
-        
+
         # Construct the URL with comma-separated token addresses
         url = f"{DEXSCREENER_API_BASE_URL}/{','.join(token_batch)}"
-        
+
         try:
             async with self.limiter:
                 response = await self.client.get(url)
-            
+
             if response.status_code == 429:
                 logger.warning(f"DEXScreener API returned HTTP 429 (Rate Limited) for batch starting with {token_batch[0]}.")
                 self._consecutive_429_errors += 1
                 return None
 
             response.raise_for_status()
-            
+
             # Reset error count on a successful request
             self._consecutive_429_errors = 0
-            
+
             data = response.json()
-            
+
             # CORRECTED: The batch API returns a direct list of pair objects
             if isinstance(data, list):
                 return data
@@ -79,12 +80,12 @@ class DexscreenerFetcher:
             else:
                 logger.warning(f"DEX Screener batch response not in expected list format. Response: {str(data)[:500]}")
                 return None
-                
+
         except httpx.HTTPStatusError as e:
             logger.error(f"DEXScreener API HTTP error for batch: {e.response.status_code} - {e.response.text}")
         except Exception as e:
             logger.error(f"DEXScreener API unexpected error for batch: {e}", exc_info=True)
-        
+
         return None
 
     def _parse_pair_data(self, pair: dict, sol_price_usd: float) -> tuple | None:
@@ -95,17 +96,17 @@ class DexscreenerFetcher:
             base_token = pair.get('baseToken', {})
             mint_address = base_token.get('address')
             if not mint_address: return None
-            
+
             txns = pair.get('txns', {})
             volume = pair.get('volume', {})
             price_change = pair.get('priceChange', {})
             liquidity = pair.get('liquidity', {})
-            
+
             m5 = txns.get('m5', {})
             h1 = txns.get('h1', {})
             h6 = txns.get('h6', {})
             h24 = txns.get('h24', {})
-            
+
             return (
                 pair.get('pairAddress'), mint_address, datetime.now(timezone.utc),
                 float(pair.get('priceUsd', 0)), float(pair.get('priceNative', 0)), sol_price_usd,
@@ -149,7 +150,7 @@ class DexscreenerFetcher:
         if not current_sol_price:
             logger.warning("DEXScreener Processor: Cannot get SOL price from state. Using 0.0 for this batch.")
             current_sol_price = 0.0
-            
+
         records_to_insert = []
         for pair_data in pairs:
             mint_address = pair_data.get('baseToken', {}).get('address')
@@ -195,14 +196,14 @@ class DexscreenerFetcher:
 
                 # --- Fetch Tokens to Poll ---
                 migrated_tokens = await self.db.get_all_migrated_tokens()
-                
+
                 if not migrated_tokens:
                     logger.debug("DEX Screener: No migrated tokens found. Waiting before next check.")
                     await self.state.wait_or_interrupt(timeout=POLLING_INTERVAL_SECONDS)
                     continue
 
                 logger.debug(f"DEXScreener Fetcher: Starting new batch cycle for {len(migrated_tokens)} migrated tokens.")
-                
+
                 # --- Create Batches ---
                 token_batches = [migrated_tokens[i:i + DEXSCREENER_BATCH_SIZE] for i in range(0, len(migrated_tokens), DEXSCREENER_BATCH_SIZE)]
 
@@ -219,7 +220,7 @@ class DexscreenerFetcher:
                         break # Break out of the batch loop to start cooldown
 
                     batch_pairs = await self._fetch_data_for_batch(batch)
-                    
+
                     if batch_pairs:
                         await self._process_batch_response(batch_pairs)
                     else:
@@ -233,5 +234,5 @@ class DexscreenerFetcher:
             except Exception as e:
                 logger.error(f"Error in DEX Screener Fetcher worker loop: {e}", exc_info=True)
                 await self.state.wait_or_interrupt(timeout=60) # Longer wait on unexpected error
-            
+
         logger.info("🛑 DEX Screener Fetcher worker shutting down.")

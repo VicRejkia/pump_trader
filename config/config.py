@@ -77,14 +77,14 @@ MAX_TOKEN_COUNT_PER_CREATOR = 100           # Maximum number of tokens per creat
 USE_TREND_REVERSAL_CONFIRMATION = True      # Master switch to enable/disable this feature
 STOP_LOSS_COOLDOWN_MINUTES = 17              # How long a token is ignored after a Stop Loss
 MIN_CANDLE_DATA_FOR_INDICATORS = 30         # Min 5-second data points required to calculate indicators
-TREND_REVERSAL_RECENCY_HOURS = 24 
+TREND_REVERSAL_RECENCY_HOURS = 24
 TREND_REVERSAL_RSI_NEUTRAL_LEVEL = 20.0     # RSI level considered neutral for trend reversal
 INDICATOR_LOOKBACK_HOURS = 1.7                # Lookback period for indicators in hours
 
 # Indicator Time Periods
 # MODIFICATION: Emojis removed from this list to ensure robust string comparisons.
 APPLY_TREND_REVERSAL_ON_SELL_REASONS = ["Stop Loss", "Emergency SL (MCap)", "Emergency SL (No Volume)", "Trailing SL", "Breakeven SL", "manual_override", "manual_override_all"]
-RSI_PERIOD = 9 
+RSI_PERIOD = 9
 BBANDS_PERIOD = 19
 BBANDS_STD_DEV = 1.5
 FAST_EMA_PERIOD = 9

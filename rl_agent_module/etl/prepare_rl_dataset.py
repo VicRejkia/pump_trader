@@ -23,15 +23,15 @@ import argparse
 import asyncio
 import os
 import sys
-from datetime import datetime
-import pandas as pd
-from tqdm import tqdm
- # +++ Add this import
+
+# +++ Add this import
 import tempfile
+from datetime import datetime
 
 import mlflow
+import pandas as pd
 from mlflow.data.pandas_dataset import PandasDataset
-
+from tqdm import tqdm
 
 # Add project root to Python path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -39,8 +39,8 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from bot_logger import logger, setup_logging
+from config.rl_config import FEATURE_GROUPS, RL_CONFIG
 from database_handler import DatabaseClient
-from config.rl_config import RL_CONFIG, FEATURE_GROUPS
 from rl_agent_module.feature_engineering.features import calculate_all_features
 
 
@@ -58,7 +58,7 @@ async def run_etl(start_date: datetime, end_date: datetime, version: str):
             db_client = DatabaseClient()
             await db_client.connect()
             min_trades = RL_CONFIG['common'].get('MIN_TRADE_COUNT_FOR_DATASET', 100)
-            
+
             logger.info(f"Fetching raw data for tokens with >= {min_trades} trades...")
             raw_data = await db_client.get_raw_data_for_rl(
                 start_date, end_date, min_trades
@@ -78,7 +78,7 @@ async def run_etl(start_date: datetime, end_date: datetime, version: str):
             if not feature_groups_data:
                 logger.error("Feature calculation resulted in no data. Aborting.")
                 return
-            
+
             # Prepare lists for mlflow.log_inputs()
             datasets = []
             contexts = []
@@ -87,11 +87,11 @@ async def run_etl(start_date: datetime, end_date: datetime, version: str):
             # Optional: Log the list of all features used
             mlflow.set_tag("feature_columns", ", ".join(feature_list))
 
-            
+
             mlflow.log_metric("feature_count", len(feature_list))
             mlflow.log_param("features_used", feature_list)
-            
-            
+
+
             base_output_dir = os.path.join(temp_output_dir) # MODIFIED
             logger.info(f"Saving partitioned data to: {temp_output_dir}")
 
@@ -131,10 +131,10 @@ async def run_etl(start_date: datetime, end_date: datetime, version: str):
                     "version": version
                 })
 
-                
+
             pbar.close()
 
-            
+
             # Log all datasets
             mlflow.log_inputs(
                 datasets=datasets,

@@ -1,37 +1,53 @@
 # ga_optimizer_module/ga_optimizer.py
-import os
-import sys
 import asyncio
-import pygad
+import gc  # For manual garbage collection
+import json
+import os
+import random
+import sys
+import time
+import uuid
+from datetime import datetime, timezone
+from glob import glob
+from multiprocessing import Manager, Process, Queue, freeze_support
+from typing import Dict, List, Optional
+
 import numpy as np
 import pandas as pd
-from datetime import datetime, timezone
-import time
-import json
-import random
-import uuid
-from multiprocessing import Manager, freeze_support, Process, Queue
-from typing import Dict, List, Optional
-from glob import glob
-import gc  # For manual garbage collection
+import pygad
 
 # --- Project Setup ---
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from bot_logger import logger, setup_logging
 import config.config as bot_config
+from bot_logger import logger, setup_logging
 from config.ga_config import (
-    OPTIMIZABLE_PARAMETERS, POPULATION_SIZE, NUM_GENERATIONS, CROSSOVER_PROBABILITY,
-    MUTATION_PROBABILITY, FITNESS_METRIC, FITNESS_GOAL, DATA_SPLIT,
-    BACKTEST_INITIAL_CAPITAL, RESULTS_DIR, HISTORICAL_DATA_START_TS,
-    HISTORICAL_DATA_END_TS, MULTIPROCESSING_CORES, KEEP_ELITISM, PARENT_SELECTION_TYPE,
-    CROSSOVER_TYPE, MUTATION_TYPE, GA_FITNESS_SAMPLE_SIZE, DETAILED_LOG_FILENAME, STOP_CRITERIA
+    BACKTEST_INITIAL_CAPITAL,
+    CROSSOVER_PROBABILITY,
+    CROSSOVER_TYPE,
+    DATA_SPLIT,
+    DETAILED_LOG_FILENAME,
+    FITNESS_GOAL,
+    FITNESS_METRIC,
+    GA_FITNESS_SAMPLE_SIZE,
+    HISTORICAL_DATA_END_TS,
+    HISTORICAL_DATA_START_TS,
+    KEEP_ELITISM,
+    MULTIPROCESSING_CORES,
+    MUTATION_PROBABILITY,
+    MUTATION_TYPE,
+    NUM_GENERATIONS,
+    OPTIMIZABLE_PARAMETERS,
+    PARENT_SELECTION_TYPE,
+    POPULATION_SIZE,
+    RESULTS_DIR,
+    STOP_CRITERIA,
 )
 from ga_optimizer_module.ga_backtester import run_backtest_sync
-from utils import NpEncoder
 from ga_optimizer_module.ga_ingestion import run_ingestion
+from utils import NpEncoder
 
 # --- NEW: WORKER-LOCAL GLOBAL VARIABLES & CACHE PATH ---
 WORKER_DATA = {}
@@ -70,7 +86,7 @@ def fitness_func_main_process(ga_instance, solution: np.ndarray, solution_idx: i
                 logger.debug(f"FATAL ERROR in Worker PID {os.getpid()}: Cache directory not found at '{cache_dir}'.")
                 logger.debug("Please run 'python ga_optimizer_module/prepare_ga_dataset.py' first.")
                 return worst_fitness
-            
+
             # 1. Load mint-to-path for OHLCV (LAZY: don't load data yet)
             ohlcv_dir = os.path.join(cache_dir, "ohlcv_data")
             mint_to_path = {os.path.basename(f).replace('.parquet', ''): f for f in glob(os.path.join(ohlcv_dir, "*.parquet"))}
@@ -79,7 +95,7 @@ def fitness_func_main_process(ga_instance, solution: np.ndarray, solution_idx: i
             # 2. Load lifespans
             lifespans_df = pd.read_parquet(os.path.join(cache_dir, "token_lifespans.parquet"))
             token_lifespans = lifespans_df.to_dict(orient='index')
-            
+
             # 3. Load DexScreener snapshots
             snapshots_dir = os.path.join(cache_dir, "dexscreener_snapshots")
             dexscreener_snapshots = {os.path.basename(f).replace('.parquet', ''): pd.read_parquet(f) for f in glob(os.path.join(snapshots_dir, "*.parquet"))}
@@ -90,7 +106,7 @@ def fitness_func_main_process(ga_instance, solution: np.ndarray, solution_idx: i
             train_ratio, val_ratio = DATA_SPLIT['training'], DATA_SPLIT['validation']
             train_idx = int(len(all_mints) * train_ratio)
             val_idx = int(len(all_mints) * (train_ratio + val_ratio))
-            
+
             train_mints = all_mints[:train_idx]
             val_mints = all_mints[train_idx:val_idx]
             test_mints = all_mints[val_idx:]
@@ -109,9 +125,9 @@ def fitness_func_main_process(ga_instance, solution: np.ndarray, solution_idx: i
         if not train_mints:
             logger.warning(f"Worker PID {os.getpid()}: No training mints available.")
             return worst_fitness
-        
+
         parameters = {p['name']: p['type'](float(solution[i]) if p['type'] in [float, 'float'] else int(round(solution[i]))) for i, p in enumerate(OPTIMIZABLE_PARAMETERS)}
-        
+
         sample_size = GA_FITNESS_SAMPLE_SIZE
         mints_to_evaluate = train_mints if not sample_size or sample_size >= len(train_mints) else random.sample(train_mints, min(sample_size, len(train_mints)))
         logger.debug(f"Worker PID {os.getpid()}: Evaluating solution {solution_idx} on {len(mints_to_evaluate)} mints (sample size: {sample_size})")
@@ -124,7 +140,7 @@ def fitness_func_main_process(ga_instance, solution: np.ndarray, solution_idx: i
                 logger.warning(f"No Parquet file found for mint {mint}. Skipping.")
                 continue
             df_data = pd.read_parquet(path)
-            
+
             lifespan = WORKER_DATA['lifespans'].get(mint)
             snapshots = WORKER_DATA['snapshots'].get(mint)
 
@@ -134,7 +150,7 @@ def fitness_func_main_process(ga_instance, solution: np.ndarray, solution_idx: i
 
             max_timestamp = lifespan['end_ts'] if lifespan else None
             parameters['mint'] = mint
-            
+
             log_record = {
                 "run_id": ga_instance.run_id,
                 "generation": ga_instance.generations_completed,
@@ -182,7 +198,7 @@ def on_generation(ga_instance):
         avg_fitness = np.mean(avg_fitness_list) if avg_fitness_list else 'N/A'
         avg_fitness_str = f"{avg_fitness:.6f}" if isinstance(avg_fitness, float) else avg_fitness
         logger.info(f"--- Generation {generation} Finished --- Best Fitness: {best_fitness:.6f} | Avg Fitness: {avg_fitness_str}")
-        
+
         if generation > 0 and (generation % 5 == 0 or generation == ga_instance.num_generations):
             if ga_instance.best_solutions:
                 best_solution = ga_instance.best_solutions[-1]
@@ -208,10 +224,10 @@ async def main_async_logic(log_queue, shared_cache):
             return
 
         logger.info(f"Using pre-computed dataset from: {cache_dir}")
-        
+
         optimization_run_id = str(uuid.uuid4())
         logger.info(f"Starting Optimization Run ID: {optimization_run_id}")
-        
+
         # Validate OPTIMIZABLE_PARAMETERS
         for param in OPTIMIZABLE_PARAMETERS:
             param_name = param.get('name', 'Unnamed')
@@ -225,11 +241,11 @@ async def main_async_logic(log_queue, shared_cache):
 
         gene_space = [{'low': p['low'], 'high': p['high']} if 'low' in p else p['values'] for p in OPTIMIZABLE_PARAMETERS]
         num_processes = os.cpu_count() - 2 if MULTIPROCESSING_CORES == "auto" and os.cpu_count() and os.cpu_count() > 2 else int(MULTIPROCESSING_CORES)
-        
+
         # --- Population Seeding Logic ---
         logger.info("Building a seeded initial population...")
         initial_population = []
-        
+
         seed_solution = []
         for param in OPTIMIZABLE_PARAMETERS:
             param_name = param['name']
@@ -260,26 +276,26 @@ async def main_async_logic(log_queue, shared_cache):
                 new_solution[gene_idx] = param_space['type'](new_gene)
             initial_population.append(new_solution)
         logger.info(f"Seeded population of {len(initial_population)} individuals created.")
-        
+
         ga_instance = pygad.GA(
-            num_generations=NUM_GENERATIONS, 
-            num_parents_mating=max(2, int(POPULATION_SIZE * 0.3)), 
-            fitness_func=fitness_func_main_process, 
-            sol_per_pop=POPULATION_SIZE, 
-            num_genes=len(OPTIMIZABLE_PARAMETERS), 
+            num_generations=NUM_GENERATIONS,
+            num_parents_mating=max(2, int(POPULATION_SIZE * 0.3)),
+            fitness_func=fitness_func_main_process,
+            sol_per_pop=POPULATION_SIZE,
+            num_genes=len(OPTIMIZABLE_PARAMETERS),
             initial_population=initial_population,
-            gene_space=gene_space, 
-            parent_selection_type=PARENT_SELECTION_TYPE, 
-            crossover_type=CROSSOVER_TYPE, 
-            crossover_probability=CROSSOVER_PROBABILITY, 
-            mutation_type=MUTATION_TYPE, 
-            mutation_probability=MUTATION_PROBABILITY, 
-            keep_elitism=max(0, KEEP_ELITISM), 
-            on_generation=on_generation, 
-            parallel_processing=['process', num_processes], 
+            gene_space=gene_space,
+            parent_selection_type=PARENT_SELECTION_TYPE,
+            crossover_type=CROSSOVER_TYPE,
+            crossover_probability=CROSSOVER_PROBABILITY,
+            mutation_type=MUTATION_TYPE,
+            mutation_probability=MUTATION_PROBABILITY,
+            keep_elitism=max(0, KEEP_ELITISM),
+            on_generation=on_generation,
+            parallel_processing=['process', num_processes],
             stop_criteria=STOP_CRITERIA
         )
-        
+
         ga_instance.log_queue = log_queue
         ga_instance.indicator_cache = shared_cache
         ga_instance.run_id = optimization_run_id
@@ -288,18 +304,18 @@ async def main_async_logic(log_queue, shared_cache):
         start_time = time.time()
         ga_instance.run()
         logger.info(f"--- GA Optimization Finished (Duration: {(time.time() - start_time)/60:.2f} minutes) ---")
-        
+
         # --- Save Best Solution to JSON ---
         if hasattr(ga_instance, 'best_solution_generation') and ga_instance.best_solution_generation != -1:
             solution, solution_fitness, solution_idx = ga_instance.best_solution()
-            
+
             logger.info(f"Best solution found at generation {ga_instance.best_solution_generation} with fitness: {solution_fitness}")
-            
+
             best_params_dict = {
                 p['name']: p['type'](float(solution[i]) if p['type'] in [float, 'float'] else int(round(solution[i])))
                 for i, p in enumerate(OPTIMIZABLE_PARAMETERS)
             }
-            
+
             # Construct the final JSON object
             results_to_save = {
                 "best_solution_id": f"gen{ga_instance.best_solution_generation}_idx{solution_idx}",
@@ -308,12 +324,12 @@ async def main_async_logic(log_queue, shared_cache):
                 "validation_metrics": {"status": "not_run"},
                 "test_metrics": {"status": "not_run"}
             }
-            
+
             # Generate filename and save
             date_today_str = datetime.now().strftime("%Y%m%d")
             filename = f"ga_results_{date_today_str}_{optimization_run_id}.json"
             output_path = os.path.join(RESULTS_DIR, filename)
-            
+
             try:
                 with open(output_path, 'w') as f:
                     json.dump(results_to_save, f, indent=4, cls=NpEncoder)
@@ -334,13 +350,13 @@ if __name__ == "__main__":
     with Manager() as manager:
         log_queue = manager.Queue()
         shared_cache = manager.dict() # Indicator cache can still be shared
-        
+
         os.makedirs(RESULTS_DIR, exist_ok=True)
         log_file_path = os.path.join(RESULTS_DIR, DETAILED_LOG_FILENAME)
-        
+
         log_process = Process(target=log_writer_process, args=(log_queue, log_file_path))
         log_process.start()
-        
+
         try:
             asyncio.run(main_async_logic(log_queue, shared_cache))
         finally:
@@ -350,7 +366,7 @@ if __name__ == "__main__":
 
         logger.info("--- Starting Automatic Database Ingestion ---")
         try:
-            if os.path.exists(log_file_path): 
+            if os.path.exists(log_file_path):
                 asyncio.run(run_ingestion(log_file_path))
                 logger.info("--- Database Ingestion Completed Successfully ---")
         except Exception as e:

@@ -3,13 +3,14 @@ Processes trade messages from the PumpPortal queue and writes them in batches to
 """
 
 import asyncio
-from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 
 from bot_logger import logger
+from config.config import _TOTAL_SUPPLY
 from state_manager import GlobalState
 from utils import calculate_market_cap
-from config.config import _TOTAL_SUPPLY
+
 
 async def trade_worker(trade_queue: asyncio.Queue):
     """
@@ -65,7 +66,7 @@ async def trade_worker(trade_queue: asyncio.Queue):
                     # Safely convert API data to Decimal
                     token_amount_raw = data.get('tokenAmount')
                     sol_amount_raw = data.get('solAmount')
-                    
+
                     token_amount = Decimal(str(token_amount_raw)) if token_amount_raw else Decimal('0')
                     sol_amount = Decimal(str(sol_amount_raw)) if sol_amount_raw else Decimal('0')
 
@@ -100,14 +101,14 @@ async def trade_worker(trade_queue: asyncio.Queue):
             if trade_params_to_db:
                 try:
                     await db_client.insert_trades_batch(trade_params_to_db, mints_in_batch)
-                    
+
                     # Mark all items in the processed batch as done
                     for _ in batch_from_queue:
                         try:
                             trade_queue.task_done()
                         except ValueError:
                             pass # Can happen if queue is manipulated elsewhere, safe to ignore
-                    
+
                     logger.debug(f":bank: Successfully processed and saved a batch of {len(trade_params_to_db)} trades.")
 
                 except Exception as e:

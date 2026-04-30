@@ -1,21 +1,23 @@
 # live_trader.py (GMGN API Version)
 
-import os
-import httpx # Using httpx for async requests
-import base64
-import time
 import asyncio
+import base64
+import os
+import time
+
+import httpx  # Using httpx for async requests
 from dotenv import load_dotenv
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
+
+# Import your main config module to access TRADING_MODE and other settings
+import config.config as bot_config  # Use an alias
+
 # We won't use SolanaClient here as GMGN has its own send_transaction endpoint
 # from solana.rpc.api import Client as SolanaClient
 # from solana.rpc.types import TxOpts
 # from solana.rpc.commitment import Confirmed
-
 from bot_logger import logger
-# Import your main config module to access TRADING_MODE and other settings
-import config.config as bot_config # Use an alias
 
 load_dotenv()
 
@@ -180,7 +182,7 @@ async def execute_live_gmgn_trade(
 
         quote_data = route_response["data"].get("quote", {})
         expected_out_amount_lamports_str = quote_data.get("outAmount", "0")
-        
+
         # Decode and deserialize the transaction
         swap_transaction_bytes = base64.b64decode(swap_transaction_b64)
         unsigned_tx = VersionedTransaction.deserialize(swap_transaction_bytes) # Deserialize from bytes
@@ -189,13 +191,13 @@ async def execute_live_gmgn_trade(
         unsigned_tx.sign([WALLET_KEYPAIR]) # Sign with your Keypair object
         signed_tx_bytes = unsigned_tx.serialize()
         signed_tx_b64 = base64.b64encode(signed_tx_bytes).decode('utf-8') # Encode to base64 string for sending
-        
+
         tx_signature_str_from_local_signing = str(unsigned_tx.signatures[0])
 
 
         if current_trading_mode == "paper_trading":
             logger.info(f"[PAPER TRADING] GMGN: Prepared TX for {action} {input_token_address} -> {output_token_address}. Sig_prefix: {tx_signature_str_from_local_signing[:10]}... NOT SENDING.")
-            
+
             # Simulate fill:
             # Use the expected_out_amount from the quote for paper trading.
             # If buying tokens (output is token), quantity_exchanged is tokens.
@@ -234,7 +236,7 @@ async def execute_live_gmgn_trade(
 
         elif current_trading_mode == "live":
             logger.info(f"[LIVE TRADING] GMGN: Sending signed TX for {action} {input_token_address} -> {output_token_address}. Local Sig: {tx_signature_str_from_local_signing}")
-            
+
             send_response = await send_gmgn_signed_transaction(signed_tx_b64, is_anti_mev)
 
             if not send_response or send_response.get("code") != 0 or "data" not in send_response or not send_response["data"].get("hash"):
@@ -275,7 +277,7 @@ async def execute_live_gmgn_trade(
                         logger.debug(f"GMGN Tx {actual_tx_hash_from_gmgn} status pending...")
                 else:
                     logger.warning(f"Could not get valid status for GMGN tx {actual_tx_hash_from_gmgn}. Response: {status_response}")
-            
+
             if not confirmed and not expired:
                  logger.warning(f"GMGN Tx {actual_tx_hash_from_gmgn} status unclear after {max_poll_attempts} attempts. Assuming not confirmed for now.")
 
@@ -291,7 +293,7 @@ async def execute_live_gmgn_trade(
                         if live_quantity_exchanged > 0: live_executed_price = int(in_amount_lamports_str) / live_quantity_exchanged
                 except ValueError:
                     logger.warning("[LIVE TRADING] Could not parse expected_out_amount for confirmed trade.")
-            
+
             return {
                 "success": confirmed, "mode": "live", "signature": actual_tx_hash_from_gmgn,
                 "executed_price": live_executed_price, # This is an estimate based on quote

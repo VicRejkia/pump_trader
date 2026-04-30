@@ -2,8 +2,10 @@
 """
 Implements the multi-objective reward function for the RL agent.
 """
+from typing import Any, Dict
+
 import numpy as np
-from typing import Dict, Any
+
 
 class RewardFunction:
     """
@@ -40,7 +42,7 @@ class RewardFunction:
                 self.rl_config.get('REWARD_POSITION_MANAGEMENT_WEIGHT', 0.2) * pos_mgmt_component +
                 self.rl_config.get('REWARD_EXECUTION_WEIGHT', 0.1) * exec_component
             )
-        
+
         # --- 3. Combine Rewards ---
         total_reward = dense_reward + (sparse_reward * self.rl_config.get('REWARD_SPARSE_WEIGHT', 0.2))
         return total_reward
@@ -57,7 +59,7 @@ class RewardFunction:
         rugcheck_risk = state.get('rugcheck_score', 1.0)
         social_risk = state.get('socials_score', 1.0)
         combined_risk = (rugcheck_risk * 0.7) + (social_risk * 0.3)
-        
+
         if pnl > 0:
             return -pnl * combined_risk * 0.5
         else:

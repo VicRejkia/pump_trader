@@ -3,14 +3,15 @@ state.py - Centralized storage for dynamic global values.
 Manages mutable global state such as SOL price, shutdown flag, active subscriptions, and API rate timestamps.
 """
 import asyncio
+import json  # Added for file writing
+import os
 from asyncio import Queue
 from collections import deque
-import config.config as config # Import config to access INITIAL_SOL_BALANCE
-import json # Added for file writing
-from bot_logger import logger
-import os
-from typing import Optional
 from datetime import datetime
+from typing import Optional
+
+import config.config as config  # Import config to access INITIAL_SOL_BALANCE
+from bot_logger import logger
 
 # Define the path for the shared SOL price file
 SOL_PRICE_FILE = 'data/sol_price.json'
@@ -30,7 +31,7 @@ class GlobalState:
 
         self.websocket_handler = None  # 🚀 Store WebSocketHandler instance
         self.new_token_subscription = False  # WebSocket subscription status
-        self.migration_stream_subscribed = False  # Migration stream subscription status 
+        self.migration_stream_subscribed = False  # Migration stream subscription status
         self.active_token_subscriptions = set()  # Active token subscriptions
 
         self.sol_price = None          # SOL price (updated hourly)
@@ -60,7 +61,7 @@ class GlobalState:
         # In GlobalState.__init__
         self.market_regime: str = "NEUTRAL"
         self.market_regime_lock = asyncio.Lock()
-        
+
 
     def _load_subscriptions_from_file(self):
         """Load active token subscriptions from file if it exists."""
@@ -153,7 +154,7 @@ class GlobalState:
         if price is None:
             logger.warning("Attempted to set SOL price to None. Skipping file write.")
             return
-            
+
         async with self.lock:
             self.sol_price = price
             # Also write to the shared file for the web app process
@@ -212,7 +213,7 @@ class GlobalState:
     async def get_new_token_subscription(self) -> bool:
         async with self.lock:
             return self.new_token_subscription
-        
+
     async def set_migration_subscription(self, status: bool):
         async with self.lock:
             self.migration_stream_subscribed = status
@@ -220,7 +221,7 @@ class GlobalState:
     async def get_migration_subscription(self) -> bool:
         async with self.lock:
             return self.migration_stream_subscribed
-        
+
     async def set_ws_refresh_next_run_ts(self, timestamp: Optional[datetime]):
         """Sets the timestamp for the next WebSocket subscription refresh."""
         async with self.lock:
@@ -246,10 +247,10 @@ class GlobalState:
 
     def get_socialscheck_queue(self) -> asyncio.PriorityQueue:
         return self.socialscheck_queue
-    
+
     def get_enrichment_queue(self) -> asyncio.Queue: # <<< ADD THIS
         return self.enrichment_queue
-    
+
     def get_ai_evaluation_queue(self) -> asyncio.PriorityQueue:
         """Returns the priority queue for AI evaluations."""
         return self.ai_evaluation_queue

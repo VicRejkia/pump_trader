@@ -1,10 +1,10 @@
-import sys
-import os
-import json
 import asyncio
+import json
+import os
+import sys
 from datetime import datetime, timedelta, timezone
 
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, jsonify, render_template, request
 
 # --- Add Project Root to Python Path ---
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -13,9 +13,9 @@ if PROJECT_ROOT not in sys.path:
 
 # --- Import from your Trading Bot Project ---
 try:
-    from database_handler import DatabaseClient
-    from bot_logger import logger
     import config.config as bot_config_module
+    from bot_logger import logger
+    from database_handler import DatabaseClient
 except ImportError as e:
     print(f"CRITICAL ERROR: Could not import necessary modules: {e}")
     sys.exit(1)
@@ -89,7 +89,7 @@ def api_update_config():
     """Updates the dynamic configuration file from user input."""
     if not request.is_json:
         return jsonify({"error": "Request must be JSON"}), 400
-    
+
     success, error = write_dynamic_config_file(request.get_json())
     if success:
         return jsonify({"message": "Configuration saved. Bot will apply changes shortly."})
@@ -119,14 +119,14 @@ async def api_get_token_data(mint_address):
         await db.connect()
         end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(days=30)
-        
+
         data_dict = await db.get_historical_data_for_backtesting(mints=[mint_address], start_date=start_date, end_date=end_date)
 
         if not data_dict or mint_address not in data_dict or data_dict[mint_address].empty:
             return jsonify({"error": "No data found for this token."}), 404
 
         df = data_dict[mint_address]
-        
+
         chart_data = []
         for timestamp, row in df.iterrows():
             ts_aware = timestamp.tz_convert(timezone.utc) if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
@@ -136,7 +136,7 @@ async def api_get_token_data(mint_address):
                 "low": row.get('Low', 0.0), "close": row.get('Close', 0.0),
                 "volume": row.get('Volume', 0.0)
             })
-        
+
         return jsonify(chart_data)
     except Exception as e:
         logger.error(f"Error in /api/token_data/{mint_address}: {e}", exc_info=True)
@@ -151,7 +151,7 @@ def api_logs():
     try:
         if not os.path.exists(LOG_FILE_PATH):
             return jsonify({"logs": "Log file not found."})
-        
+
         with open(LOG_FILE_PATH, 'r', encoding='utf-8') as f:
             lines = f.readlines()
             return jsonify({"logs": "".join(lines[-100:])})

@@ -11,34 +11,35 @@ import argparse
 import asyncio
 import json
 import os
-import shutil
-import tempfile
-from datetime import datetime, timezone
-import numpy as np
-import pandas as pd
 import random
-from stable_baselines3 import PPO
-from tqdm import tqdm
-
-# --- MLflow Integration ---
-import mlflow
-from mlflow.tracking import MlflowClient
-from mlflow.data.pandas_dataset import PandasDataset
-
+import shutil
 
 # --- Project-specific imports ---
 import sys
+import tempfile
+from datetime import datetime, timezone
+
+# --- MLflow Integration ---
+import mlflow
+import numpy as np
+import pandas as pd
+from mlflow.data.pandas_dataset import PandasDataset
+from mlflow.tracking import MlflowClient
+from stable_baselines3 import PPO
+from tqdm import tqdm
+
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+import nest_asyncio
+
 from bot_logger import logger, setup_logging
-from config.rl_config import get_config_for_mode, get_active_features, RL_CONFIG
+from config.rl_config import RL_CONFIG, get_active_features, get_config_for_mode
 from rl_agent_module.data.data_manager import DataManager
 from rl_agent_module.environments.meme_coin_env import MemeCoinEnv
-from rl_agent_module.utils.script_utils import generate_config_json # Import the utility
+from rl_agent_module.utils.script_utils import generate_config_json  # Import the utility
 
-import nest_asyncio
 nest_asyncio.apply()
 
 def run_single_token_episode(model: PPO, env: MemeCoinEnv) -> float:
@@ -73,9 +74,9 @@ async def run_feature_importance(model_path: str, dataset_run_id: str, n_tokens:
         try:
             # --- 1. Log Initial Parameters & Tags ---
             # *** MODIFIED: Use the new 'importance' config mode ***
-            rl_config = get_config_for_mode('importance') 
+            rl_config = get_config_for_mode('importance')
             features_to_analyze = get_active_features(rl_config)
-            
+
             # **FIXED**: Log the persistent model URI, not the temporary path.
             model_uri = f"runs:/{model_run_id}/model"
             mlflow.log_params({
@@ -116,7 +117,7 @@ async def run_feature_importance(model_path: str, dataset_run_id: str, n_tokens:
             full_eval_df = data_manager.get_evaluation_data()
             if full_eval_df is None or full_eval_df.empty:
                 raise RuntimeError("Evaluation data is empty. Aborting.")
-            
+
             eval_dataset: PandasDataset = mlflow.data.from_pandas(full_eval_df, name="evaluation_set")
             mlflow.log_input(eval_dataset, context="evaluation_data")
             logger.info("✅ Logged evaluation dataset as an MLflow input.")
@@ -124,7 +125,7 @@ async def run_feature_importance(model_path: str, dataset_run_id: str, n_tokens:
             # --- 3. Prepare Evaluation DataFrames per Token ---
             _, eval_mints_all = data_manager.get_split_token_mints()
             eval_token_dfs = {
-                mint: df.copy() for mint, df in full_eval_df.groupby('mint') 
+                mint: df.copy() for mint, df in full_eval_df.groupby('mint')
                 if mint in eval_mints_all and not df.empty
             }
             if not eval_token_dfs:
@@ -164,10 +165,10 @@ async def run_feature_importance(model_path: str, dataset_run_id: str, n_tokens:
                     data_manager.use_single_token_data(shuffled_df)
                     pnl = run_single_token_episode(model, env)
                     shuffled_pnls.append(pnl)
-                
+
                 shuffled_mean_pnl = np.mean(shuffled_pnls)
                 importances[feature] = baseline_mean_pnl - shuffled_mean_pnl
-            
+
             logger.info("Finished calculating all feature importances.")
             sorted_importances = sorted(importances.items(), key=lambda x: x[1], reverse=True)
 
@@ -182,7 +183,7 @@ async def run_feature_importance(model_path: str, dataset_run_id: str, n_tokens:
             report_path = os.path.join(staging_dir, "feature_importance_report.json")
             with open(report_path, "w") as f:
                 json.dump(results_data, f, indent=4)
-            
+
             # Log all collected artifacts from the staging directory
             mlflow.log_artifacts(staging_dir, artifact_path="analysis_outputs")
             logger.info("💾 All analysis artifacts, including the report and configs, logged to MLflow.")
@@ -200,7 +201,7 @@ if __name__ == "__main__":
     # --- Point to the MLflow server ---
     mlflow.set_tracking_uri("http://127.0.0.1:8080")
     #mlflow.set_tracking_uri("file:./data/rl_runs")
-    
+
     parser = argparse.ArgumentParser(description="Calculate Permutation Feature Importance.")
     parser.add_argument("--model-run-id", type=str, required=True, help="MLflow run ID of the trained PPO model.")
     parser.add_argument("--model-path", type=str, required=True, help="Path to the saved PPO model .zip file.")

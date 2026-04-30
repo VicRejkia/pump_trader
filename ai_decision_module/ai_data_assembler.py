@@ -1,15 +1,16 @@
 # ai_data_assembler.py
-import sys
-import os
 import asyncio
 import datetime as dt
-import pandas as pd
-import numpy as np
+import inspect
 import json
+import os
 import statistics
-import httpx 
-from decimal import Decimal 
-import inspect 
+import sys
+from decimal import Decimal
+
+import httpx
+import numpy as np
+import pandas as pd
 
 # --- Conditional Path Setup for Standalone Execution ---
 if __name__ == "__main__":
@@ -20,12 +21,13 @@ if __name__ == "__main__":
         print(f"[Standalone Mode] Added project root to sys.path: {project_root}")
 
 # --- Imports ---
+from ai_decision_module.ai_decision_maker import AIDecisionMaker
 from bot_logger import logger, setup_logging
+from config import config as config_module
 from database_handler import DatabaseClient
 from state_manager import GlobalState
-from utils import calculate_volatility, ensure_datetime, calculate_trend_indicators
-from ai_decision_module.ai_decision_maker import AIDecisionMaker 
-from config import config as config_module
+from utils import calculate_trend_indicators, calculate_volatility, ensure_datetime
+
 # (Removed MAX_TOKEN_COUNT_PER_CREATOR import)
 
 # --- Calculation Helper Functions ---
@@ -78,14 +80,14 @@ def summarize_score_history(history_records: list, score_field: str, time_field:
         if df.empty: return default_result
         if score_field not in df.columns:
             logger.warning(f"Score field '{score_field}' not found."); return default_result
-        
+
         df[score_field] = pd.to_numeric(df[score_field], errors='coerce')
         df = df.dropna(subset=[score_field])
         if df.empty: return default_result
 
         initial_score = df[score_field].iloc[0]
         latest_score = df[score_field].iloc[-1]
-        
+
         recent_cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=lookback_hours)
         recent_scores_series = df[df[time_field] >= recent_cutoff][score_field]
         trend_description = "N/A"
@@ -136,13 +138,13 @@ def summarize_score_history(history_records: list, score_field: str, time_field:
             if len(valid_members_series) > 1:
                 member_change = valid_members_series.iloc[-1] - valid_members_series.iloc[0]
                 tg_members_trend_str = f"{member_change:+.0f}"
-            
+
             if not valid_members_series.empty:
                 latest_telegram_members = valid_members_series.iloc[-1]
             valid_online_series = recent_details_df['online'].dropna()
             if not valid_online_series.empty:
                 latest_telegram_online = valid_online_series.iloc[-1]
-            
+
             valid_ratios_series = recent_details_df['online_ratio'].dropna()
             if len(valid_ratios_series) > 1:
                 ratio_change_pct = (valid_ratios_series.iloc[-1] - valid_ratios_series.iloc[0]) * 100
@@ -176,14 +178,14 @@ def summarize_market_dynamics(history_records: list, source: str, lookback_mins:
             numeric_cols = ['price_change_m5', 'volume_m5', 'liquidity_usd', 'buys_m5', 'sells_m5']
         else:
             logger.warning(f"🧠 Market Dynamics: Unknown source '{source}'."); return default_summary
-        
+
         for col in required_cols:
             if col not in df.columns: df[col] = np.nan
         for col in numeric_cols:
              if col in df.columns:
                 if col == 'price_sol': df[col] = df[col].apply(lambda x: Decimal(str(x)) if pd.notna(x) else pd.NA)
                 else: df[col] = pd.to_numeric(df[col], errors='coerce')
-        
+
         now_utc = dt.datetime.now(dt.timezone.utc)
         if source == 'PUMP':
             one_min_ago = now_utc - dt.timedelta(minutes=1)
@@ -211,7 +213,7 @@ def summarize_market_dynamics(history_records: list, source: str, lookback_mins:
                              else: summary['dex_price_trend_15m'] = "Stable Momentum"
                          except (np.linalg.LinAlgError, ValueError):
                              logger.warning("LinAlgError during Dex price trend calculation."); summary['dex_price_trend_15m'] = "Trend Calc Error"
-                    else: 
+                    else:
                         if price_change_col.iloc[-1] > price_change_col.iloc[0]: summary['dex_price_trend_15m'] = "Increasing Momentum"
                         elif price_change_col.iloc[-1] < price_change_col.iloc[0]: summary['dex_price_trend_15m'] = "Decreasing Momentum"
                         else: summary['dex_price_trend_15m'] = "Stable Momentum"
@@ -301,9 +303,9 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
         token_info = await conn.fetchrow(
             "SELECT name, symbol, data_source, traderpublickey, timestamp, uri FROM tokens WHERE mint = $1", mint
         )
-        
+
         creator_wallet = None
-        
+
         if not token_info:
             # Token is not in the active 'tokens' table.
             backup_info = await conn.fetchrow(
@@ -313,7 +315,7 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
                 # This is the race condition. The token was just backed up.
                 logger.warning(f"🧠 Token {mint} is no longer active (found in backup). Returning minimal outcome packet.")
                 creator_wallet = backup_info['traderpublickey'] # Get creator from backup
-                
+
                 # --- [FIXED] Fetch creator summary for backup token ---
                 creator_summary_string, creator_summary_dict = "N/A", {}
                 if creator_wallet:
@@ -340,10 +342,10 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
         token_creation_ts = ensure_datetime(token_info['timestamp'])
         uri = token_info['uri']
         token_age_minutes = (dt.datetime.now(dt.timezone.utc) - token_creation_ts).total_seconds() / 60 if token_creation_ts else None
-        
+
         # Fetch creator summary for the active token
         creator_summary_string, creator_summary_dict = await db.get_creator_history_summary(creator_wallet, mint)
-        
+
         uri_status = await check_uri_status(uri)
         # --- [END FIX] ---
 
@@ -364,7 +366,7 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
             current_mcap_usd = float(current_mcap_sol) * sol_price
         elif current_price_sol is None or current_price_sol <= 0:
             logger.warning(f"🧠 Both Price and Market Cap in SOL missing or invalid for {mint}. Setting USD Market Cap to 0.")
-        
+
         # 4. Fetch Score Histories
         rugcheck_hist_raw = await conn.fetch(
             "SELECT score, last_checked FROM v_rugcheck WHERE mint = $1 ORDER BY last_checked DESC LIMIT 50", mint
@@ -414,19 +416,19 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
                WHERE mint = $1 AND price_sol > 0 AND market_cap_sol > 0
             """, mint
         )
-        
+
         if peak_data and peak_data['max_price_sol'] and peak_data['max_price_ts'] and token_creation_ts:
             try:
                 max_price_sol = float(peak_data['max_price_sol'])
                 max_mcap_sol = float(peak_data['max_mcap_sol'])
                 max_price_ts = ensure_datetime(peak_data['max_price_ts'])
-                
+
                 time_to_peak_minutes = (max_price_ts - token_creation_ts).total_seconds() / 60
                 minutes_since_peak = (dt.datetime.now(dt.timezone.utc) - max_price_ts).total_seconds() / 60
-                
+
                 if current_price_sol and max_price_sol > 0:
                     drawdown_from_peak_pct = ((float(current_price_sol) / max_price_sol) - 1) * 100.0
-                
+
             except Exception as e:
                 logger.warning(f"🧠 Error calculating peak/drawdown metrics for {mint}: {e}", exc_info=True)
         # --- [END NEW BLOCK 5b] ---
@@ -457,7 +459,7 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
                 if not market_hist_df.empty:
                     market_hist_df = market_hist_df.set_index('timestamp').sort_index()
                     price_series = pd.to_numeric(market_hist_df['price_sol_decimal'])
-                    
+
                     if not price_series.empty and len(price_series) > 1:
                         vol_window = min(len(price_series), 120)
                         if vol_window >= 2:
@@ -486,15 +488,15 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
 
                             # Run the existing TA function
                             df_with_indicators = calculate_trend_indicators(ohlc, db.config)
-                            
+
                             if not df_with_indicators.empty:
                                 latest_row = df_with_indicators.iloc[-1]
-                                
+
                                 # Get the column names from config
                                 rsi_col = f"RSI_{db.config['RSI_PERIOD']}"
                                 ema_fast_col = 'EMA_fast'
                                 ema_slow_col = 'EMA_slow'
-                                
+
                                 # Safely extract values and format them
                                 if rsi_col in latest_row and pd.notna(latest_row[rsi_col]):
                                     latest_rsi = f"{latest_row[rsi_col]:.2f}"
@@ -502,7 +504,7 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
                                     latest_ema_fast = f"{latest_row[ema_fast_col]:.9f}"
                                 if ema_slow_col in latest_row and pd.notna(latest_row[ema_slow_col]):
                                     latest_ema_slow = f"{latest_row[ema_slow_col]:.9f}"
-                                
+
                                 logger.debug(f"🧠 TA Indicators for {mint}: RSI={latest_rsi}, EMA_F={latest_ema_fast}, EMA_S={latest_ema_slow}")
                         else:
                             logger.debug(f"🧠 Not enough resampled candles for TA ({len(ohlc)} < {min_candles})")
@@ -527,7 +529,7 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
         if market_summary.get('market_dynamics_summary_str', "N/A").startswith("N/A"):
             data_completeness_score -= 15
             completeness_notes.append("Missing Market Dynamics")
-        
+
         data_completeness_score = max(0, data_completeness_score) # Clamp at 0
         market_regime = await GlobalState.get_instance().get_market_regime()
 
@@ -537,11 +539,11 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
             'timestamp': dt.datetime.now(dt.timezone.utc).isoformat(),
             'decision_context': decision_context,
             'token_age_minutes': round(token_age_minutes, 1) if token_age_minutes is not None else None,
-            
+
             # --- [FIXED] This now correctly includes data for active tokens ---
             'creator_history_summary': creator_summary_string, # The summary string
             **creator_summary_dict, # Unpack structured data (creator_rug_rate, etc.)
-            
+
             # Add new peak/drawdown metrics
             'max_price_sol': max_price_sol,
             'max_mcap_sol': max_mcap_sol,
@@ -550,7 +552,7 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
             'minutes_since_peak': round(minutes_since_peak, 1) if minutes_since_peak is not None else None,
             'drawdown_from_peak_pct': round(drawdown_from_peak_pct, 2),
             # --- [END FIX] ---
-            
+
             'uri_status': uri_status,
             'price': float(current_price_sol) if current_price_sol is not None else 0.0,
             'market_cap': current_mcap_usd, 'volatility': volatility,
@@ -651,7 +653,7 @@ async def main(mint: str, include_explanation_in_output: bool = True):
         ai._set_log_verbose(True)
 
         current_data = await fetch_comprehensive_token_data(db, mint)
-        
+
         # logger.info(f"--- Comprehensive Data Prepared for AI Prompt ({mint}) ---")
         # logger.info("\n" + json.dumps(current_data, indent=2, default=str))
         # logger.info(f"--- End Comprehensive Data ---")

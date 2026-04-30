@@ -2,16 +2,16 @@
 # **MODIFIED:** This version adds a 'Run' axis to the parameter plot for easy
 # identification, improves the layout, and uses the latest Streamlit APIs.
 
+import json
 import os
 from pathlib import Path
-import json
 
-import psycopg2
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import psycopg2
 import streamlit as st
 from dotenv import load_dotenv
-import plotly.express as px
-import plotly.graph_objects as go 
 
 # --- Page Configuration ---
 st.set_page_config(layout="wide", page_title="GA Optimizer Dashboard")
@@ -33,7 +33,7 @@ def init_connection():
             db_host_val, db_port_val = (host, int(port_str))
         else:
             db_host_val = raw_db_host
-    
+
     conn = psycopg2.connect(
         host=db_host_val,
         port=db_port_val,
@@ -100,7 +100,7 @@ def main():
     if runs_df.empty:
         st.error("No runs found in the database. Please run the optimizer and ingestion script first.")
         st.stop()
-        
+
     runs_df['display'] = runs_df.apply(lambda row: f"{row['created_at'].strftime('%Y-%m-%d %H:%M')} ({str(row['run_id'])[:8]})", axis=1)
 
     # --- TABS FOR SINGLE AND COMPARISON VIEWS ---
@@ -110,11 +110,11 @@ def main():
     with tab1:
         st.header("Single Run Deep Dive")
         selected_display = st.selectbox("Select Optimization Run", runs_df['display'])
-        
+
         selected_run_id = runs_df[runs_df['display'] == selected_display]['run_id'].iloc[0]
 
         st.info(f"Analyzing Run ID: `{selected_run_id}`")
-        
+
         with st.spinner("Fetching optimization data for selected run..."):
             solutions_df = get_ranked_solutions(conn, selected_run_id)
 
@@ -129,9 +129,9 @@ def main():
 
             st.subheader("Ranked Strategies")
             st.text("Click on any row to load its details below.")
-            
+
             display_cols = ['solution_id', 'generation', 'avg_portfolio', 'avg_win_rate', 'avg_profit_factor', 'total_trades', 'backtest_count']
-            
+
             st.dataframe(
                 solutions_df[display_cols],
                 width='stretch',
@@ -152,7 +152,7 @@ def main():
 
             if selected_solution_id:
                 solution_params = solutions_df.loc[solutions_df['solution_id'] == selected_solution_id, 'parameters'].iloc[0]
-                
+
                 with st.expander(f"View Parameters", expanded=False):
                     st.json(solution_params)
 
@@ -174,7 +174,7 @@ def main():
     with tab2:
         st.header("Compare Multiple Optimization Runs")
         selected_run_displays = st.multiselect(
-            "Select 2 or more runs to compare:", 
+            "Select 2 or more runs to compare:",
             runs_df['display'],
             max_selections=5
         )
@@ -183,9 +183,9 @@ def main():
             st.info("Please select at least two runs to generate a comparison.")
         else:
             run_ids_to_compare = runs_df[runs_df['display'].isin(selected_run_displays)]['run_id'].tolist()
-            
+
             all_solutions_list = []
-            best_solutions_data = [] 
+            best_solutions_data = []
             with st.spinner("Fetching and aggregating data for comparison..."):
                 for run_id, display_name in zip(run_ids_to_compare, selected_run_displays):
                     run_solutions_df = get_ranked_solutions(conn, run_id)
@@ -201,10 +201,10 @@ def main():
             else:
                 st.subheader("Performance Distribution")
                 st.markdown("This plot shows the distribution of the final portfolio value for all solutions in each run. It helps identify which run was consistently better, not just lucky with one outlier.")
-                
+
                 combined_df = pd.concat(all_solutions_list, ignore_index=True)
                 fig_box = px.box(
-                    combined_df, 
+                    combined_df,
                     x='run_display_name', y='avg_portfolio', color='run_display_name',
                     points="all", title="Distribution of Average Portfolio Value Across Runs",
                     labels={"run_display_name": "Optimization Run", "avg_portfolio": "Average Final Portfolio (SOL)"}
@@ -213,7 +213,7 @@ def main():
 
                 st.subheader("Best Solution Parameter Comparison")
                 st.markdown("This chart compares the best strategies found in each run. Each line represents a run, colored by its final portfolio value. Use the 'Run' axis on the left to identify which line corresponds to which run.")
-                
+
                 best_solutions_df = pd.DataFrame(best_solutions_data)
                 params_unpacked = best_solutions_df['parameters'].apply(pd.Series)
                 plot_df = pd.concat([best_solutions_df[['run_display_name', 'avg_portfolio']], params_unpacked], axis=1)
@@ -237,7 +237,7 @@ def main():
                     run_names = plot_df['run_display_name'].unique()
                     run_name_map = {name: i for i, name in enumerate(run_names)}
                     plot_df['run_idx'] = plot_df['run_display_name'].map(run_name_map)
-                    
+
                     dimensions = [
                         {
                             'label': 'Run',
@@ -248,7 +248,7 @@ def main():
                     ]
                     # Add the numeric parameter dimensions after the run name
                     dimensions.extend([{'label': param, 'values': plot_df[param]} for param in params_to_display])
-                    
+
                     fig_parallel = go.Figure(data=
                         go.Parcoords(
                             line = dict(
@@ -262,7 +262,7 @@ def main():
                             dimensions = list(dimensions)
                         )
                     )
-                    
+
                     fig_parallel.update_layout(
                         title='Comparison of Best Parameters by Performance',
                         plot_bgcolor='rgba(0,0,0,0)',

@@ -5,23 +5,28 @@ Helper functions and utilities for the trading bot.
 Includes URL validation, audio alerts, and log formatting.
 """
 
-import os
 import asyncio
+import json
+import os
+import warnings  # Add this import
+from datetime import datetime, timedelta, timezone  # <-- Added timedelta
+
+# Type hint for DatabaseClient without creating circular dependency
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+
+import numpy as np
 import pandas as pd
 import ta as ta_lib
-import warnings # Add this import
-import numpy as np
-import json
-from datetime import datetime, timezone, timedelta # <-- Added timedelta
-from bot_logger import logger, Panel, Table, Text, Align, Group, rich_box
-# Type hint for DatabaseClient without creating circular dependency
-from typing import TYPE_CHECKING, Dict, Optional, Tuple, List
+
+from bot_logger import Align, Group, Panel, Table, Text, logger, rich_box
+
 # For type hinting TradingBot instance without circular import
 if TYPE_CHECKING:
-    from trading_bot import TradingBot # Assuming trading_bot.py has TradingBot class
-    from state_manager import GlobalState
     from database_handler import DatabaseClient
+    from state_manager import GlobalState
+    from trading_bot import TradingBot  # Assuming trading_bot.py has TradingBot class
 from urllib.parse import urlparse
+
 try:
     import winsound
     _WINSOUND_AVAILABLE = True
@@ -113,7 +118,7 @@ def format_buy_order_log(state, name: str, mint: str, price_per_token: float, to
     reason_emoji = "🧠" if buy_reason == "AI-Advised" else "⚙️"
     reason_text = f"│ {reason_emoji} Reason: {buy_reason}\n"
     # <<< END REASON LOGIC >>>
-    
+
     if sol_price:
         price_usd = price_per_token * sol_price
         market_cap_usd = market_cap * sol_price
@@ -138,7 +143,7 @@ def format_buy_order_log(state, name: str, mint: str, price_per_token: float, to
             f"│ Tokens Bought: {tokens_bought}\n"
             f"│ Total Investment: {total_investment}\n"
         )
-    
+
 
 def format_sell_order_log(mint: str, token_name: str, market_cap_sol: float, profit: float, reason: str, sol_price: float | None, for_telegram: bool = False) -> str:
     """Formats the log message for a sell order."""
@@ -189,14 +194,14 @@ def format_sell_order_log(mint: str, token_name: str, market_cap_sol: float, pro
         f"│ Market Cap: {market_cap_text}\n"
         f"│ Profit: {profit_text}\n"
     )
-    
+
 
 def calculate_social_score(social_data: dict, token_name: str, token_symbol: str) -> int:
     """Computes a social risk score based on provided social data."""
     total_penalty = 0
     token_name = (token_name or "").lower()
     token_symbol = (token_symbol or "").lower()
-    
+
     website = social_data.get("website")
     if not website:
         total_penalty += 30
@@ -209,21 +214,21 @@ def calculate_social_score(social_data: dict, token_name: str, token_symbol: str
             domain = parsed.netloc
             if domain.endswith(f".{token_name}") or domain.endswith(f".{token_symbol}"):
                 total_penalty -= 5
-    
+
     telegram = social_data.get("telegram")
     if not telegram:
         total_penalty += 20
     else:
         if not is_valid_telegram(telegram):
             total_penalty += 10
-    
+
     twitter = social_data.get("twitter")
     if not twitter:
         total_penalty += 20
     else:
         if not is_valid_twitter(twitter):
             total_penalty += 10
-            
+
     return min(max(total_penalty, 0), 100)
 
 def calculate_market_cap(vTokensInBondingCurve: float, vSolInBondingCurve: float, totalSupply: float, sol_price: float) -> float:
@@ -305,16 +310,16 @@ async def load_and_split_data(
               AND (vt.backup_reason NOT IN ('suspicious_creator', 'high_rugcheckscore') OR vt.backup_reason IS NULL);
         """
         candidate_records = await db_client.pool.fetch(query_mints_lifespans, start_date, end_date, min_data_points)
-        
+
         if not candidate_records:
             logger.error(f"No tokens found that met the criteria (active in window, min trades: {min_data_points})."); return None
-            
+
         token_lifespans_map = {r['mint']: {'start_ts': r['first_trade_ts'], 'end_ts': r['last_trade_ts']} for r in candidate_records if all(r.get(k) for k in ['mint', 'first_trade_ts', 'last_trade_ts'])}
         mints_to_load = list(token_lifespans_map.keys())
-        
-        if not mints_to_load: 
+
+        if not mints_to_load:
             logger.error("No valid mints with lifespans found after filtering."); return None
-        
+
         logger.info(f"Found {len(mints_to_load)} candidate mints. Fetching their full historical data...")
 
         all_historical_data, dexscreener_snapshot_records = await asyncio.gather(
@@ -337,7 +342,7 @@ async def load_and_split_data(
             logger.error("Failed to fetch any historical OHLCV data for the candidate mints."); return None
 
         final_token_lifespans = {mint: token_lifespans_map[mint] for mint, df in all_historical_data.items() if mint in token_lifespans_map}
-        
+
         # --- THIS IS THE FIX ---
         if data_split_ratios is None:
             # If no split config is given (ETL mode), return all data in a single dictionary.
@@ -347,11 +352,11 @@ async def load_and_split_data(
         else:
             # Original GA optimizer mode: Split the data.
             sorted_mints = sorted(final_token_lifespans.keys(), key=lambda m: final_token_lifespans[m]['start_ts'])
-            
+
             historical_data_sets = {}
             train_ratio = data_split_ratios.get('training', 0.6)
             val_ratio = data_split_ratios.get('validation', 0.2)
-            
+
             train_idx = int(len(sorted_mints) * train_ratio)
             val_idx = train_idx + int(len(sorted_mints) * val_ratio)
 
@@ -364,7 +369,7 @@ async def load_and_split_data(
             historical_data_sets['test'] = {m: all_historical_data[m] for m in test_mints if m in all_historical_data}
 
             logger.info(f"Data split complete. Training: {len(historical_data_sets['train'])}, Validation: {len(historical_data_sets['validation'])}, Test: {len(historical_data_sets['test'])}")
-            
+
             return historical_data_sets, final_token_lifespans, dexscreener_snapshots
 
     except Exception as e:
@@ -409,7 +414,6 @@ def calculate_volatility(prices: pd.Series, window: int = 120) -> pd.Series: # <
     # Return the entire volatility Series
     return volatility_series.fillna(0.0) # Fill leading NaNs with 0
 
-import os
 
 def export_to_csv(historical_data_sets: Dict[str, Dict[str, pd.DataFrame]],
                  output_dir: str,
@@ -541,9 +545,9 @@ def calculate_trend_indicators(df: pd.DataFrame, config: dict) -> pd.DataFrame:
             df_ta['VWAP'] = ta_lib.volume.VolumeWeightedAveragePrice(
                 high=high, low=low, close=close, volume=volume
             ).volume_weighted_average_price()
-        
+
         df_ta.dropna(inplace=True)
-        
+
         #logger.debug(f"Successfully calculated indicators. Resulting data shape: {df_ta.shape}")
         return df_ta
 

@@ -1,6 +1,8 @@
-import uvicorn
 import os
-from bot_logger import setup_logging, logger
+
+import uvicorn
+
+from bot_logger import logger, setup_logging
 
 # Set up logging immediately
 setup_logging(logger_name="pump_trader_v3")
@@ -19,7 +21,7 @@ APP_PORT = int(os.getenv("PUMP_TRADER_PORT", 8000))
 
 if __name__ == "__main__":
     logger.info(f"🚀 Starting PumpTrader v3.0 C&C Hub at http://{APP_HOST}:{APP_PORT}")
-    
+
     # uvicorn.run expects the import string "api.main:app"
     # This allows for hot-reloading when run with --reload
     uvicorn.run(

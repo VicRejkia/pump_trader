@@ -1,8 +1,8 @@
-import json
-import platform
-import os
-import sys
 import argparse
+import json
+import os
+import platform
+import sys
 from urllib.parse import urlparse
 
 try:
@@ -25,8 +25,8 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from config.rl_config import get_active_features, FEATURE_GROUPS
 from bot_logger import logger, setup_logging
+from config.rl_config import FEATURE_GROUPS, get_active_features
 
 # Dynamically create the reverse mapping
 FEATURE_TO_GROUP_MAP = {
@@ -130,11 +130,11 @@ def get_hardware_recommendations(dataset_run_id: str, safety_margin: float = 0.9
     total_data_gb = 0
     if feature_store_path:
         total_data_gb = calculate_data_size(feature_store_path)
-    
+
     # 3. Get Recommendations
     advisor = RLHardwareAdvisor(sys_info, total_data_gb, safety_margin)
     recommendations = advisor.analyze()
-    
+
     # 4. Combine all info into a single dictionary and return it
     return {
         "system_info": sys_info,
@@ -156,7 +156,7 @@ def display_advisor_results(results: dict):
         logger.info(f"🚀 GPU: Found {sys_info['cuda']['device_count']} CUDA device(s) ({sys_info['cuda']['devices'][0]['name']})")
     else:
         logger.info("⚪️ GPU: No CUDA devices found.")
-    
+
     logger.info("--- Dataset Analysis ---")
     logger.info(f"📊 Total on-disk size of dataset: {dataset_gb:.2f} GB")
     logger.info(f"📈 Estimated in-memory data size: {dataset_gb * RLHardwareAdvisor.IN_MEMORY_FACTOR:.2f} GB")
@@ -167,7 +167,7 @@ def display_advisor_results(results: dict):
         logger.info(f"Optimal N_CPU (Sweet Spot): {recs['N_CPU']}")
     else:
         logger.warning(f"Optimal N_CPU: ⚠️ {recs.get('analysis_notes', 'Not enough RAM.')}")
-    
+
     logger.info("="*70)
     logger.info("💡 Total System RAM Usage Calculation")
     logger.info("="*70)
@@ -193,10 +193,10 @@ if __name__ == "__main__":
 
     # Get results by calling the new function
     results = get_hardware_recommendations(args.dataset_run_id, args.safety_margin)
-    
+
     # Display the results
     display_advisor_results(results)
-    
+
     # Save output if requested
     if args.output_file:
         settings_to_save = results['recommendations']

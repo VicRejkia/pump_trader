@@ -1,23 +1,23 @@
 # db_setup_maintenance.py
 import argparse
 import asyncio
-import os
-import sys
-import subprocess
 import json
-from datetime import datetime, timezone
 import logging
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
 from typing import List
 
-from dotenv import load_dotenv, find_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 # Ensure project root is in sys.path if this script is in a subdirectory
 PROJECT_ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT_DIR not in sys.path:
     sys.path.append(PROJECT_ROOT_DIR)
 
-from database_handler import DatabaseClient
 import config.config as base_config_module
+from database_handler import DatabaseClient
 
 # --- Basic Logger Setup for this script ---
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
@@ -57,20 +57,20 @@ def update_env_file(key_to_update: str, new_value: str) -> bool:
         new_value = f'"{new_value}"'
 
     new_line = f"{key_to_update}={new_value}"
-    
+
     try:
         lines = []
         if os.path.exists(env_path):
             with open(env_path, 'r') as f:
                 lines = f.readlines()
-            
+
         key_found = False
         for i, line in enumerate(lines):
             if line.strip().startswith(f"{key_to_update}="):
                 lines[i] = new_line + '\n'
                 key_found = True
                 break
-        
+
         if not key_found:
             if lines and not lines[-1].endswith('\n'):
                 lines.append('\n')
@@ -78,7 +78,7 @@ def update_env_file(key_to_update: str, new_value: str) -> bool:
 
         with open(env_path, 'w') as f:
             f.writelines(lines)
-        
+
         return True
     except IOError as e:
         script_logger.error(f"Failed to write to .env file at {env_path}: {e}")
@@ -193,20 +193,20 @@ def handle_backup():
         db_port = db_port_raw
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
+
     # --- START OF CHANGE ---
     # Change the filename extension to .backup to reflect the new format.
     backup_file_path = os.path.join(BACKUP_DIR, f"db_backup_{db_name}_{timestamp}.backup")
     # --- END OF CHANGE ---
 
     pg_dump_path = os.getenv('PG_DUMP_PATH', 'pg_dump')
-    
+
     command = [
         pg_dump_path, "--host", db_host, "--port", db_port, "--username", db_user,
         "--dbname", db_name,
         # --- START OF CHANGE ---
         # Change the format from 'plain' to 'custom' for a compressed binary backup.
-        "--format=custom", 
+        "--format=custom",
         # --- END OF CHANGE ---
         "--file", backup_file_path, "--no-password", "--verbose"
     ]

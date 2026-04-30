@@ -158,7 +158,7 @@ RL_CONFIG = {
         "N_CPU": 16,
         "DEVICE": "cpu", # Inference is typically faster on CPU
         # Use a very short number of steps, as we only need to complete single episodes
-        "PPO_FINAL_MODEL_TIMESTEPS": 50_000, 
+        "PPO_FINAL_MODEL_TIMESTEPS": 50_000,
         "PPO_EVAL_FREQ": 1024, # Not critical for this mode, but good to have
     }
 }

@@ -3,29 +3,29 @@ Database module.
 Handles PostgreSQL connections and CRUD operations.
 """
 
-import os
-import io
+import asyncio
 import csv
 import glob
-from datetime import datetime, timezone,timedelta
-import asyncio
-import asyncpg
-import aiofiles
+import inspect
+import io
 import json
+import os
+import statistics
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from typing import Any, Dict, List, Optional, Tuple
+
+import aiofiles
+import asyncpg
+import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
+
+import config.config as base_config_module
 from bot_logger import logger
 from config.config import _TOTAL_SUPPLY
-import config.config as base_config_module
 from state_manager import GlobalState
-import pandas as pd
-import numpy as np
-from typing import Dict, Optional, List, Tuple, Any
 from utils import calculate_volatility
-import inspect 
-from typing import Optional
-import statistics 
-from decimal import Decimal
 
 # Load environment variables from .env file
 load_dotenv()
@@ -62,9 +62,9 @@ def _sanitize_string(value: Any) -> Optional[str]:
     return None if value is None else str(value) # Convert other types to string, handle None
 class DatabaseClient:
     """Client to manage database connections and operations."""
- 
+
     _DEFAULT_CONFIG = _config_module_to_dict(base_config_module)
-    
+
     def __init__(self, config_dict: Optional[dict] = None):
         self.config = config_dict
         self.pool = None
@@ -89,8 +89,9 @@ class DatabaseClient:
         Creates and returns a synchronous connection pool for psycopg2.
         This version correctly parses the host and port.
         """
-        from psycopg2.pool import SimpleConnectionPool
         import os
+
+        from psycopg2.pool import SimpleConnectionPool
 
         if hasattr(self, '_sync_pool') and self._sync_pool:
             return self._sync_pool
@@ -122,7 +123,7 @@ class DatabaseClient:
 
         dsn = " ".join(dsn_parts)
         # --- END FIX ---
-        
+
         self._sync_pool = SimpleConnectionPool(minconn=1, maxconn=5, dsn=dsn)
         return self._sync_pool
 
@@ -144,7 +145,7 @@ class DatabaseClient:
         """
         sql_folder = os.path.join(os.path.dirname(__file__), "sql")
         sql_files = sorted(glob.glob(os.path.join(sql_folder, "*.sql")))
-        
+
         async with self.pool.acquire() as conn:
             # Execute schema SQL files
             for file_path in sql_files:
@@ -192,7 +193,7 @@ class DatabaseClient:
                         "SELECT token_count, last_token_time FROM creator_wallets WHERE wallet_address = $1",
                         creator
                     )
-                    
+
                     token_count = 1
                     if row:
                         token_count, last_token_time = row
@@ -217,24 +218,24 @@ class DatabaseClient:
                     if sol_price is None or sol_price <= 0:
                         logger.warning(f"⚠ Invalid SOL_PRICE ({sol_price}); skipping insert token operation.")
                         return False # Cannot proceed without valid SOL price
-                    
+
                     # 3. Insert/update token
                     await conn.execute("""
                         INSERT INTO tokens(mint, traderPublicKey, initialBuy, solAmount, bondingCurveKey, 
                             vTokensInBondingCurve, vSolInBondingCurve, marketCapSol, name, symbol, uri, sol_price_usd,
                             is_active, timestamp)
                         VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, True, NOW());
-                        """, 
-                        data.get('mint'), 
-                        data.get('traderPublicKey'), 
-                        data.get('initialBuy'), 
-                        data.get('solAmount'), 
-                        data.get('bondingCurveKey'), 
+                        """,
+                        data.get('mint'),
+                        data.get('traderPublicKey'),
+                        data.get('initialBuy'),
+                        data.get('solAmount'),
+                        data.get('bondingCurveKey'),
                         data.get('vTokensInBondingCurve'),
-                        data.get('vSolInBondingCurve'), 
-                        data.get('marketCapSol'), 
+                        data.get('vSolInBondingCurve'),
+                        data.get('marketCapSol'),
                         _sanitize_string(data.get('name')),
-                        _sanitize_string(data.get('symbol')), 
+                        _sanitize_string(data.get('symbol')),
                         _sanitize_string(data.get('uri')),
                         sol_price
                     )
@@ -338,7 +339,7 @@ class DatabaseClient:
         """
         async with self.pool.acquire() as conn:
             return await conn.fetch(query, mc_drop_threshold, inactivity_period, min_token_age)
-        
+
     async def get_social_check_count(self, mint: str, conn=None) -> int:
         """Counts how many times a social check has been performed for a token."""
         query = "SELECT COUNT(*) FROM social_scores WHERE mint = $1"
@@ -384,7 +385,7 @@ class DatabaseClient:
             """
         async with self.pool.acquire() as conn:
             return await conn.fetch(query, creator)
-        
+
     async def get_total_supply(self, mint: str): #
         """Fetch the total supply of a token (RAW units) from rugcheck table.
            NOTE: For price calculations, use _get_latest_token_info which also gets decimals.
@@ -396,7 +397,7 @@ class DatabaseClient:
             default_supply = self.config.get('_TOTAL_SUPPLY', 1_000_000_000) #
             return result['token_supply'] if result and result['token_supply'] is not None else default_supply #
 
-    async def find_trading_opportunities(self, sol_price: float, volume_threshold: float, marketcap_threshold: float, rugcheck_threshold: int, social_score_threshold: int, time_interval_minutes: int, min_volatility: float): 
+    async def find_trading_opportunities(self, sol_price: float, volume_threshold: float, marketcap_threshold: float, rugcheck_threshold: int, social_score_threshold: int, time_interval_minutes: int, min_volatility: float):
         """
         [MODIFIED] Identifies potential token buy opportunities, ensuring only the latest rugcheck score is used.
         - Volume Calculation is source-aware:
@@ -404,7 +405,7 @@ class DatabaseClient:
             - DEXSCREENER: Takes only the SINGLE LATEST volume snapshot to prevent duplicate counting.
         - Volatility is calculated ONLY from high-frequency PUMP trades for accuracy.
         """
-        
+
         query = """
             WITH LatestTickData AS (
                 -- This correctly gets the latest price/MC from either source
@@ -562,10 +563,10 @@ class DatabaseClient:
 
                 if market_cap_val is not None and market_cap_val > 0: # Require positive MC
                     current_data['market_cap'] = market_cap_val
-                
+
                 if price_val is not None and price_val > 0:
                     current_data['price'] = price_val
-                
+
                 # Only add to results if we have at least a valid market_cap or a valid price
                 if current_data['market_cap'] is not None or current_data['price'] is not None:
                     results[mint] = current_data
@@ -1049,7 +1050,7 @@ class DatabaseClient:
             except Exception as e:
                 logger.error(f":police_car_light: Error fetching unique mints with names: {e}", exc_info=True)
                 return []
-            
+
     async def get_all_migrated_tokens(self) -> List[str]:
         """Fetches all active tokens that have been marked as migrated to DEXScreener."""
         query = "SELECT mint FROM tokens WHERE data_source = 'DEXSCREENER' AND is_active = TRUE ORDER BY timestamp DESC"
@@ -1180,7 +1181,7 @@ class DatabaseClient:
             except Exception as e:
                 logger.error(f":police_car_light: Error fetching portfolio transactions for mints {mints}: {e}", exc_info=True)
                 return {} # Return empty dict on error
-            
+
     # In class DatabaseClient:
 
     async def get_creator_history_summary(self, creator_wallet: str, current_mint: str) -> Tuple[str, dict]:
@@ -1207,7 +1208,7 @@ class DatabaseClient:
         )
         SELECT * FROM PastTokens WHERE max_mcap IS NOT NULL OR backup_reason IS NOT NULL;
         """
-        
+
         summary_dict = {
             "creator_total_launches": 0,
             "creator_rug_count": 0,
@@ -1235,11 +1236,11 @@ class DatabaseClient:
             for row in rows:
                 if row['backup_reason'] in rug_reasons:
                     rugged_count += 1
-                
+
                 # Define "good run" (e.g., > 10x MCap from creation)
                 if row['max_mcap'] and row['creation_mcap'] and row['max_mcap'] > (row['creation_mcap'] * 10):
                     good_runs_count += 1
-                
+
                 if row['lifespan']:
                     total_lifespan_minutes += row['lifespan'].total_seconds() / 60
                     lifespan_count += 1
@@ -1259,7 +1260,7 @@ class DatabaseClient:
                 f"{good_runs_count} achieved >10x MCap. "
                 f"Average lifespan: {avg_lifespan_str}."
             )
-            
+
             summary_dict = {
                 "creator_total_launches": total_tokens,
                 "creator_rug_count": rugged_count,
@@ -1267,7 +1268,7 @@ class DatabaseClient:
                 "creator_good_runs_count": good_runs_count,
                 "creator_avg_lifespan_minutes": avg_lifespan_minutes_val
             }
-            
+
             return summary_string, summary_dict
 
         except Exception as e:
@@ -1297,7 +1298,7 @@ class DatabaseClient:
             return # Exit on error to be safe
         # --- END: ADD THIS SAFETY CHECK BLOCK ---
         final_reason = reason # Initialize final_reason with the provided reason
- 
+
         try:
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
@@ -1319,11 +1320,11 @@ class DatabaseClient:
                                     FROM tokens
                                     WHERE mint = $2
                                 ''', final_reason, mint)
-                        
+
                         await conn.execute('''
                             INSERT INTO trades_backup SELECT *, NOW() FROM trades WHERE mint = $1
                         ''', mint)
- 
+
                         await conn.execute('''
                             INSERT INTO rugcheck_backup SELECT *, NOW() FROM rugcheck WHERE mint = $1
                         ''', mint)
@@ -1332,7 +1333,7 @@ class DatabaseClient:
                             INSERT INTO social_scores_backup (id, mint, timestamp, score_type, score_value, details, backup_timestamp)
                             SELECT id, mint, timestamp, score_type, score_value, details, NOW() FROM social_scores WHERE mint = $1
                         ''', mint)
- 
+
                         # Backup migrations, ignoring conflicts on the primary key
                         await conn.execute('''
                             INSERT INTO migrations_backup SELECT *, NOW() FROM migrations WHERE mint = $1
@@ -1342,16 +1343,16 @@ class DatabaseClient:
                         await conn.execute('''
                             INSERT INTO dexscreener_data_backup SELECT *, NOW() FROM dexscreener_data WHERE mint_address = $1
                         ''', mint)
- 
+
                         await conn.execute("DELETE FROM tokens WHERE mint = $1", mint)
                         await conn.execute("DELETE FROM trades WHERE mint = $1", mint)
                         await conn.execute("DELETE FROM rugcheck WHERE mint = $1", mint)
                         await conn.execute("DELETE FROM social_scores WHERE mint = $1", mint)
                         await conn.execute("DELETE FROM migrations WHERE mint = $1", mint)
                         await conn.execute("DELETE FROM dexscreener_data WHERE mint_address = $1", mint)
- 
+
                         logger.debug(f"🧹 Backup & deletion completed for {mint}")
- 
+
                     except Exception as e:
                         logger.error(f"❌ Backup failed for {mint}: {e}", exc_info=True)
                         raise
@@ -1368,7 +1369,7 @@ class DatabaseClient:
         try:
             async with self.pool.acquire() as conn:
                 rows = await conn.fetch("SELECT wallet_address, token_count, last_token_time FROM creator_wallets")
-                
+
                 # Convert rows to a list of dictionaries
                 data = [
                     {
@@ -1378,11 +1379,11 @@ class DatabaseClient:
                     }
                     for row in rows
                 ]
-                
+
                 # Write the data to a JSON file
                 async with aiofiles.open(backup_file_path, "w") as f:
                     await f.write(json.dumps(data, indent=4))
-                
+
                 logger.info(f"✅ Successfully backed up {len(rows)} creator wallets to {backup_file_path}")
         except Exception as e:
             logger.exception(f":police_car_light: Error backing up creator_wallets table: {e}")
@@ -1391,8 +1392,8 @@ class DatabaseClient:
 
     async def restore_creator_wallets(self):
         backup_path = os.path.abspath(os.path.join(
-            os.path.dirname(__file__), 
-            self.config.get("_BACKUP_STORAGE_PATH", "backups"), 
+            os.path.dirname(__file__),
+            self.config.get("_BACKUP_STORAGE_PATH", "backups"),
             "creator_wallets_backup.json"
         ))
 
@@ -1451,7 +1452,7 @@ class DatabaseClient:
             ORDER BY timestamp ASC;
         """
         return await conn.fetch(query, mint, str(window_minutes))
-    
+
     async def _get_latest_token_info(self, mint: str, conn) -> Dict[str, Optional[float]]:
         """
         Fetches the latest token_supply and token_decimals for a mint.
@@ -1495,7 +1496,7 @@ class DatabaseClient:
         supporting both time-based and count-based windows.
         """
         window_type = config_params.get("PRICE_WINDOW_TYPE", "time")
-        
+
         # Common base of the query selecting necessary columns and initial filters
         query_select_cols = "SELECT timestamp, sol_amount, token_amount, price_sol"
         query_from_where = """
@@ -1532,7 +1533,7 @@ class DatabaseClient:
         else:
             logger.warning(f"Unknown PRICE_WINDOW_TYPE: {window_type}. Defaulting to time window of 1 min.")
             final_query = query_select_cols + query_from_where + " AND timestamp >= NOW() - INTERVAL '1 minute' ORDER BY timestamp ASC;"
-        
+
         return await conn.fetch(final_query, *params)
 
     async def _get_raw_marketcaps_for_calc(self, mint: str, config_params: dict, conn) -> List[Dict[str, Any]]:
@@ -1541,7 +1542,7 @@ class DatabaseClient:
         supporting both time-based and count-based windows.
         """
         window_type = config_params.get("PRICE_WINDOW_TYPE", "time")
-        
+
         query_select_cols = "SELECT timestamp, market_cap_sol"
         query_from_where = """
             FROM v_unified_market_ticks_live -- <<< CHANGE TO LIVE VIEW
@@ -1571,7 +1572,7 @@ class DatabaseClient:
         else:
             logger.warning(f"Unknown PRICE_WINDOW_TYPE: {window_type}. Defaulting to time window of 1 min for MC calc.")
             final_query = query_select_cols + query_from_where + " AND timestamp >= NOW() - INTERVAL '1 minute' ORDER BY timestamp ASC;"
-                
+
         return await conn.fetch(final_query, *params)
 
     def _apply_iqr_to_trades(self, trade_records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1617,7 +1618,7 @@ class DatabaseClient:
             # For now, returning empty list, forcing price calculation to fail or use other fallbacks.
             return []
         return inlier_trades
-    
+
     def _apply_iqr_to_values(self, values: List[float]) -> List[float]: #
         if not values or len(values) < 4: #
             return values #
@@ -1626,14 +1627,14 @@ class DatabaseClient:
             q1 = np.percentile(values, 25) #
             q3 = np.percentile(values, 75) #
             iqr_val = q3 - q1 #
-            
+
             if iqr_val == 0: #
                 return values #
 
             lower_bound = q1 - 1.5 * iqr_val #
             upper_bound = q3 + 1.5 * iqr_val #
             inliers = [v for v in values if lower_bound <= v <= upper_bound] #
-            
+
             if not inliers: #
                 logger.warning("IQR filtering removed all values. Returning original values as fallback.") #
                 return values #
@@ -1689,11 +1690,11 @@ class DatabaseClient:
         df = pd.DataFrame(df_data) #
         if df.empty: return None #
         df = df.set_index('timestamp') #
-        
+
         interval_prices = df['price'].resample(f'{interval_seconds}S').median(numeric_only=True) #
         valid_interval_prices = interval_prices.dropna() #
         if valid_interval_prices.empty: return None #
-        
+
         twap = valid_interval_prices.mean() #
         return float(twap) if pd.notnull(twap) else None #
 
@@ -1715,7 +1716,7 @@ class DatabaseClient:
         if not inlier_market_caps:
             logger.warning(f"All market caps for {mint} filtered by IQR. Falling back to unfiltered median for MC calc.") #
             return statistics.median(market_caps) if market_caps else None #
-        
+
         return statistics.median(inlier_market_caps) if inlier_market_caps else None
 
 
@@ -1790,9 +1791,9 @@ class DatabaseClient:
         # _calculate_vwap_price_with_iqr, and their own helpers (_get_raw_trades_for_price_calc)
         # would need to be modified to query the `trades` table directly instead of `v_unified_market_ticks_live`.
         # For simplicity, we will implement the MEDIAN calculation directly here.
-        
+
         window_type = config_params.get("PRICE_WINDOW_TYPE", "time")
-        
+
         # Build query to fetch raw trades only from the `trades` table
         params = [mint]
         if window_type == "time":
@@ -1828,7 +1829,7 @@ class DatabaseClient:
 
         final_price = statistics.median(inlier_prices) if inlier_prices else None
         final_market_cap = statistics.median(inlier_market_caps) if inlier_market_caps else None
-        
+
         return {'price': final_price, 'market_cap': final_market_cap}
 
     async def get_price_and_market_cap_for_decision(self, mint: str, config_from_caller: dict, conn) -> Dict[str, Optional[float]]:
@@ -1861,7 +1862,7 @@ class DatabaseClient:
                 if migration_ts:
                     grace_period_minutes = self.config.get('DEXSCREENER_MIGRATION_GRACE_PERIOD_MINUTES', 5)
                     time_since_migration = datetime.now(timezone.utc) - migration_ts
-                    
+
                     if time_since_migration < timedelta(minutes=grace_period_minutes):
                         logger.info(
                             f"DEXScreener price for {mint} is invalid, but token is within the {grace_period_minutes}-minute "
@@ -1874,7 +1875,7 @@ class DatabaseClient:
 
             # If not in grace period or if Dexscreener data was valid, return the original result.
             return price_data
-            
+
         else: # 'PUMP'
             # For non-migrated tokens, use the robust calculation to handle outliers
             return await self._get_robust_price_from_pump(mint, config_from_caller, conn)
@@ -1921,7 +1922,7 @@ class DatabaseClient:
         query = "SELECT COUNT(*) FROM tokens"
         if backedup:
             query = "SELECT COUNT(*) FROM v_tokens"
-        
+
         async with self.pool.acquire() as conn:
             try:
                 result = await conn.fetchval(query)
@@ -2059,7 +2060,7 @@ class DatabaseClient:
                 # Check if any heartbeats exist at all to distinguish a new bot from a long-dead one.
                 async with self.pool.acquire() as conn: # Re-acquire if needed, or use existing conn if scope allows
                     first_ever_heartbeat = await conn.fetchval("SELECT MIN(timestamp) FROM bot_heartbeat")
-                
+
                 if first_ever_heartbeat and first_ever_heartbeat < archived_at:
                     # Heartbeats exist in the table, but none before the current archival time.
                     # This implies the bot was down for the entire period leading up to 'archived_at'.
@@ -2086,7 +2087,7 @@ class DatabaseClient:
                 logger.info(f"Data gap detected: Last heartbeat was {time_since_last_heartbeat_seconds:.2f}s ago "
                             f"(threshold: {gap_detection_threshold_seconds}s). Token lifecycle likely interrupted.")
                 return True
-            
+
             logger.debug("No significant pre-archival data gap detected based on heartbeats.")
             return False
 
@@ -2147,7 +2148,7 @@ class DatabaseClient:
             return True
 
         return False
-    
+
     async def set_token_cooldown(self, mint: str, cooldown_minutes: int):
         """Sets a cooldown period on a token to prevent immediate re-buys."""
         if cooldown_minutes <= 0:
@@ -2202,7 +2203,7 @@ class DatabaseClient:
                     'migrations',         # Standalone or related? Assuming standalone for drop order
                     'tokens',             # Drop after dependents
                     'social_scores_backup',
-                    'portfolio_backup',          
+                    'portfolio_backup',
                     'rugcheck_backup',
                     'trades_backup',
                     'migrations_backup',
@@ -2329,19 +2330,19 @@ class DatabaseClient:
                 return None
 
     def ohlcv_sql_like(self, df_group: pd.DataFrame) -> pd.Series:
-        df = df_group 
+        df = df_group
         if df.empty:
             return pd.Series({
                 'Open': np.nan, 'High': np.nan, 'Low': np.nan, 'Close': np.nan,
                 'Volume': 0.0,
-                'market_cap_calculated': np.nan, 
-                'marketCapSol': np.nan,          
+                'market_cap_calculated': np.nan,
+                'marketCapSol': np.nan,
                 'volatility': 0.0
             })
 
         last_rolling_volume = df['rolling_volume_sql'].iloc[-1] if 'rolling_volume_sql' in df.columns and not df['rolling_volume_sql'].empty else 0.0
         last_rolling_volatility = df['rolling_volatility_sql'].iloc[-1] if 'rolling_volatility_sql' in df.columns and not df['rolling_volatility_sql'].empty else 0.0
-        
+
         last_market_cap_usd = df['market_cap_calculated'].iloc[-1] if 'market_cap_calculated' in df.columns and not df['market_cap_calculated'].isnull().all() else np.nan
         last_market_cap_sol_live = df['marketcapsol'].iloc[-1] if 'marketcapsol' in df.columns and not df['marketcapsol'].empty and pd.notna(df['marketcapsol'].iloc[-1]) else np.nan
 
@@ -2352,7 +2353,7 @@ class DatabaseClient:
             'Close': df['price'].iloc[-1] if 'price' in df.columns and not df['price'].empty else np.nan,
             'Volume': last_rolling_volume,
             'market_cap_calculated': last_market_cap_usd,
-            'marketCapSol': last_market_cap_sol_live, 
+            'marketCapSol': last_market_cap_sol_live,
             'volatility': last_rolling_volatility
         })
 
@@ -2441,12 +2442,12 @@ class DatabaseClient:
                 # --- Process Data (same logic as before) ---
                 trade_records_list_of_dicts = [dict(rec) for rec in trade_records_raw]
                 trades_df = pd.DataFrame(trade_records_list_of_dicts)
-                
+
                 trades_df.columns = [str(col).lower() for col in trades_df.columns]
-                
+
                 trades_df['timestamp'] = pd.to_datetime(trades_df['timestamp'], errors='coerce', utc=True)
                 trades_df.dropna(subset=['timestamp'], inplace=True)
-                
+
                 numeric_cols_from_trades = ['price', 'volume', 'market_cap_calculated', 'live_market_cap_sol']
                 for col in numeric_cols_from_trades:
                     if col in trades_df.columns:
@@ -2464,7 +2465,7 @@ class DatabaseClient:
                     mint_df = mint_df_group.sort_values('timestamp').copy()
                     mint_df_indexed = mint_df.set_index('timestamp')
                     mint_df['rolling_volume_sql'] = mint_df_indexed['volume'].rolling(window_duration, closed='left').sum().fillna(0.0).values
-                    
+
                     if 'live_market_cap_sol' in mint_df.columns:
                         mint_df.rename(columns={'live_market_cap_sol': 'marketcapsol'}, inplace=True)
 
@@ -2486,29 +2487,29 @@ class DatabaseClient:
 
                 ohlcv_df = processed_trades_df.groupby(['mint', pd.Grouper(key='timestamp', freq='5s')])\
                                             .apply(self.ohlcv_sql_like).reset_index()
-                
+
                 ohlcv_df.dropna(subset=['mint', 'timestamp'], inplace=True)
                 ohlc_cols = ['Open', 'High', 'Low', 'Close']
                 ohlcv_df[ohlc_cols] = ohlcv_df.groupby('mint')[ohlc_cols].ffill().bfill().fillna(0.0)
-                
+
                 cols_to_fill_ohlcv = ['Volume', 'volatility', 'market_cap_calculated', 'marketCapSol']
                 for col in cols_to_fill_ohlcv:
                     if col in ohlcv_df.columns: ohlcv_df[col] = ohlcv_df[col].fillna(0.0)
                     else: ohlcv_df[col] = 0.0
-                
+
                 ohlcv_df = ohlcv_df.set_index('timestamp')
                 if ohlcv_df.index.has_duplicates: ohlcv_df = ohlcv_df.loc[~ohlcv_df.index.duplicated(keep='last')]
-                
+
                 resampled_ohlcv_list = []
                 for mint_name, group_df in ohlcv_df.groupby('mint'):
-                    if group_df.index.has_duplicates: 
+                    if group_df.index.has_duplicates:
                         group_df = group_df.loc[~group_df.index.duplicated(keep='last')]
-                    
+
                     min_ts, max_ts = group_df.index.min(), group_df.index.max()
-                    if pd.isna(min_ts) or pd.isna(max_ts): 
+                    if pd.isna(min_ts) or pd.isna(max_ts):
                         logger.warning(f"Skipping mint {mint_name} due to NaT in min/max timestamp for reindexing.")
                         continue
-                        
+
                     full_range = pd.date_range(start=min_ts, end=max_ts, freq='5s', tz='UTC')
                     group_reindexed = group_df.reindex(full_range)
 
@@ -2516,7 +2517,7 @@ class DatabaseClient:
                         'Open', 'High', 'Low', 'Close', 'Volume',
                         'market_cap_calculated', 'marketCapSol', 'volatility'
                     ]
-                    
+
                     for col in cols_to_interpolate:
                         if col in group_reindexed.columns:
                             group_reindexed[col] = pd.to_numeric(group_reindexed[col], errors='coerce').interpolate(method='time')
@@ -2525,10 +2526,10 @@ class DatabaseClient:
                     group_resampled['mint'] = mint_name
                     resampled_ohlcv_list.append(group_resampled)
 
-                if not resampled_ohlcv_list: 
+                if not resampled_ohlcv_list:
                     logger.warning("No data after resampling for any mints.")
                     return {}
-                
+
                 resampled_ohlcv_df = pd.concat(resampled_ohlcv_list)
                 if resampled_ohlcv_df.index.name != 'timestamp': resampled_ohlcv_df.index.name = 'timestamp'
 
@@ -2565,14 +2566,14 @@ class DatabaseClient:
                         cooldown_until_ts = pd.to_datetime(cooldown_until_val, errors='coerce', utc=True)
 
                         if mint_val and pd.notna(creation_time):
-                            token_info_map[mint_val] = {'creation_time': creation_time, 
-                                                        'socials_score': socials, 
+                            token_info_map[mint_val] = {'creation_time': creation_time,
+                                                        'socials_score': socials,
                                                         'creation_init_market_cap_sol': creation_mc_sol,
                                                         'cooldown_until': cooldown_until_ts
                                                         }
-                
+
                 required_final_cols = ['Open', 'High', 'Low', 'Close', 'Volume', 'market_cap_calculated', 'marketCapSol', 'creation_init_market_cap_sol', 'volatility', 'rugcheck_score', 'socials_score', 'token_creation_time', 'cooldown_until']
-                
+
                 grouped_ohlcv = resampled_ohlcv_df.groupby('mint')
                 for mint_name in grouped_ohlcv.groups:
                     mint_ohlcv_group = grouped_ohlcv.get_group(mint_name)
@@ -2596,20 +2597,20 @@ class DatabaseClient:
                         combined_df['token_creation_time'], combined_df['socials_score'], combined_df['creation_init_market_cap_sol'], combined_df['cooldown_until'] = mint_specific_info['creation_time'], mint_specific_info['socials_score'], mint_specific_info.get('creation_init_market_cap_sol', np.nan), mint_specific_info.get('cooldown_until', pd.NaT)
                     else:
                         combined_df['token_creation_time'], combined_df['socials_score'], combined_df['creation_init_market_cap_sol'], combined_df['cooldown_until'] = pd.NaT, 100, np.nan, pd.NaT
-                    
+
                     for r_col in required_final_cols:
-                        if r_col not in combined_df.columns: combined_df[r_col] = np.nan 
+                        if r_col not in combined_df.columns: combined_df[r_col] = np.nan
 
                     for col in ['rugcheck_score', 'socials_score', 'token_creation_time', 'creation_init_market_cap_sol', 'cooldown_until']: combined_df[col] = combined_df[col].ffill().bfill()
-                    
+
                     combined_df['rugcheck_score'] = combined_df['rugcheck_score'].fillna(10000).astype(int)
                     combined_df['socials_score'] = combined_df['socials_score'].fillna(100).astype(int)
                     combined_df['creation_init_market_cap_sol'] = pd.to_numeric(combined_df['creation_init_market_cap_sol'], errors='coerce').fillna(0.0)
-                    combined_df['cooldown_until'] = pd.to_datetime(combined_df['cooldown_until'], errors='coerce', utc=True) 
+                    combined_df['cooldown_until'] = pd.to_datetime(combined_df['cooldown_until'], errors='coerce', utc=True)
 
                     for col in ['Open', 'High', 'Low', 'Close', 'Volume', 'market_cap_calculated', 'marketCapSol', 'volatility']:
                         combined_df[col] = pd.to_numeric(combined_df[col], errors='coerce').fillna(0.0)
-                    
+
                     final_df = combined_df.copy()
                     # If dates were provided, filter the final combined data at the end
                     if start_date_utc:
@@ -2619,25 +2620,25 @@ class DatabaseClient:
 
                     if not final_df.empty and all(col in final_df.columns for col in required_final_cols):
                         astype_dict = {
-                            'Open': float, 'High': float, 'Low': float, 'Close': float, 
-                            'Volume': float, 'market_cap_calculated': float, 
-                            'marketCapSol': float, 'creation_init_market_cap_sol': float, 
+                            'Open': float, 'High': float, 'Low': float, 'Close': float,
+                            'Volume': float, 'market_cap_calculated': float,
+                            'marketCapSol': float, 'creation_init_market_cap_sol': float,
                             'volatility': float, 'rugcheck_score': int, 'socials_score': int
                         }
                         cols_for_astype = [col for col in required_final_cols if col in astype_dict]
                         final_df[cols_for_astype] = final_df[cols_for_astype].astype(astype_dict)
-                        
+
                         final_df.index = pd.to_datetime(final_df.index, utc=True)
                         results_dict[mint_name] = final_df[required_final_cols]
                     else:
                         logger.warning(f"No valid data or missing columns for {mint_name} after final processing. Skipping.")
-            
+
             except Exception as e:
                 logger.error(f":police_car_light: Error processing historical data ({type(e).__name__}): {e}", exc_info=True)
                 return {}
 
         return results_dict
-    
+
     async def get_raw_data_for_rl(
         self,
         start_date: datetime,
@@ -2662,13 +2663,13 @@ class DatabaseClient:
             ) AS trade_counts
             WHERE trade_count >= $3;
         """
-        
+
         try:
             eligible_mint_records = await self.pool.fetch(mints_query, start_date, end_date, min_trade_count)
             if not eligible_mint_records:
                 logger.warning(f"No tokens found in the date range with at least {min_trade_count} trades.")
                 return None
-            
+
             mints = [r['mint'] for r in eligible_mint_records]
             logger.info(f"Found {len(mints)} eligible tokens. Fetching their full raw data...")
 
@@ -2683,7 +2684,7 @@ class DatabaseClient:
                 WHERE t.mint = ANY($1::text[]);
             """
             # --- END OF FIX ---
-            
+
             rugcheck_query = "SELECT mint, last_checked AS timestamp, score AS rugcheck_score FROM v_rugcheck WHERE mint = ANY($1::text[]) ORDER BY timestamp;"
             token_info_query = "SELECT mint, socials_score, socials_last_checked, timestamp AS token_creation_time FROM v_tokens WHERE mint = ANY($1::text[]);"
             dexscreener_query = "SELECT mint_address as mint, timestamp, liquidity_usd, buys_m5, sells_m5, volume_m5, price_change_m5 FROM v_dexscreener_data WHERE mint_address = ANY($1::text[]) ORDER BY timestamp;"
@@ -2747,10 +2748,10 @@ class DatabaseClient:
                 market_cap_at_trade, tx_fee_sol, tip_sol, slippage_percent, trade_context
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);
         """
-        
+
         # Convert trade_context dict to a JSON string if it exists
         trade_context_json = json.dumps(trade_context) if trade_context else None
-        
+
         connection = conn or await self.pool.acquire()
         try:
             await connection.execute(

@@ -1,7 +1,7 @@
 # utils/script_utils.py
 
-import os
 import json
+import os
 
 
 def generate_tensorboard_launch_scripts(
@@ -68,4 +68,3 @@ def generate_config_json(
     with open(rl_config_path, "w", encoding="utf-8") as f:
         f.write(json.dumps(rl_config, indent=4))
         f.write("\n")
-    

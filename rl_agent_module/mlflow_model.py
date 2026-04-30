@@ -15,13 +15,12 @@ import os
 import tempfile
 from typing import Any, Dict, Optional
 
+import mlflow
 import numpy as np
 import pandas as pd
-import mlflow
 from mlflow import pyfunc
 from mlflow.models.signature import ModelSignature, infer_signature
-from mlflow.types import Schema, ColSpec
-
+from mlflow.types import ColSpec, Schema
 from stable_baselines3 import PPO
 
 

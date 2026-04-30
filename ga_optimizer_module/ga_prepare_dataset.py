@@ -17,6 +17,7 @@ import asyncio
 import os
 import sys
 from datetime import datetime, timezone
+
 import pandas as pd
 from tqdm import tqdm
 
@@ -26,8 +27,8 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from bot_logger import logger, setup_logging
+from config.ga_config import HISTORICAL_DATA_END_TS, HISTORICAL_DATA_START_TS
 from database_handler import DatabaseClient
-from config.ga_config import HISTORICAL_DATA_START_TS, HISTORICAL_DATA_END_TS
 from utils import load_and_split_data
 
 # --- DEFINE THE CACHE PATH ---
@@ -37,7 +38,7 @@ GA_CACHE_PATH = os.path.join(project_root, "data", "ga_cache")
 async def run_ga_etl(start_date: datetime, end_date: datetime, force_rebuild: bool = False):
     """Main ETL orchestration function for the GA dataset."""
     logger.info("--- Starting GA Dataset ETL ---")
-    
+
     date_str = f"{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}"
     output_dir = os.path.join(GA_CACHE_PATH, date_str)
 
@@ -61,7 +62,7 @@ async def run_ga_etl(start_date: datetime, end_date: datetime, force_rebuild: bo
         await db_client.connect()
 
         logger.info("Fetching and splitting data from database... This may take a long time.")
-        
+
         # --- THIS IS THE FIX ---
         # Changed the keyword argument `data_split_ratios=None` to a positional argument `None`.
         loaded_results = await load_and_split_data(db_client, start_date, end_date, None)
@@ -72,7 +73,7 @@ async def run_ga_etl(start_date: datetime, end_date: datetime, force_rebuild: bo
             return
 
         all_data, token_lifespans, dexscreener_snapshots = loaded_results
-        
+
         all_data_dir = os.path.join(output_dir, "ohlcv_data")
         os.makedirs(all_data_dir, exist_ok=True)
         logger.info(f"Saving {len(all_data)} tokens to Parquet cache...")
@@ -106,7 +107,7 @@ async def run_ga_etl(start_date: datetime, end_date: datetime, force_rebuild: bo
 if __name__ == "__main__":
     setup_logging(logger_name="ga_etl")
     parser = argparse.ArgumentParser(description="Run the ETL pipeline for GA dataset generation.")
-    
+
     # Use defaults from ga_config.py
     default_start_str = HISTORICAL_DATA_START_TS.isoformat()
     default_end_str = HISTORICAL_DATA_END_TS.isoformat()

@@ -1,17 +1,17 @@
 # utils/mlflow_utils.py or similar
 
-import os
-import subprocess
-import socket
-import time
 import logging
-from typing import List, Tuple, Optional, Any
+import os
+import socket
+import subprocess
+import time
 from datetime import datetime
+from typing import Any, List, Optional, Tuple
+
 import mlflow
 from mlflow.entities import RunStatus
-from mlflow.tracking import MlflowClient
 from mlflow.exceptions import MlflowException
-
+from mlflow.tracking import MlflowClient
 
 logger = logging.getLogger(__name__)
 
@@ -204,14 +204,14 @@ def fetch_mlflow_parent_runs(
         if not experiment:
             logger.warning(f"⚠️ Experiment '{experiment_name}' not found.")
             return []
-        
+
         all_runs = client.search_runs(
             experiment_ids=[experiment.experiment_id],
             filter_string="attributes.status = 'FINISHED'",
             order_by=["start_time DESC"],
             max_results=num_runs * 10
         )
-        
+
         parent_runs = [
             run for run in all_runs
             if 'mlflow.parentRunId' not in run.data.tags

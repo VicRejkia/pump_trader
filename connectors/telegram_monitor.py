@@ -1,7 +1,9 @@
-import re
-from bs4 import BeautifulSoup
-import httpx
 import asyncio
+import re
+
+import httpx
+from bs4 import BeautifulSoup
+
 
 async def check_telegram_channel(tg_url: str) -> dict:
     """
@@ -81,7 +83,7 @@ async def check_telegram_channel(tg_url: str) -> dict:
                 resp_pub = await client.get(public_url, headers=headers)
                 if resp_pub.status_code == 200:
                     soup_pub = BeautifulSoup(resp_pub.text, "html.parser")
-                    
+
                     # FIX: A public preview only exists if message containers are found.
                     messages = soup_pub.find_all("div", {"class": "tgme_widget_message_wrap"})
                     if messages:
@@ -106,4 +108,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    

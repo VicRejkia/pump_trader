@@ -5,14 +5,13 @@ Manages the lifecycle of the production RL model for live inference.
 
 import asyncio
 import os
+import sys
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
 
 import numpy as np
 from stable_baselines3 import PPO
 
-import os
-import sys
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
@@ -105,7 +104,7 @@ class RLModelServer:
         if not os.path.exists(new_model_path):
             logger.error(f"Hot-swap failed: New model file not found at '{new_model_path}'.")
             return False
-            
+
         async with self.lock:
             if new_model_path == self.model_path:
                 logger.warning("Hot-swap skipped: New model path is the same as the current one.")

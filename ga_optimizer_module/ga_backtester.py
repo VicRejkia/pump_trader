@@ -7,14 +7,16 @@ Simulates trading strategies on historical data, respecting token lifespans,
 cooldown periods, and implementing source-aware (Pump.fun vs. DexScreener)
 trend-reversal re-buy logic to evaluate performance.
 """
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
+
 import numpy as np
 import pandas as pd
-from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional, Any
 
+import config.config as config_module  # To access fixed configurations
+import utils  # For calculate_trend_indicators
 from bot_logger import logger
-import utils # For calculate_trend_indicators
-import config.config as config_module # To access fixed configurations
+
 
 # --- Performance Metrics Calculation (Unchanged) ---
 def calculate_performance_metrics(
@@ -65,7 +67,7 @@ def calculate_performance_metrics(
              metrics["profit_factor"] = metrics["total_profit_sells"] / metrics["total_loss_sells"]
         elif metrics["total_profit_sells"] > 0:
              metrics["profit_factor"] = float('inf')
-             
+
     equity_curve = pd.Series(index=[], dtype=float)
     if trade_history:
         first_ts = trade_history[0]['timestamp']
@@ -140,7 +142,7 @@ def run_backtest_sync(
         'ADAPTIVE_ATR_PERIOD': parameters.get('ADAPTIVE_ATR_PERIOD', config_module.ADAPTIVE_ATR_PERIOD)
     }
     df_with_indicators = utils.calculate_trend_indicators(df, indicator_config)
-    
+
     if not df_with_indicators.empty:
         df = df_with_indicators
 
@@ -165,7 +167,7 @@ def run_backtest_sync(
     df[['Volume']] = df[['Volume']].fillna(0.0)
     df[['rugcheck_score', 'socials_score']] = df[['rugcheck_score', 'socials_score']].fillna(1000.0)
     df['cooldown_until'] = df['cooldown_until'].fillna(pd.NaT)
-    
+
     df = df[df["Close"] > 1e-12]
 
     if df.empty:
@@ -232,7 +234,7 @@ def run_backtest_sync(
                 pos = active_position
                 # Update the highest price seen since the buy
                 pos['highest_price'] = max(pos['highest_price'], high_price)
-                
+
                 # Initialize sell trigger variables for the current timestep
                 sell_reason, sell_all, sell_partial, sell_percentage = None, False, False, 0.0
 
@@ -246,7 +248,7 @@ def run_backtest_sync(
                     # Check for the first take-profit
                     elif price >= pos['initial_tp_price']:
                         sell_reason, sell_partial, sell_percentage = "First TP", True, first_sell_percent / 100.0
-                
+
                 # --- Stage 2: Logic after the first take-profit has been hit ---
                 else:
                     # --- DYNAMIC SELL LOGIC BRANCH ---
@@ -262,15 +264,15 @@ def run_backtest_sync(
                                 multiplier = adaptive_atr_extreme_mult
                             elif row[rsi_col] >= adaptive_rsi_strong:
                                 multiplier = adaptive_atr_strong_mult
-                            
+
                             # Calculate the dynamic exit price
                             chandelier_exit_price = pos['highest_price'] - (multiplier * row[atr_col])
-                            
+
                             if price < chandelier_exit_price:
                                 sell_reason = "Dynamic Exit (Chandelier)"
                                 sell_all = True
                                 sell_percentage = 1.0
-                    
+
                     # --- Original Trailing SL logic (fallback if dynamic TP is off or indicators fail) ---
                     if not sell_reason:
                         trailing_sl_price = pos['highest_price'] * (1.0 - trailing_stop_loss_percent / 100.0)
@@ -282,7 +284,7 @@ def run_backtest_sync(
                     # The breakeven stop loss is always active after the first TP is hit
                     if not sell_reason and price <= pos['stop_loss_price']:
                         sell_reason, sell_all, sell_percentage = "🛡️ Breakeven SL", True, 1.0
-                
+
                 # --- Emergency Sell Conditions (checked at every step) ---
                 if not sell_reason:
                     initial_mcap_sol = pos.get('initial_market_cap_sol', 0.0)
@@ -306,23 +308,23 @@ def run_backtest_sync(
                         net_sol = (tokens_to_sell * price) - sell_fee - sell_tip
                         cost_basis = pos['total_investment_sol'] * (tokens_to_sell / pos['initial_tokens']) if pos['initial_tokens'] > 0 else 0
                         pnl = net_sol - cost_basis
-                        
+
                         # Update portfolio state
                         current_sol += net_sol
                         pos['remaining_tokens'] -= tokens_to_sell
-                        
+
                         # Log the trade
                         trade_history.append({'timestamp': timestamp, 'type': 'sell', 'price': price, 'amount_sol': net_sol, 'amount_tokens': tokens_to_sell, 'reason': sell_reason, 'pnl': pnl, 'mint': mint_addr})
-                        
+
                         # Update position state after a partial sell (First TP)
                         if sell_partial:
                             pos['first_tp_hit'] = True
                             pos['stop_loss_price'] = pos['buy_price'] # Move SL to breakeven
-                        
+
                         # Close the position if all tokens are sold
                         if pos['remaining_tokens'] < 1e-9:
                             active_position = None
-                        
+
                         # Apply cooldown period for stop-loss related sells
                         if stop_loss_cooldown_minutes_ga > 0 and any(trigger in sell_reason for trigger in apply_trend_reversal_on_sell_reasons_config):
                             cooldown_end_ts = timestamp + pd.Timedelta(minutes=stop_loss_cooldown_minutes_ga)
@@ -375,11 +377,11 @@ def run_backtest_sync(
                                     # --- FIX: Add missing ADAPTIVE_ATR_PERIOD key to this config dict ---
                                     # This prevents a potential KeyError in the utility function.
                                     indicator_config = {
-                                        'MIN_CANDLE_DATA_FOR_INDICATORS': min_candle_data_for_indicators_config, 
-                                        'RSI_PERIOD': rsi_period_ga, 
-                                        'BBANDS_PERIOD': bbands_period_ga, 
-                                        'BBANDS_STD_DEV': bbands_std_dev_ga, 
-                                        'FAST_EMA_PERIOD': fast_ema_period_ga, 
+                                        'MIN_CANDLE_DATA_FOR_INDICATORS': min_candle_data_for_indicators_config,
+                                        'RSI_PERIOD': rsi_period_ga,
+                                        'BBANDS_PERIOD': bbands_period_ga,
+                                        'BBANDS_STD_DEV': bbands_std_dev_ga,
+                                        'FAST_EMA_PERIOD': fast_ema_period_ga,
                                         'SLOW_EMA_PERIOD': slow_ema_period_ga,
                                         'ADAPTIVE_ATR_PERIOD': adaptive_atr_period # This key was missing
                                     }
@@ -415,15 +417,15 @@ def run_backtest_sync(
                         second_tp = price * (1.0 + second_take_profit_percent / 100.0)
                         current_sol -= total_investment
                         active_position = {
-                            'buy_price': price, 
-                            'initial_tokens': tokens_bought, 
-                            'remaining_tokens': tokens_bought, 
-                            'total_investment_sol': total_investment, 
-                            'stop_loss_price': initial_sl, 
-                            'initial_tp_price': initial_tp, 
-                            'second_tp_price': second_tp, 
-                            'highest_price': price, 
-                            'first_tp_hit': False, 
+                            'buy_price': price,
+                            'initial_tokens': tokens_bought,
+                            'remaining_tokens': tokens_bought,
+                            'total_investment_sol': total_investment,
+                            'stop_loss_price': initial_sl,
+                            'initial_tp_price': initial_tp,
+                            'second_tp_price': second_tp,
+                            'highest_price': price,
+                            'first_tp_hit': False,
                             'entry_timestamp': timestamp,
                             'initial_market_cap_sol': market_cap_sol # Store the market cap at the time of buy
                         }
@@ -451,7 +453,7 @@ def run_backtest_sync(
     metrics = calculate_performance_metrics(trade_history, initial_capital, final_value, start_ts=start_ts_data, end_ts=end_ts_data, simulation_end_reason=simulation_end_reason)
     metrics.update({
         "parameters": parameters,
-        "initial_capital": initial_capital, 
+        "initial_capital": initial_capital,
         "final_portfolio_value": final_value,
         "trade_history": trade_history
     })
