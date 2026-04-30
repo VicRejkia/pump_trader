@@ -1,0 +1,11 @@
+# macOS 12 Monterey compatibility constraints
+# Usage: pip install -r requirements.txt -c constraints-macos12.txt
+#
+# PyTorch dropped macOS 12 wheel builds after 2.2.2.
+# stable-baselines3 >=2.6.0 requires torch>=2.3, so it must be capped too.
+# gymnasium >=1.1.x is required by SB3 >=2.6, so it is capped accordingly.
+# Remove this file and use requirements.txt directly on macOS 13+ or Linux.
+
+torch==2.2.2
+stable-baselines3==2.5.0
+gymnasium==1.0.0

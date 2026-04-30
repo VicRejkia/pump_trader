@@ -23,16 +23,22 @@ must be reverted when moving to a proper environment.
 These are package version caps forced by macOS 12's pip only serving older
 wheels. On macOS 13+ or Linux, restore to the latest versions.
 
-### `requirements.txt`
+### `constraints-macos12.txt`
 
-| Package | macOS 12 (current) | Target (restore to) |
+A pip constraint file handles the version overrides. `requirements.txt` stays
+at the intended target versions. On macOS 12 install with:
+
+```bash
+pip install -r requirements.txt -c constraints-macos12.txt
+```
+
+| Package | macOS 12 pin | Reason |
 |---|---|---|
-| `torch` | `>=2.2.0` | `>=2.6.0` |
-| `stable-baselines3` | `>=2.3.0,<2.6.0` | `>=2.6.0` |
-| `gymnasium` | `>=0.29.1,<1.1.0` | `>=1.1.1` |
+| `torch` | `==2.2.2` | Last wheel built for macOS 12 |
+| `stable-baselines3` | `==2.5.0` | 2.6.0+ requires torch>=2.3 |
+| `gymnasium` | `==1.0.0` | SB3 2.5.0 requires gymnasium<1.1.0 |
 
-**Why:** PyTorch dropped macOS 12 wheel builds after 2.2.2. stable-baselines3
-2.6.0+ requires torch>=2.3, and gymnasium 1.1.x+ is required by SB3 2.6+.
+On macOS 13+ or Linux, use `pip install -r requirements.txt` directly.
 
 ### pgvector Installation
 
