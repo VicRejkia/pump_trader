@@ -830,7 +830,7 @@ class TradingBot:
                     evaluation_start_time = time.monotonic()
 
                     # 3. Fetch data
-                    comprehensive_data = await fetch_comprehensive_token_data(self.db_client, mint)
+                    comprehensive_data = await fetch_comprehensive_token_data(self.state, self.db_client, mint)
 
                     # --- NEW LOGIC ---
                     # 4. Check if the token was backed up (race condition)

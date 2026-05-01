@@ -290,7 +290,7 @@ def summarize_trade_history(history_records: list, max_events: int = 5) -> str:
         return "Error generating trade history summary."
 
 # --- Main Data Fetching Function ---
-async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
+async def fetch_comprehensive_token_data(state: GlobalState, db: DatabaseClient, mint: str) -> dict:
     """
     [MODIFIED V3 - CORRECTED]
     Fetches and processes all necessary data for a given token mint.
@@ -361,7 +361,7 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
         current_price_sol = price_data.get('price')
         current_mcap_sol = price_data.get('market_cap')
         current_mcap_usd = 0.0
-        sol_price = await GlobalState.get_instance().get_sol_price()
+        sol_price = await state.get_sol_price()
         if current_mcap_sol and sol_price and sol_price > 0:
             current_mcap_usd = float(current_mcap_sol) * sol_price
         elif current_price_sol is None or current_price_sol <= 0:
@@ -531,7 +531,7 @@ async def fetch_comprehensive_token_data(db: DatabaseClient, mint: str) -> dict:
             completeness_notes.append("Missing Market Dynamics")
 
         data_completeness_score = max(0, data_completeness_score) # Clamp at 0
-        market_regime = await GlobalState.get_instance().get_market_regime()
+        market_regime = await state.get_market_regime()
 
         # 8. Assemble Final Data Dictionary
         current_data = {
@@ -652,7 +652,7 @@ async def main(mint: str, include_explanation_in_output: bool = True):
         ai = AIDecisionMaker(config=loaded_config, db_client=db)
         ai._set_log_verbose(True)
 
-        current_data = await fetch_comprehensive_token_data(db, mint)
+        current_data = await fetch_comprehensive_token_data(state, db, mint)
 
         # logger.info(f"--- Comprehensive Data Prepared for AI Prompt ({mint}) ---")
         # logger.info("\n" + json.dumps(current_data, indent=2, default=str))
