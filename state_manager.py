@@ -18,14 +18,9 @@ SOL_PRICE_FILE = 'data/sol_price.json'
 SUBSCRIPTIONS_FILE = 'data/current_subscriptions.json'
 
 class GlobalState:
-    """Thread-safe Singleton class to store global state variables."""
-    _instance = None
-    _lock = asyncio.Lock()  # Ensures only one instance is created
+    """Global state container. Create one instance per process root and inject it explicitly."""
 
     def __init__(self):
-        if GlobalState._instance is not None:
-            raise Exception("This class is a singleton!")
-
         """Initialize state variables."""
         self.shutdown_event = asyncio.Event()  # 🚀 Interruptible sleep support
 
@@ -127,12 +122,6 @@ class GlobalState:
                     logger.debug(f"Removed {mint} from Socials queue.")
             except asyncio.QueueEmpty:
                 break
-
-    @classmethod
-    def get_instance(cls):
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
 
     async def wait_for_shutdown(self):
         await self.shutdown_event.wait()
