@@ -12,11 +12,10 @@ from state_manager import GlobalState
 from utils import calculate_market_cap
 
 
-async def trade_worker(trade_queue: asyncio.Queue):
+async def trade_worker(state: GlobalState, trade_queue: asyncio.Queue):
     """
     Processes trade messages from the provided queue and writes them in batches to the database.
     """
-    state = GlobalState.get_instance()
     db_client = state.db_client
 
     if not db_client:

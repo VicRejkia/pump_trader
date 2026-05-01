@@ -1569,7 +1569,7 @@ class TradingBot:
             asyncio.create_task(self.command_listener(), name="command_listener"),
             asyncio.create_task(self.monitor_tasks(), name="task_monitor"),
             asyncio.create_task(update_sol_price(self.state, self.db_client), name="sol_price_updater"),
-            asyncio.create_task(trade_worker(self.ws_handler.trade_queue), name="trade_worker"),
+            asyncio.create_task(trade_worker(self.state, self.ws_handler.trade_queue), name="trade_worker"),
             asyncio.create_task(self.dexscreener_fetcher.run(), name="dexscreener_fetcher"),
             *self.socials_proc.start(),
             asyncio.create_task(self.run_buy_checks(), name="buy_opportunity_checker"),
