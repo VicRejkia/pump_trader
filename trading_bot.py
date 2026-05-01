@@ -56,18 +56,19 @@ class TradingBot:
     - Graceful shutdown
     """
 
-    def __init__(self, cleanup: bool = False, backup: bool = False, params_file: str = None, no_log_rotate: bool = False):
+    def __init__(self, state: GlobalState, cleanup: bool = False, backup: bool = False, params_file: str = None, no_log_rotate: bool = False):
         """
         Initializes the TradingBot instance.
-        
+
         Args:
+            state (GlobalState): The shared global state instance.
             cleanup (bool): If True, cleans up the database on start.
             backup (bool): If True, backs up the database on start.
             params_file (str): Path to an optional JSON file for GA/RL parameters.
             no_logger.rotate (bool): If True, disables log rotation (used when run by main.py).
         """
         self.loop: Optional[asyncio.AbstractEventLoop] = None
-        self.state = GlobalState.get_instance()
+        self.state = state
         self.cleanup = cleanup
         self.backup = backup
         self.no_log_rotate = no_log_rotate
@@ -1654,7 +1655,9 @@ if __name__ == "__main__":
     async def run_bot_async_wrapper():
         """Async wrapper to create, run, and shut down the bot instance."""
         global bot_instance
+        state = GlobalState()
         bot_instance = TradingBot(
+            state=state,
             cleanup=args.cleanup,
             backup=args.backup,
             params_file=args.params_file,

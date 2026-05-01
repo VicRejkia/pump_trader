@@ -623,7 +623,7 @@ async def main(mint: str, include_explanation_in_output: bool = True):
     """
     setup_logging('ai_data_assembler_test')
     logger.info(f"--- Starting AI Data Assembler Test for Mint: {mint} ---")
-    state = GlobalState.get_instance()
+    state = GlobalState()
     loaded_config = {}
     try:
         loaded_config = _config_module_to_dict(config_module)
