@@ -633,7 +633,7 @@ async def main(mint: str, include_explanation_in_output: bool = True):
         logger.critical(f"CRITICAL: Failed to load config module: {e}", exc_info=True)
         return
 
-    db = DatabaseClient(config_dict=loaded_config)
+    db = DatabaseClient(state=state, config_dict=loaded_config)
 
     try:
         await db.connect()

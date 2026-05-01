@@ -29,6 +29,7 @@ if project_root not in sys.path:
 from bot_logger import logger, setup_logging
 from config.ga_config import HISTORICAL_DATA_END_TS, HISTORICAL_DATA_START_TS
 from database_handler import DatabaseClient
+from state_manager import GlobalState
 from utils import load_and_split_data
 
 # --- DEFINE THE CACHE PATH ---
@@ -58,7 +59,8 @@ async def run_ga_etl(start_date: datetime, end_date: datetime, force_rebuild: bo
 
     db_client = None
     try:
-        db_client = DatabaseClient()
+        state = GlobalState()
+        db_client = DatabaseClient(state=state)
         await db_client.connect()
 
         logger.info("Fetching and splitting data from database... This may take a long time.")

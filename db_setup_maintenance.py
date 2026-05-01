@@ -18,6 +18,7 @@ if PROJECT_ROOT_DIR not in sys.path:
 
 import config.config as base_config_module
 from database_handler import DatabaseClient
+from state_manager import GlobalState
 
 # --- Basic Logger Setup for this script ---
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
@@ -285,7 +286,8 @@ async def main_async():
     if not any([is_init, is_backup, is_cleanup]):
         script_logger.info("No specific action provided, defaulting to --init.")
         is_init = True
-    db_client = DatabaseClient()
+    state = GlobalState()
+    db_client = DatabaseClient(state=state)
     if is_cleanup: await handle_cleanup(db_client)
     elif is_backup: handle_backup()
     elif is_init: await handle_init(db_client)

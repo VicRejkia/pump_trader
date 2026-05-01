@@ -38,6 +38,7 @@ try:
         TREND_REVERSAL_RSI_NEUTRAL_LEVEL,
     )
     from database_handler import DatabaseClient
+    from state_manager import GlobalState
     from utils import calculate_trend_indicators
 except ImportError as e:
     print(f"Error: Could not import necessary modules. {e}")
@@ -46,7 +47,8 @@ except ImportError as e:
 
 # --- Logger and DB Client Initialization ---
 setup_logging()
-db_client = DatabaseClient()
+state = GlobalState()
+db_client = DatabaseClient(state=state)
 db_pool = db_client.get_sync_connection_pool()
 
 

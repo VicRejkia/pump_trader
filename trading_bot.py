@@ -1512,7 +1512,7 @@ class TradingBot:
 
         try:
             # --- 2. Initialize Database ---
-            self.db_client = DatabaseClient(config_dict=self.config)
+            self.db_client = DatabaseClient(state=self.state, config_dict=self.config)
             await self.db_client.connect()
             await self.state.set_db_client(self.db_client)
 

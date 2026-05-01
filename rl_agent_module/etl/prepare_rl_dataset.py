@@ -41,6 +41,7 @@ if project_root not in sys.path:
 from bot_logger import logger, setup_logging
 from config.rl_config import FEATURE_GROUPS, RL_CONFIG
 from database_handler import DatabaseClient
+from state_manager import GlobalState
 from rl_agent_module.feature_engineering.features import calculate_all_features
 
 
@@ -55,7 +56,8 @@ async def run_etl(start_date: datetime, end_date: datetime, version: str):
 
         db_client = None
         try:
-            db_client = DatabaseClient()
+            state = GlobalState()
+            db_client = DatabaseClient(state=state)
             await db_client.connect()
             min_trades = RL_CONFIG['common'].get('MIN_TRADE_COUNT_FOR_DATASET', 100)
 

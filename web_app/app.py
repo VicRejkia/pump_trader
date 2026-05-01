@@ -16,6 +16,7 @@ try:
     import config.config as bot_config_module
     from bot_logger import logger
     from database_handler import DatabaseClient
+    from state_manager import GlobalState
 except ImportError as e:
     print(f"CRITICAL ERROR: Could not import necessary modules: {e}")
     sys.exit(1)
@@ -99,7 +100,8 @@ def api_update_config():
 @app.route('/api/tokens', methods=['GET'])
 async def api_get_tokens():
     """Fetches all unique token mints and names for the dropdown."""
-    db = DatabaseClient()
+    state = GlobalState()
+    db = DatabaseClient(state=state)
     try:
         await db.connect()
         tokens = await db.get_all_unique_mints_with_names()
@@ -114,7 +116,8 @@ async def api_get_tokens():
 @app.route('/api/token_data/<string:mint_address>', methods=['GET'])
 async def api_get_token_data(mint_address):
     """Fetches OHLCV data for a selected token."""
-    db = DatabaseClient()
+    state = GlobalState()
+    db = DatabaseClient(state=state)
     try:
         await db.connect()
         end_date = datetime.now(timezone.utc)
