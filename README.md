@@ -15,7 +15,6 @@ Welcome to Pump Trader, the bot that's bravely navigating the treacherous waters
 
 ## 🧭 Table of Contents
 
-- [🎞️ Demo](https://www.google.com/search?q=%23%EF%B8%8F-demo)
 - [💭 Why This Bot Exists (The Origin Story of Our Digital Anti-Hero)](https://www.google.com/search?q=%23-why-this-bot-exists-the-origin-story-of-our-digital-anti-hero)
 - [🏁 Getting Started (For Those Who Read Manuals Last, If At All)](https://www.google.com/search?q=%23-getting-started-for-those-who-read-manuals-last-if-at-all)
 - [🌍 Overview (What This Contraption Supposedly Does)](https://www.google.com/search?q=%23-overview-what-this-contraption-supposedly-does)
@@ -39,19 +38,6 @@ Welcome to Pump Trader, the bot that's bravely navigating the treacherous waters
 - [🧪 Testing (The "Does it Explode?" Phase)](https://www.google.com/search?q=%23-testing-the-does-it-explode-phase)
 - [📜 License](https://www.google.com/search?q=%23-license)
 - [🙌 Acknowledgments (To Those Who Paved the Way With Rugpulls)](https://www.google.com/search?q=%23-acknowledgments-to-those-who-paved-the-way-with-rugpulls)
-
------
-
-## 🎞️ Demo
-
-> *“A GIF is worth a thousand lines of panicked log output.” — Some dev, probably.*
-
-Here’s Pump Trader heroically attempting to not lose all your SOL, set to a dramatic Lo-fi beat:
-
-*(Imagine a super cool, dark-mode GIF here showing the bot doing smart things, or at least, things that *look* smart.)*
-`![Pump Trader Demo - Dark Mode](httpss://via.placeholder.com/600x400.gif?text=Pump+Trader+Actually+Working)`
-
-> ⚠️ Seriously, replace this with an actual GIF. Your credibility (and our amusement) depends on it.
 
 -----
 
